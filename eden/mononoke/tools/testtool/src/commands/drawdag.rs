@@ -25,9 +25,14 @@
 //! * Mark a file as deleted.
 //!     # delete: COMMIT path/to/file
 //!
+//! * Forget file that was about to be added (useful for getting rid of files
+//!   that are added by default):
+//!     # forget: COMMIT path/to/file
+//!
 //! Paths can be surrounded by quotes if they contain special characters.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Display;
 use std::io::Write;
 
 use anyhow::{anyhow, Context, Error, Result};
@@ -37,7 +42,7 @@ use bookmarks::{BookmarkName, BookmarkUpdateReason};
 use changeset_info::ChangesetInfo;
 use clap::Parser;
 use context::CoreContext;
-use deleted_files_manifest::{RootDeletedManifestId, RootDeletedManifestV2Id};
+use deleted_manifest::RootDeletedManifestV2Id;
 use derived_data_filenodes::FilenodesOnlyPublic;
 use derived_data_manager::BatchDeriveOptions;
 use derived_data_manager::BonsaiDerivable;
@@ -45,7 +50,6 @@ use fastlog::RootFastlog;
 use fsnodes::RootFsnodeId;
 use futures::try_join;
 use mercurial_derived_data::MappedHgChangesetId;
-use metaconfig_types::DeletedManifestVersion;
 use mononoke_app::args::RepoArgs;
 use mononoke_app::MononokeApp;
 use mononoke_types::ChangesetId;
@@ -70,6 +74,10 @@ pub struct CommandArgs {
     /// Derive all derived data types for all commits
     #[clap(long)]
     derive_all: bool,
+
+    /// Print hashes in HG format instead of bonsai
+    #[clap(long)]
+    print_hg_hashes: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -95,6 +103,9 @@ enum ChangeAction {
         content: Vec<u8>,
     },
     Delete {
+        path: Vec<u8>,
+    },
+    Forget {
         path: Vec<u8>,
     },
     Extra {
@@ -140,6 +151,14 @@ impl Action {
                     Ok(Action::Change {
                         name,
                         change: ChangeAction::Delete { path },
+                    })
+                }
+                ("forget", [name, path]) => {
+                    let name = name.to_string()?;
+                    let path = path.to_bytes();
+                    Ok(Action::Change {
+                        name,
+                        change: ChangeAction::Forget { path },
                     })
                 }
                 ("extra", [name, key, value]) => {
@@ -269,6 +288,13 @@ impl ActionArg {
     }
 }
 
+fn print_name_hash_pairs(pairs: impl IntoIterator<Item = (String, impl Display)>) -> Result<()> {
+    for (name, id) in pairs.into_iter() {
+        writeln!(std::io::stdout(), "{}={}", name, id)?;
+    }
+    Ok(())
+}
+
 pub async fn run(app: MononokeApp, args: CommandArgs) -> Result<()> {
     let ctx = app.new_context();
 
@@ -336,10 +362,6 @@ pub async fn run(app: MononokeApp, args: CommandArgs) -> Result<()> {
     )
     .await?;
 
-    for (name, id) in commits.iter() {
-        writeln!(std::io::stdout(), "{}={}", name, id)?;
-    }
-
     if !bookmarks.is_empty() {
         let mut txn = repo.bookmarks().create_transaction(ctx.clone());
         for (bookmark, name) in bookmarks {
@@ -368,7 +390,8 @@ pub async fn run(app: MononokeApp, args: CommandArgs) -> Result<()> {
         txn.commit().await?;
     }
 
-    if args.derive_all {
+    let any_derivation_needed = args.derive_all | args.print_hg_hashes;
+    if any_derivation_needed {
         let dag = dag
             .into_iter()
             .map(|(k, v)| (k, v.into_iter().collect()))
@@ -384,7 +407,33 @@ pub async fn run(app: MononokeApp, args: CommandArgs) -> Result<()> {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        derive_all(&ctx, &repo, &csids).await?;
+        if args.derive_all {
+            derive_all(&ctx, &repo, &csids).await?;
+        } else {
+            derive::<MappedHgChangesetId>(&ctx, &repo, &csids).await?;
+        }
+    }
+
+    if args.print_hg_hashes {
+        let mapping: HashMap<_, _> = repo
+            .bonsai_hg_mapping()
+            .get(&ctx, commits.values().copied().collect::<Vec<_>>().into())
+            .await?
+            .into_iter()
+            .map(|entry| (entry.bcs_id, entry.hg_cs_id))
+            .collect();
+        let commits = commits
+            .into_iter()
+            .map(|(name, id)| {
+                mapping
+                    .get(&id)
+                    .ok_or_else(|| anyhow!("Couldn't translate {}={} to hg", name, id))
+                    .map(|hg_id| (name, hg_id))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        print_name_hash_pairs(commits)?;
+    } else {
+        print_name_hash_pairs(commits)?;
     }
 
     Ok(())
@@ -399,6 +448,7 @@ fn apply_changes<'a>(
         match change {
             ChangeAction::Modify { path, content, .. } => c = c.add_file(path.as_slice(), content),
             ChangeAction::Delete { path, .. } => c = c.delete_file(path.as_slice()),
+            ChangeAction::Forget { path, .. } => c = c.forget_file(path.as_slice()),
             ChangeAction::Extra { key, value, .. } => c = c.add_extra(key, value),
             ChangeAction::Copy {
                 path,
@@ -447,16 +497,7 @@ async fn derive_all(ctx: &CoreContext, repo: &BlobRepo, csids: &[ChangesetId]) -
         derive::<RootUnodeManifestId>(ctx, repo, csids).await?;
         try_join!(
             derive::<RootBlameV2>(ctx, repo, csids),
-            async move {
-                use DeletedManifestVersion::*;
-                match repo
-                    .get_active_derived_data_types_config()
-                    .deleted_manifest_version
-                {
-                    V1 => derive::<RootDeletedManifestId>(ctx, repo, csids).await,
-                    V2 => derive::<RootDeletedManifestV2Id>(ctx, repo, csids).await,
-                }
-            },
+            derive::<RootDeletedManifestV2Id>(ctx, repo, csids),
             derive::<RootFastlog>(ctx, repo, csids),
         )?;
         Ok::<_, Error>(())

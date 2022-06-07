@@ -147,6 +147,13 @@ impl AddScubaParams for thrift::RepoResolveBookmarkParams {
     }
 }
 
+impl AddScubaParams for thrift::RepoBookmarkInfoParams {
+    fn add_scuba_params(&self, scuba: &mut MononokeScubaSampleBuilder) {
+        scuba.add("bookmark_name", self.bookmark_name.as_str());
+        self.identity_schemes.add_scuba_params(scuba);
+    }
+}
+
 impl AddScubaParams for thrift::RepoResolveCommitPrefixParams {
     fn add_scuba_params(&self, scuba: &mut MononokeScubaSampleBuilder) {
         scuba.add("param_prefix", self.prefix.as_str());
@@ -249,6 +256,12 @@ impl AddScubaParams for thrift::CommitListDescendantBookmarksParams {
             scuba.add("param_after", after.as_str());
         }
         self.identity_schemes.add_scuba_params(scuba);
+    }
+}
+
+impl AddScubaParams for thrift::CommitRunHooksParams {
+    fn add_scuba_params(&self, scuba: &mut MononokeScubaSampleBuilder) {
+        scuba.add("bookmark_name", self.bookmark.as_str());
     }
 }
 
@@ -465,5 +478,11 @@ impl AddScubaParams for thrift::MegarepoAddConfigParams {
     fn add_scuba_params(&self, scuba: &mut MononokeScubaSampleBuilder) {
         scuba.add("param_megarepo_version", self.new_config.version.clone());
         report_megarepo_target(&self.new_config.target, scuba, Reported::Param);
+    }
+}
+
+impl AddScubaParams for thrift::MegarepoReadConfigParams {
+    fn add_scuba_params(&self, scuba: &mut MononokeScubaSampleBuilder) {
+        report_megarepo_target(&self.target, scuba, Reported::Param);
     }
 }

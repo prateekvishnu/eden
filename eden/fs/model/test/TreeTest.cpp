@@ -14,18 +14,10 @@
 #include "eden/fs/testharness/TestUtil.h"
 #include "eden/fs/utils/PathFuncs.h"
 
-using facebook::eden::Hash20;
-using facebook::eden::ObjectId;
-using facebook::eden::PathComponent;
-using facebook::eden::PathComponentPiece;
-using facebook::eden::Tree;
-using facebook::eden::TreeEntry;
-using facebook::eden::TreeEntryType;
-using std::string;
-using std::vector;
+namespace facebook::eden {
 
 namespace {
-string testHashHex = folly::to<string>(
+std::string testHashHex = folly::to<std::string>(
     "faceb00c",
     "deadbeef",
     "c00010ff",
@@ -35,54 +27,52 @@ string testHashHex = folly::to<string>(
 ObjectId testHash(testHashHex);
 } // namespace
 
-TEST(Tree, testGetEntryPtr) {
-  vector<TreeEntry> entries;
-  entries.emplace_back(
-      testHash, PathComponent{"a_file"}, TreeEntryType::REGULAR_FILE);
+TEST(Tree, testFind) {
+  Tree::container entries{CaseSensitivity::Insensitive};
+  auto aFileName = PathComponent{"a_file"};
+  entries.emplace(aFileName, testHash, TreeEntryType::REGULAR_FILE);
   Tree tree(std::move(entries), testHash);
 
   // Verify existent path.
   PathComponentPiece existentPath("a_file");
-  auto entry = tree.getEntryPtr(existentPath);
-  EXPECT_NE(nullptr, entry);
-  EXPECT_EQ("a_file", entry->getName());
-  EXPECT_EQ(false, entry->isTree());
-  EXPECT_EQ(TreeEntryType::REGULAR_FILE, entry->getType());
+  auto entry = tree.find(existentPath);
+  EXPECT_NE(tree.cend(), entry);
+  EXPECT_EQ("a_file", entry->first);
+  EXPECT_EQ(false, entry->second.isTree());
+  EXPECT_EQ(TreeEntryType::REGULAR_FILE, entry->second.getType());
 
-#ifdef _WIN32
-  // Case insensitive testing only on Windows
+  // Case insensitive testing
   PathComponentPiece existentPath1("A_file");
-  entry = tree.getEntryPtr(existentPath1);
-  EXPECT_NE(nullptr, entry);
-  EXPECT_EQ("a_file", entry->getName());
+  entry = tree.find(existentPath1);
+  EXPECT_NE(tree.end(), entry);
+  EXPECT_EQ("a_file", entry->first);
 
   PathComponentPiece existentPath2("a_File");
-  entry = tree.getEntryPtr(existentPath2);
-  EXPECT_NE(nullptr, entry);
-  EXPECT_EQ("a_file", entry->getName());
+  entry = tree.find(existentPath2);
+  EXPECT_NE(tree.end(), entry);
+  EXPECT_EQ("a_file", entry->first);
 
   PathComponentPiece existentPath3("A_FILE");
-  entry = tree.getEntryPtr(existentPath3);
-  EXPECT_NE(nullptr, entry);
-  EXPECT_EQ("a_file", entry->getName());
-#endif
+  entry = tree.find(existentPath3);
+  EXPECT_NE(tree.end(), entry);
+  EXPECT_EQ("a_file", entry->first);
 
   // Verify non-existent path.
   PathComponentPiece nonExistentPath("not_a_file");
-  EXPECT_EQ(nullptr, tree.getEntryPtr(nonExistentPath));
+  EXPECT_EQ(tree.end(), tree.find(nonExistentPath));
 }
 
 TEST(Tree, testSize) {
-  std::string entryName{"file.txt"};
   auto entryType = TreeEntryType::REGULAR_FILE;
-  TreeEntry entry{testHash, PathComponent{entryName}, entryType};
-  auto entrySize = sizeof(entry) + entry.getIndirectSizeBytes();
+  TreeEntry entry{testHash, entryType};
+  auto entrySize = sizeof(entry);
 
   auto numEntries = 5;
 
-  vector<TreeEntry> entries;
+  Tree::container entries{kPathMapDefaultCaseSensitive};
   for (auto i = 0; i < numEntries; ++i) {
-    entries.emplace_back(entry);
+    auto entryName = fmt::format("file{}.txt", i);
+    entries.emplace(PathComponentPiece{entryName}, entry);
   }
   Tree tree(std::move(entries), testHash);
 
@@ -92,3 +82,5 @@ TEST(Tree, testSize) {
   // summ of the footprint of the entrys & the hash
   EXPECT_LE(numEntries * entrySize + Hash20::RAW_SIZE, tree.getSizeBytes());
 }
+
+} // namespace facebook::eden

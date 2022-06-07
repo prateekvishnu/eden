@@ -14,6 +14,7 @@
 #include <folly/Range.h>
 #include <folly/logging/xlog.h>
 
+#include "eden/fs/model/BlobMetadata.h"
 #include "eden/fs/utils/EnumValue.h"
 #include "eden/fs/utils/PathFuncs.h"
 
@@ -21,6 +22,19 @@ namespace facebook::eden {
 
 using namespace folly;
 using namespace folly::io;
+
+EntryAttributes::EntryAttributes(
+    folly::Try<Hash20> contentsHash,
+    folly::Try<uint64_t> fileLength,
+    folly::Try<TreeEntryType> fileType)
+    : sha1(std::move(contentsHash)),
+      size(std::move(fileLength)),
+      type(std::move(fileType)) {}
+
+EntryAttributes::EntryAttributes(
+    BlobMetadata blobMetadata,
+    TreeEntryType fileType)
+    : sha1(blobMetadata.sha1), size(blobMetadata.size), type(fileType) {}
 
 mode_t modeFromTreeEntryType(TreeEntryType ft) {
   switch (ft) {
@@ -62,7 +76,7 @@ std::optional<TreeEntryType> treeEntryTypeFromMode(mode_t mode) {
   }
 }
 
-std::string TreeEntry::toLogString() const {
+std::string TreeEntry::toLogString(PathComponentPiece name) const {
   char fileTypeChar = '?';
   switch (type_) {
     case TreeEntryType::TREE:
@@ -80,7 +94,7 @@ std::string TreeEntry::toLogString() const {
   }
 
   return folly::to<std::string>(
-      "(", name_, ", ", hash_, ", ", fileTypeChar, ")");
+      "(", name, ", ", hash_, ", ", fileTypeChar, ")");
 }
 
 std::ostream& operator<<(std::ostream& os, TreeEntryType type) {
@@ -100,35 +114,28 @@ std::ostream& operator<<(std::ostream& os, TreeEntryType type) {
 
 bool operator==(const TreeEntry& entry1, const TreeEntry& entry2) {
   return (entry1.getHash() == entry2.getHash()) &&
-      (entry1.getType() == entry2.getType()) &&
-      (entry1.getName() == entry2.getName());
+      (entry1.getType() == entry2.getType());
 }
 
 bool operator!=(const TreeEntry& entry1, const TreeEntry& entry2) {
   return !(entry1 == entry2);
 }
 
-size_t TreeEntry::getIndirectSizeBytes() const {
-  // TODO: we should consider using a standard memory framework across
-  // eden for this type of thing. D17174143 is one such idea.
-  return estimateIndirectMemoryUsage(name_.value());
-}
-
-size_t TreeEntry::serializedSize() const {
+size_t TreeEntry::serializedSize(PathComponentPiece name) const {
   return sizeof(uint8_t) + sizeof(uint16_t) + hash_.size() + sizeof(uint16_t) +
-      name_.stringPiece().size() + sizeof(uint64_t) + Hash20::RAW_SIZE;
+      name.stringPiece().size() + sizeof(uint64_t) + Hash20::RAW_SIZE;
 }
 
-void TreeEntry::serialize(Appender& appender) const {
+void TreeEntry::serialize(PathComponentPiece name, Appender& appender) const {
   appender.write<uint8_t>(static_cast<uint8_t>(type_));
   auto hash = hash_.getBytes();
   XCHECK_LE(hash.size(), std::numeric_limits<uint16_t>::max());
   appender.write<uint16_t>(folly::to_narrow(hash.size()));
   appender.push(hash);
-  auto name = name_.stringPiece();
-  XCHECK_LE(name.size(), std::numeric_limits<uint16_t>::max());
-  appender.write<uint16_t>(folly::to_narrow(name.size()));
-  appender.push(name);
+  auto nameStringPiece = name.stringPiece();
+  XCHECK_LE(nameStringPiece.size(), std::numeric_limits<uint16_t>::max());
+  appender.write<uint16_t>(folly::to_narrow(nameStringPiece.size()));
+  appender.push(nameStringPiece);
   if (size_) {
     appender.write<uint64_t>(*size_);
   } else {
@@ -141,7 +148,8 @@ void TreeEntry::serialize(Appender& appender) const {
   }
 }
 
-std::optional<TreeEntry> TreeEntry::deserialize(folly::StringPiece& data) {
+std::optional<std::pair<PathComponent, TreeEntry>> TreeEntry::deserialize(
+    folly::StringPiece& data) {
   uint8_t type;
   if (data.size() < sizeof(uint8_t)) {
     XLOG(ERR) << "Can not read tree entry type, bytes remaining "
@@ -218,7 +226,8 @@ std::optional<TreeEntry> TreeEntry::deserialize(folly::StringPiece& data) {
     sha1 = sha1_raw;
   }
 
-  return TreeEntry{hash, name, (TreeEntryType)type, size, sha1};
+  return std::pair{
+      std::move(name), TreeEntry{hash, (TreeEntryType)type, size, sha1}};
 }
 
 } // namespace facebook::eden

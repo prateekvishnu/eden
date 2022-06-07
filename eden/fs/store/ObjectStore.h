@@ -7,7 +7,6 @@
 
 #pragma once
 
-#include <folly/Executor.h>
 #include <folly/Synchronized.h>
 #include <folly/container/EvictingCacheMap.h>
 #include <memory>
@@ -77,10 +76,10 @@ class ObjectStore : public IObjectStore,
       std::shared_ptr<BackingStore> backingStore,
       std::shared_ptr<TreeCache> treeCache,
       std::shared_ptr<EdenStats> stats,
-      folly::Executor::KeepAlive<folly::Executor> executor,
       std::shared_ptr<ProcessNameCache> processNameCache,
       std::shared_ptr<StructuredLogger> structuredLogger,
-      std::shared_ptr<const EdenConfig> edenConfig);
+      std::shared_ptr<const EdenConfig> edenConfig,
+      CaseSensitivity caseSensitive);
   ~ObjectStore() override;
 
   /**
@@ -141,7 +140,7 @@ class ObjectStore : public IObjectStore,
    * ready.  It may result in a std::domain_error if the specified commit ID
    * does not exist, or possibly other exceptions on error.
    */
-  folly::Future<std::shared_ptr<const Tree>> getRootTree(
+  ImmediateFuture<std::shared_ptr<const Tree>> getRootTree(
       const RootId& rootId,
       ObjectFetchContext& context) const override;
 
@@ -152,10 +151,9 @@ class ObjectStore : public IObjectStore,
    * ready. It may result in a std::domain_error if the specified tree ID does
    * not exist, or possibly other exceptions on error.
    */
-  folly::Future<std::shared_ptr<TreeEntry>> getTreeEntryForRootId(
+  ImmediateFuture<std::shared_ptr<TreeEntry>> getTreeEntryForRootId(
       const RootId& rootId,
-      facebook::eden::TreeEntryType treeEntryType,
-      facebook::eden::PathComponentPiece pathComponentPiece,
+      TreeEntryType treeEntryType,
       ObjectFetchContext& context) const;
 
   /**
@@ -173,9 +171,9 @@ class ObjectStore : public IObjectStore,
    * Prefetch all the blobs represented by the HashRange.
    *
    * The caller is responsible for making sure that the HashRange stays valid
-   * for as long as the returned SemiFuture.
+   * for as long as the returned ImmediateFuture.
    */
-  folly::Future<folly::Unit> prefetchBlobs(
+  ImmediateFuture<folly::Unit> prefetchBlobs(
       ObjectIdRange ids,
       ObjectFetchContext& context) const override;
 
@@ -186,7 +184,7 @@ class ObjectStore : public IObjectStore,
    * It may result in a std::domain_error if the specified blob ID does not
    * exist, or possibly other exceptions on error.
    */
-  folly::Future<std::shared_ptr<const Blob>> getBlob(
+  ImmediateFuture<std::shared_ptr<const Blob>> getBlob(
       const ObjectId& id,
       ObjectFetchContext& context) const override;
 
@@ -244,10 +242,10 @@ class ObjectStore : public IObjectStore,
       std::shared_ptr<BackingStore> backingStore,
       std::shared_ptr<TreeCache> treeCache,
       std::shared_ptr<EdenStats> stats,
-      folly::Executor::KeepAlive<folly::Executor> executor,
       std::shared_ptr<ProcessNameCache> processNameCache,
       std::shared_ptr<StructuredLogger> structuredLogger,
-      std::shared_ptr<const EdenConfig> edenConfig);
+      std::shared_ptr<const EdenConfig> edenConfig,
+      CaseSensitivity caseSensitive);
   // Forbidden copy constructor and assignment operator
   ObjectStore(ObjectStore const&) = delete;
   ObjectStore& operator=(ObjectStore const&) = delete;
@@ -300,8 +298,6 @@ class ObjectStore : public IObjectStore,
 
   std::shared_ptr<EdenStats> const stats_;
 
-  folly::Executor::KeepAlive<folly::Executor> executor_;
-
   /* number of fetches for each process collected
    * from the beginning of the eden daemon progress */
   std::unique_ptr<PidFetchCounts> pidFetchCounts_;
@@ -313,6 +309,10 @@ class ObjectStore : public IObjectStore,
   std::shared_ptr<ProcessNameCache> processNameCache_;
   std::shared_ptr<StructuredLogger> structuredLogger_;
   std::shared_ptr<const EdenConfig> edenConfig_;
+
+  // Is this ObjectStore case sensitive? This only matters for methods returning
+  // Tree.
+  CaseSensitivity caseSensitive_;
 };
 
 } // namespace facebook::eden

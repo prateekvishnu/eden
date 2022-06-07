@@ -5,7 +5,7 @@
 
 # windows.py - Windows utility function implementations for Mercurial
 #
-#  Copyright 2005-2009 Matt Mackall <mpm@selenic.com> and others
+#  Copyright 2005-2009 Olivia Mackall <olivia@selenic.com> and others
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -13,6 +13,7 @@
 from __future__ import absolute_import
 
 import errno
+import io
 import msvcrt
 import os
 import re
@@ -296,8 +297,12 @@ def setbinary(fd):
     # When run without console, pipes may expose invalid
     # fileno(), usually set to -1.
     fno = getattr(fd, "fileno", None)
-    if fno is not None and fno() >= 0:
-        msvcrt.setmode(fno(), os.O_BINARY)
+    try:
+        if fno is not None and fno() >= 0:
+            msvcrt.setmode(fno(), os.O_BINARY)
+    except io.UnsupportedOperation:
+        # fno() might raise this exception
+        pass
 
 
 def pconvert(path):
@@ -526,10 +531,6 @@ def syncdir(dirpath):
     dirpath is persisted to a permanent storage device."""
     # See comments in posix implementation for discussion on this topic.
     # Do nothing.
-
-
-def gethgcmd(argv=sys.argv):
-    return [sys.executable] + argv[:1]
 
 
 def groupmembers(name):

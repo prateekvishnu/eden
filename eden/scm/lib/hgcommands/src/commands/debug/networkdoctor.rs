@@ -19,7 +19,7 @@ define_flags! {
     }
 }
 
-pub fn run(_opts: DebugNetworkDoctorOps, io: &IO, mut repo: OptionalRepo) -> Result<u8> {
+pub fn run(_opts: DebugNetworkDoctorOps, io: &IO, repo: &mut OptionalRepo) -> Result<u8> {
     // Set a default repo so we can build valid edenapi URLs outside a repo.
     if let OptionalRepo::None(ref mut config) = repo {
         config.set(
@@ -44,4 +44,8 @@ pub fn name() -> &'static str {
 
 pub fn doc() -> &'static str {
     "run the (Rust) network doctor"
+}
+
+pub fn synopsis() -> Option<&'static str> {
+    None
 }

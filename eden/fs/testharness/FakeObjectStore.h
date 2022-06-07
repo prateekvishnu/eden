@@ -18,8 +18,7 @@
 #include "eden/fs/store/ImportPriority.h"
 #include "eden/fs/store/ObjectFetchContext.h"
 
-namespace facebook {
-namespace eden {
+namespace facebook::eden {
 
 /**
  * Fake implementation of IObjectStore that allows the data to be injected
@@ -34,7 +33,7 @@ class FakeObjectStore final : public IObjectStore {
   void addBlob(Blob&& blob);
   void setTreeForCommit(const RootId& commitID, Tree&& tree);
 
-  folly::Future<std::shared_ptr<const Tree>> getRootTree(
+  ImmediateFuture<std::shared_ptr<const Tree>> getRootTree(
       const RootId& commitID,
       ObjectFetchContext& context =
           ObjectFetchContext::getNullContext()) const override;
@@ -42,11 +41,11 @@ class FakeObjectStore final : public IObjectStore {
       const ObjectId& id,
       ObjectFetchContext& context =
           ObjectFetchContext::getNullContext()) const override;
-  folly::Future<std::shared_ptr<const Blob>> getBlob(
+  ImmediateFuture<std::shared_ptr<const Blob>> getBlob(
       const ObjectId& id,
       ObjectFetchContext& context =
           ObjectFetchContext::getNullContext()) const override;
-  folly::Future<folly::Unit> prefetchBlobs(
+  ImmediateFuture<folly::Unit> prefetchBlobs(
       ObjectIdRange ids,
       ObjectFetchContext& context =
           ObjectFetchContext::getNullContext()) const override;
@@ -60,5 +59,4 @@ class FakeObjectStore final : public IObjectStore {
   mutable std::unordered_map<RootId, size_t> commitAccessCounts_;
   mutable std::unordered_map<ObjectId, size_t> accessCounts_;
 };
-} // namespace eden
-} // namespace facebook
+} // namespace facebook::eden

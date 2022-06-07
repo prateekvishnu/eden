@@ -5,8 +5,6 @@
  * GNU General Public License version 2.
  */
 
-#![deny(warnings)]
-
 use anyhow::{Error, Result};
 use blobrepo::BlobRepo;
 use blobstore::Loadable;
@@ -78,7 +76,7 @@ impl Tailer {
         )
         .await?;
 
-        load_hooks(ctx.fb, &mut hook_manager, config, disabled_hooks).await?;
+        load_hooks(ctx.fb, &mut hook_manager, &config, disabled_hooks).await?;
 
         Ok(Tailer {
             ctx,

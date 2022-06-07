@@ -5,8 +5,6 @@
  * GNU General Public License version 2.
  */
 
-#![deny(warnings)]
-
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::RangeBounds;
@@ -24,7 +22,7 @@ use bookmarks_types::{Bookmark, BookmarkKind, BookmarkPagination, BookmarkPrefix
 use changeset_info::ChangesetInfo;
 use cloned::cloned;
 use context::{CoreContext, SessionClass};
-use deleted_files_manifest::{RootDeletedManifestId, RootDeletedManifestV2Id};
+use deleted_manifest::RootDeletedManifestV2Id;
 use derived_data_filenodes::FilenodesOnlyPublic;
 use derived_data_manager::BonsaiDerivable as NewBonsaiDerivable;
 use fastlog::RootFastlog;
@@ -39,7 +37,7 @@ use futures_watchdog::WatchdogExt;
 use itertools::Itertools;
 use lock_ext::RwLockExt;
 use mercurial_derived_data::MappedHgChangesetId;
-use metaconfig_types::{BlameVersion, DeletedManifestVersion};
+use metaconfig_types::BlameVersion;
 use mononoke_types::{ChangesetId, Timestamp};
 use phases::PhasesArc;
 use repo_derived_data::RepoDerivedDataArc;
@@ -204,25 +202,10 @@ where
         }
         // deleted manifest share the same name
         if types.contains(RootDeletedManifestV2Id::NAME) {
-            match self
-                .repo
-                .repo_derived_data()
-                .active_config()
-                .deleted_manifest_version
-            {
-                DeletedManifestVersion::V1 => {
-                    self.warmers
-                        .push(create_derived_data_warmer::<RootDeletedManifestId, _>(
-                            &self.ctx, self.repo,
-                        ))
-                }
-                DeletedManifestVersion::V2 => {
-                    self.warmers
-                        .push(create_derived_data_warmer::<RootDeletedManifestV2Id, _>(
-                            &self.ctx, self.repo,
-                        ))
-                }
-            }
+            self.warmers
+                .push(create_derived_data_warmer::<RootDeletedManifestV2Id, _>(
+                    &self.ctx, self.repo,
+                ));
         }
         if types.contains(RootFastlog::NAME) {
             self.warmers

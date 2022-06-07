@@ -94,10 +94,10 @@ struct BlobAccessTest : ::testing::Test {
         backingStore,
         treeCache,
         std::make_shared<EdenStats>(),
-        &folly::QueuedImmediateExecutor::instance(),
         std::make_shared<ProcessNameCache>(),
         std::make_shared<NullStructuredLogger>(),
-        rawEdenConfig);
+        rawEdenConfig,
+        kPathMapDefaultCaseSensitive);
 
     blobAccess = std::make_shared<BlobAccess>(objectStore, blobCache);
 

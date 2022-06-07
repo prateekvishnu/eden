@@ -158,6 +158,7 @@ windows-sys = { git = "https://github.com/fanzeyi/windows-rs", rev = "8775afca5d
 [workspace]
 members = [
   ".",
+  "acl_regions",
   "admin",
   "aliasverify",
   "alpn",
@@ -217,6 +218,7 @@ members = [
   "bulkops",
   "bulkops/bench",
   "cache_warmup",
+  "cats",
   "changesets",
   "changesets/changesets_creation",
   "changesets/changesets_impl",
@@ -269,7 +271,7 @@ members = [
   "derived_data/blame",
   "derived_data/changeset_info",
   "derived_data/changeset_info/if",
-  "derived_data/deleted_files_manifest",
+  "derived_data/deleted_manifest",
   "derived_data/derived_generation",
   "derived_data/fastlog",
   "derived_data/filenodes",
@@ -342,6 +344,7 @@ members = [
   "phases",
   "phases/sqlphases",
   "pushrebase",
+  "pushrebase/client",
   "pushrebase/pushrebase_hook",
   "pushrebase_mutation_mapping",
   "quiet_stream",
@@ -355,6 +358,7 @@ members = [
   "repo_attributes/repo_cross_repo",
   "repo_attributes/repo_derived_data",
   "repo_attributes/repo_identity",
+  "repo_attributes/repo_lock/repo_lock",
   "repo_attributes/repo_permission_checker",
   "repo_client",
   "repo_client/getbundle_response",
@@ -394,7 +398,6 @@ members = [
   "tools/testtool",
   "tunables",
   "tunables/tunables-derive",
-  "unbundle_replay",
   "upload_globalrevs",
   "walker",
 ]

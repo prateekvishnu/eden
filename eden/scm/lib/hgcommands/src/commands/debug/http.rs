@@ -12,7 +12,7 @@ use super::Repo;
 use super::Result;
 use super::IO;
 
-pub fn run(_opts: NoOpts, io: &IO, repo: Repo) -> Result<u8> {
+pub fn run(_opts: NoOpts, io: &IO, repo: &mut Repo) -> Result<u8> {
     let client = edenapi::Builder::from_config(repo.config())?.build()?;
     let meta = block_on(client.health())?;
     io.write(format!("{:#?}\n", &meta))?;
@@ -25,4 +25,8 @@ pub fn name() -> &'static str {
 
 pub fn doc() -> &'static str {
     "check whether the EdenAPI server is reachable"
+}
+
+pub fn synopsis() -> Option<&'static str> {
+    None
 }

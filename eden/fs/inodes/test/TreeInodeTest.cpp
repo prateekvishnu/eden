@@ -45,9 +45,9 @@ DirEntry makeDirEntry() {
   return DirEntry{S_IFREG | 0644, 1_ino, ObjectId{}};
 }
 
-TreeEntry makeTreeEntry(folly::StringPiece name) {
-  return TreeEntry{
-      ObjectId{}, PathComponent{name}, TreeEntryType::REGULAR_FILE};
+Tree::value_type makeTreeEntry(folly::StringPiece name) {
+  return {
+      PathComponent{name}, TreeEntry{ObjectId{}, TreeEntryType::REGULAR_FILE}};
 }
 } // namespace
 
@@ -55,7 +55,10 @@ TEST(TreeInode, findEntryDifferencesWithSameEntriesReturnsNone) {
   DirContents dir(CaseSensitivity::Sensitive);
   dir.emplace("one"_pc, makeDirEntry());
   dir.emplace("two"_pc, makeDirEntry());
-  Tree tree{{makeTreeEntry("one"), makeTreeEntry("two")}, testHash};
+  Tree tree{
+      {{makeTreeEntry("one"), makeTreeEntry("two")},
+       CaseSensitivity::Sensitive},
+      testHash};
 
   EXPECT_FALSE(findEntryDifferences(dir, tree));
 }
@@ -64,7 +67,10 @@ TEST(TreeInode, findEntryDifferencesReturnsAdditionsAndSubtractions) {
   DirContents dir(CaseSensitivity::Sensitive);
   dir.emplace("one"_pc, makeDirEntry());
   dir.emplace("two"_pc, makeDirEntry());
-  Tree tree{{makeTreeEntry("one"), makeTreeEntry("three")}, testHash};
+  Tree tree{
+      {{makeTreeEntry("one"), makeTreeEntry("three")},
+       CaseSensitivity::Sensitive},
+      testHash};
 
   auto differences = findEntryDifferences(dir, tree);
   EXPECT_TRUE(differences);
@@ -75,7 +81,7 @@ TEST(TreeInode, findEntryDifferencesWithOneSubtraction) {
   DirContents dir(CaseSensitivity::Sensitive);
   dir.emplace("one"_pc, makeDirEntry());
   dir.emplace("two"_pc, makeDirEntry());
-  Tree tree{{makeTreeEntry("one")}, testHash};
+  Tree tree{{{makeTreeEntry("one")}, CaseSensitivity::Sensitive}, testHash};
 
   auto differences = findEntryDifferences(dir, tree);
   EXPECT_TRUE(differences);
@@ -87,7 +93,8 @@ TEST(TreeInode, findEntryDifferencesWithOneAddition) {
   dir.emplace("one"_pc, makeDirEntry());
   dir.emplace("two"_pc, makeDirEntry());
   Tree tree{
-      {makeTreeEntry("one"), makeTreeEntry("two"), makeTreeEntry("three")},
+      {{makeTreeEntry("one"), makeTreeEntry("two"), makeTreeEntry("three")},
+       CaseSensitivity::Sensitive},
       testHash};
 
   auto differences = findEntryDifferences(dir, tree);

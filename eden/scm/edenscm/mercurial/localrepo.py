@@ -5,7 +5,7 @@
 
 # localrepo.py - read/write repository class for mercurial
 #
-# Copyright 2005-2007 Matt Mackall <mpm@selenic.com>
+# Copyright 2005-2007 Olivia Mackall <olivia@selenic.com>
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -37,9 +37,9 @@ from . import (
     dirstate,
     dirstateguard,
     discovery,
-    edenfs,
-    edenapi,
     eagerpeer,
+    edenapi,
+    edenfs,
     encoding,
     error as errormod,
     exchange,
@@ -2152,6 +2152,10 @@ class localrepository(object):
                     pass
             delattr(self, "dirstate")
 
+    def flushandinvalidate(self, clearfilecache=False):
+        self.commitpending()
+        self.invalidate(clearfilecache=clearfilecache)
+
     def invalidate(self, clearfilecache=False):
         """Invalidates both store and non-store parts other than dirstate
 
@@ -2165,11 +2169,16 @@ class localrepository(object):
             # dirstate is invalidated separately in invalidatedirstate()
             if k == "dirstate":
                 continue
-            if k == "changelog" and self.currenttransaction():
-                # The changelog object may store unwritten revisions. We don't
-                # want to lose them.
-                # TODO: Solve the problem instead of working around it.
-                continue
+            if k == "changelog":
+                if self.currenttransaction():
+                    # The changelog object may store unwritten revisions. We don't
+                    # want to lose them.
+                    # TODO: Solve the problem instead of working around it.
+                    continue
+                else:
+                    # Use dedicated function to properly invalidate changelog.
+                    self.invalidatechangelog()
+                    continue
 
             if k == "manifestlog" and "manifestlog" in self.__dict__:
                 # The manifestlog may have uncommitted additions, let's just
@@ -2241,9 +2250,9 @@ class localrepository(object):
         warntimeout = None
         if wait:
             timeout = self.ui.configint("ui", "timeout")
-            warntimeout = self.ui.configint("ui", "timeout.warn", None)
+            warntimeout = self.ui.configint("ui", "timeout.warn")
 
-        l = lockmod.trylock(
+        return lockmod.trylock(
             self.ui,
             vfs,
             lockname,
@@ -2253,7 +2262,6 @@ class localrepository(object):
             acquirefn=acquirefn,
             desc=desc,
         )
-        return l
 
     def _afterlock(self, callback):
         """add a callback to be run when the repository is fully unlocked
@@ -2311,7 +2319,7 @@ class localrepository(object):
             "lock",
             wait,
             releasefn,
-            self.invalidate,
+            self.flushandinvalidate,
             _("repository %s") % self.origroot,
         )
         self._lockref = weakref.ref(l)

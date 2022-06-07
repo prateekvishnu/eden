@@ -32,6 +32,7 @@
 #include "eden/fs/service/EdenStateDir.h"
 #include "eden/fs/service/PeriodicTask.h"
 #include "eden/fs/service/StartupLogger.h"
+#include "eden/fs/store/BackingStore.h"
 #include "eden/fs/takeover/TakeoverData.h"
 #include "eden/fs/takeover/TakeoverHandler.h"
 #include "eden/fs/telemetry/EdenStats.h"
@@ -57,8 +58,7 @@ namespace folly {
 class EventBase;
 }
 
-namespace facebook {
-namespace eden {
+namespace facebook::eden {
 
 class BackingStore;
 class HgQueuedBackingStore;
@@ -99,7 +99,7 @@ class BackingStoreFactory {
   virtual ~BackingStoreFactory() = default;
 
   virtual std::shared_ptr<BackingStore> createBackingStore(
-      folly::StringPiece type,
+      BackingStoreType type,
       const CreateParams& params) = 0;
 };
 
@@ -336,7 +336,7 @@ class EdenServer : private TakeoverHandler {
    * return the existing BackingStore that was previously created.
    */
   std::shared_ptr<BackingStore> getBackingStore(
-      folly::StringPiece type,
+      BackingStoreType type,
       folly::StringPiece name);
 
   AbsolutePathPiece getEdenDir() const {
@@ -480,7 +480,7 @@ class EdenServer : private TakeoverHandler {
     }
   };
 
-  using BackingStoreKey = std::pair<std::string, std::string>;
+  using BackingStoreKey = std::pair<BackingStoreType, std::string>;
   using BackingStoreMap =
       std::unordered_map<BackingStoreKey, std::shared_ptr<BackingStore>>;
   using MountMap = PathMap<struct EdenMountInfo, AbsolutePath>;
@@ -600,6 +600,9 @@ class EdenServer : private TakeoverHandler {
   // while.
   void refreshBackingStore();
 
+  // Tree overlay needs periodically run checkpoint to flush its journal file.
+  void manageOverlay();
+
   // Cancel all subscribers on all mounts so that we can tear
   // down the thrift server without blocking
   void shutdownSubscribers();
@@ -637,7 +640,8 @@ class EdenServer : private TakeoverHandler {
   std::shared_ptr<TreeCache> treeCache_;
   std::shared_ptr<ReloadableConfig> config_;
 
-  folly::Synchronized<MountMap> mountPoints_{kPathMapDefaultCaseSensitive};
+  folly::Synchronized<MountMap> mountPoints_{
+      MountMap{kPathMapDefaultCaseSensitive}};
 
 #ifndef _WIN32
   /**
@@ -760,10 +764,9 @@ class EdenServer : private TakeoverHandler {
   PeriodicFnTask<&EdenServer::manageLocalStore> localStoreTask_{
       this,
       "local_store"};
-
   PeriodicFnTask<&EdenServer::refreshBackingStore> backingStoreTask_{
       this,
       "backing_store"};
+  PeriodicFnTask<&EdenServer::manageOverlay> overlayTask_{this, "overlay"};
 };
-} // namespace eden
-} // namespace facebook
+} // namespace facebook::eden

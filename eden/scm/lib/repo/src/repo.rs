@@ -13,12 +13,21 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use configparser::config::ConfigSet;
+use configparser::Config;
 use edenapi::Builder;
 use edenapi::EdenApi;
 use edenapi::EdenApiError;
 use hgcommits::DagCommits;
 use metalog::MetaLog;
 use parking_lot::RwLock;
+use revisionstore::scmstore::FileStoreBuilder;
+use revisionstore::scmstore::TreeStoreBuilder;
+use revisionstore::trait_impls::ArcFileStore;
+use revisionstore::EdenApiFileStore;
+use revisionstore::EdenApiTreeStore;
+use revisionstore::MemcacheStore;
+use storemodel::ReadFileContents;
+use storemodel::TreeStore;
 use util::path::absolute;
 
 use crate::commits::open_dag_commits;
@@ -37,6 +46,8 @@ pub struct Repo {
     metalog: Option<Arc<RwLock<MetaLog>>>,
     eden_api: Option<Arc<dyn EdenApi>>,
     dag_commits: Option<Arc<RwLock<Box<dyn DagCommits + Send + 'static>>>>,
+    file_store: Option<Arc<dyn ReadFileContents<Error = anyhow::Error> + Send + Sync>>,
+    tree_store: Option<Arc<dyn TreeStore + Send + Sync>>,
 }
 
 /// Either an optional [`Repo`] which owns a [`ConfigSet`], or a [`ConfigSet`]
@@ -123,12 +134,12 @@ impl OptionalRepo {
 impl Repo {
     pub fn init(
         root_path: &Path,
-        config: &mut ConfigSet,
+        config: &ConfigSet,
         hgrc_contents: Option<String>,
     ) -> Result<Repo> {
         let root_path = absolute(root_path)?;
         init::init_hg_repo(&root_path, config, hgrc_contents)?;
-        let mut repo = Self::load_with_config(&root_path, config.clone())?;
+        let mut repo = Self::load(&root_path)?;
         repo.metalog()?.write().init_tracked()?;
         Ok(repo)
     }
@@ -148,8 +159,10 @@ impl Repo {
         Self::load_with_config(path, config)
     }
 
-    /// Loads the repo from an explicit path. If a reference to a config object is passed,
-    /// a clone of it is used; otherwise, a new one is created.
+    /// Loads the repo at given path, eschewing any config loading in
+    /// favor of given config. This method exists so Python can create
+    /// a Repo that uses the Python config verbatim without worrying
+    /// about mixing CLI config overrides back in.
     pub fn load_with_config<P>(path: P, config: ConfigSet) -> Result<Self>
     where
         P: Into<PathBuf>,
@@ -169,9 +182,6 @@ impl Repo {
                     .get("remotefilelog", "reponame")
                     .map(|v| v.to_string())
             });
-        let metalog = None;
-        let eden_api = None;
-        let dag_commits = None;
 
         Ok(Repo {
             path,
@@ -182,9 +192,11 @@ impl Repo {
             dot_hg_path,
             shared_dot_hg_path,
             repo_name,
-            metalog,
-            eden_api,
-            dag_commits,
+            metalog: None,
+            eden_api: None,
+            dag_commits: None,
+            file_store: None,
+            tree_store: None,
         })
     }
 
@@ -297,6 +309,53 @@ impl Repo {
             .open(self.store_path().join("requires"))?
             .write_all(requirement.as_bytes())?;
         Ok(())
+    }
+
+    pub fn file_store(
+        &mut self,
+    ) -> Result<Arc<dyn ReadFileContents<Error = anyhow::Error> + Send + Sync>> {
+        if let Some(fs) = &self.file_store {
+            return Ok(fs.clone());
+        }
+
+        let eden_api = self.eden_api()?;
+        let mut file_builder = FileStoreBuilder::new(self.config())
+            .edenapi(EdenApiFileStore::new(eden_api))
+            .local_path(self.store_path())
+            .correlator(edenapi::DEFAULT_CORRELATOR.as_str());
+
+        if self.config.get_or_default("scmstore", "auxindexedlog")? {
+            file_builder = file_builder.store_aux_data();
+        }
+
+        if self
+            .config
+            .get_nonempty("remotefilelog", "cachekey")
+            .is_some()
+        {
+            file_builder = file_builder.memcache(Arc::new(MemcacheStore::new(&self.config)?));
+        }
+
+        let fs = Arc::new(ArcFileStore(Arc::new(file_builder.build()?)));
+
+        self.file_store = Some(fs.clone());
+
+        Ok(fs)
+    }
+
+    pub fn tree_store(&mut self) -> Result<Arc<dyn TreeStore + Send + Sync>> {
+        if let Some(ts) = &self.tree_store {
+            return Ok(ts.clone());
+        }
+
+        let eden_api = self.eden_api()?;
+        let tree_builder = TreeStoreBuilder::new(self.config())
+            .edenapi(EdenApiTreeStore::new(eden_api))
+            .local_path(self.store_path())
+            .suffix("manifests");
+        let ts = Arc::new(tree_builder.build()?);
+        self.tree_store = Some(ts.clone());
+        Ok(ts)
     }
 }
 

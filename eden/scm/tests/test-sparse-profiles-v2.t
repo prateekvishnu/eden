@@ -72,7 +72,7 @@ test sparse
   incfile.txt
 
   $ hg debugsparseexplainmatch inc/exc/incfile.txt
-  inc/exc/incfile.txt: included by rule inc/exc/incfile.txt/** (main.sparse)
+  inc/exc/incfile.txt: included by rule inc/exc/incfile.txt/** ($TESTTMP/myrepo/.hg/sparse -> main.sparse)
 
 
   $ hg debugsparseprofilev2 main.sparse
@@ -119,3 +119,44 @@ Test that multiple profiles do not clobber each others includes
   ./inc/file.txt
   ./main.sparse
   ./other.sparse
+
+# Test explain with multiple matches
+
+  $ newrepo
+  $ cat > s1.sparse << 'EOF'
+  > !glob:a*.sparse
+  > [metadata]
+  > version: 2
+  > EOF
+  $ cat > s2.sparse << 'EOF'
+  > glob:a*.sparse
+  > [metadata]
+  > version: 2
+  > EOF
+  $ cat > s3.sparse << 'EOF'
+  > glob:*b.sparse
+  > [metadata]
+  > version: 2
+  > EOF
+  $ cat > s4.sparse << 'EOF'
+  > !glob:*b.sparse
+  > [metadata]
+  > version: 2
+  > EOF
+
+  $ hg ci -Am init s1.sparse s2.sparse s3.sparse s4.sparse
+  $ hg sparse enable s1.sparse s4.sparse
+
+  $ hg debugsparseexplainmatch ab.sparse
+  ab.sparse:
+    !a*.sparse/** ($TESTTMP/repo1/.hg/sparse -> s1.sparse)
+    !*b.sparse/** ($TESTTMP/repo1/.hg/sparse -> s4.sparse)
+
+  $ hg sparse enable s2.sparse s3.sparse
+  $ hg debugsparseexplainmatch ab.sparse
+  ab.sparse:
+    a*.sparse/** ($TESTTMP/repo1/.hg/sparse -> s2.sparse)
+    *b.sparse/** ($TESTTMP/repo1/.hg/sparse -> s3.sparse)
+    !a*.sparse/** ($TESTTMP/repo1/.hg/sparse -> s1.sparse) (overridden by rules above)
+    !*b.sparse/** ($TESTTMP/repo1/.hg/sparse -> s4.sparse) (overridden by rules above)
+

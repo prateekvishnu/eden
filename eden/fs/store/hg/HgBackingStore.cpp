@@ -213,7 +213,7 @@ SemiFuture<unique_ptr<Tree>> HgBackingStore::getRootTree(const RootId& rootId) {
   ObjectId commitId = hashFromRootId(rootId);
 
   return localStore_
-      ->getFuture(KeySpace::HgCommitToTreeFamily, commitId.getBytes())
+      ->getImmediateFuture(KeySpace::HgCommitToTreeFamily, commitId.getBytes())
       .thenValue(
           [this, commitId](
               StoreResult result) -> folly::SemiFuture<unique_ptr<Tree>> {
@@ -234,7 +234,8 @@ SemiFuture<unique_ptr<Tree>> HgBackingStore::getRootTree(const RootId& rootId) {
             auto rootTreeHash = HgProxyHash::load(
                 localStore_.get(), ObjectId{result.bytes()}, "getRootTree");
             return importTreeManifestImpl(rootTreeHash.revHash());
-          });
+          })
+      .semi();
 }
 
 SemiFuture<unique_ptr<Tree>> HgBackingStore::getTree(
@@ -257,7 +258,8 @@ Future<unique_ptr<Tree>> HgBackingStore::importTreeImpl(
   // This isn't actually present in the mercurial data store; it has to be
   // handled specially in the code.
   if (path.empty() && manifestNode == kZeroHash) {
-    auto tree = make_unique<Tree>(std::vector<TreeEntry>{}, edenTreeID);
+    auto tree = make_unique<Tree>(
+        Tree::container{kPathMapDefaultCaseSensitive}, edenTreeID);
     return makeFuture(std::move(tree));
   }
 
@@ -463,7 +465,7 @@ std::unique_ptr<Tree> HgBackingStore::processTree(
     RelativePathPiece path,
     LocalStore::WriteBatch* writeBatch) {
   auto manifest = Manifest(std::move(content));
-  std::vector<TreeEntry> entries;
+  Tree::container entries{kPathMapDefaultCaseSensitive};
   auto hgObjectIdFormat = config_->getEdenConfig()->hgObjectIdFormat.getValue();
 
   for (auto& entry : manifest) {
@@ -478,7 +480,7 @@ std::unique_ptr<Tree> HgBackingStore::processTree(
         (hgObjectIdFormat != HgObjectIdFormat::ProxyHash) ? nullptr
                                                           : writeBatch);
 
-    entries.emplace_back(proxyHash, std::move(entry.name), entry.type);
+    entries.emplace(entry.name, proxyHash, entry.type);
   }
 
   writeBatch->flush();
@@ -491,7 +493,9 @@ folly::Future<folly::Unit> HgBackingStore::importTreeManifestForRoot(
     const Hash20& manifestId) {
   auto commitId = hashFromRootId(rootId);
   return localStore_
-      ->getFuture(KeySpace::HgCommitToTreeFamily, commitId.getBytes())
+      ->getImmediateFuture(KeySpace::HgCommitToTreeFamily, commitId.getBytes())
+      .semi()
+      .via(&folly::QueuedImmediateExecutor::instance())
       .thenValue(
           [this, commitId, manifestId](
               StoreResult result) -> folly::Future<folly::Unit> {

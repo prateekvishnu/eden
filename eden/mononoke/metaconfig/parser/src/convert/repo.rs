@@ -13,20 +13,23 @@ use anyhow::{anyhow, Context, Result};
 use bookmarks_types::BookmarkName;
 use metaconfig_types::{
     BlameVersion, BookmarkOrRegex, BookmarkParams, Bundle2ReplayParams, CacheWarmupParams,
-    ComparableRegex, DeletedManifestVersion, DerivedDataConfig, DerivedDataTypesConfig, HookBypass,
-    HookConfig, HookManagerParams, HookParams, InfinitepushNamespace, InfinitepushParams,
-    LfsParams, PushParams, PushrebaseFlags, PushrebaseParams, RepoClientKnobs,
+    ComparableRegex, CrossRepoCommitValidation, DerivedDataConfig, DerivedDataTypesConfig,
+    HookBypass, HookConfig, HookManagerParams, HookParams, InfinitepushNamespace,
+    InfinitepushParams, LfsParams, PushParams, PushrebaseFlags, PushrebaseParams, RepoClientKnobs,
     SegmentedChangelogConfig, SegmentedChangelogHeadConfig, ServiceWriteRestrictions,
-    SourceControlServiceMonitoring, SourceControlServiceParams, UnodeVersion,
+    SourceControlServiceMonitoring, SourceControlServiceParams, UnodeVersion, WalkerConfig,
+    WalkerJobParams, WalkerJobType,
 };
 use mononoke_types::{ChangesetId, MPath, PrefixTrie};
 use regex::Regex;
 use repos::{
-    RawBookmarkConfig, RawBundle2ReplayParams, RawCacheWarmupConfig, RawDerivedDataConfig,
-    RawDerivedDataTypesConfig, RawHookConfig, RawHookManagerParams, RawInfinitepushParams,
-    RawLfsParams, RawPushParams, RawPushrebaseParams, RawRepoClientKnobs,
-    RawSegmentedChangelogConfig, RawSegmentedChangelogHeadConfig, RawServiceWriteRestrictions,
-    RawSourceControlServiceMonitoring, RawSourceControlServiceParams,
+    RawBookmarkConfig, RawBundle2ReplayParams, RawCacheWarmupConfig,
+    RawCrossRepoCommitValidationConfig, RawDerivedDataConfig, RawDerivedDataTypesConfig,
+    RawHookConfig, RawHookManagerParams, RawInfinitepushParams, RawLfsParams, RawPushParams,
+    RawPushrebaseParams, RawRepoClientKnobs, RawSegmentedChangelogConfig,
+    RawSegmentedChangelogHeadConfig, RawServiceWriteRestrictions,
+    RawSourceControlServiceMonitoring, RawSourceControlServiceParams, RawWalkerConfig,
+    RawWalkerJobParams, RawWalkerJobType,
 };
 
 use crate::convert::Convert;
@@ -349,12 +352,6 @@ impl Convert for RawDerivedDataTypesConfig {
             Some(2) => BlameVersion::V2,
             Some(version) => return Err(anyhow!("unknown blame version {}", version)),
         };
-        let deleted_manifest_version = match self.deleted_manifest_version {
-            None => DeletedManifestVersion::default(),
-            Some(1) => DeletedManifestVersion::V1,
-            Some(2) => DeletedManifestVersion::V2,
-            Some(version) => return Err(anyhow!("unknown deleted manifest version {}", version)),
-        };
         Ok(DerivedDataTypesConfig {
             types,
             mapping_key_prefixes,
@@ -362,7 +359,6 @@ impl Convert for RawDerivedDataTypesConfig {
             blame_filesize_limit,
             hg_set_committer_extra: self.hg_set_committer_extra.unwrap_or(false),
             blame_version,
-            deleted_manifest_version,
         })
     }
 }
@@ -471,5 +467,79 @@ impl Convert for RawSegmentedChangelogConfig {
             heads_to_include,
             extra_heads_to_include_in_background_jobs,
         })
+    }
+}
+
+impl Convert for RawWalkerJobType {
+    type Output = WalkerJobType;
+
+    fn convert(self) -> Result<Self::Output> {
+        let job_type = match self {
+            RawWalkerJobType::SCRUB_ALL_CHUNKED => WalkerJobType::ScrubAllChunked,
+            RawWalkerJobType::SCRUB_DERIVED_CHUNKED => WalkerJobType::ScrubDerivedChunked,
+            RawWalkerJobType::SCRUB_DERIVED_NO_CONTENT_META => {
+                WalkerJobType::ScrubDerivedNoContentMeta
+            }
+            RawWalkerJobType::SCRUB_DERIVED_NO_CONTENT_META_CHUNKED => {
+                WalkerJobType::ScrubDerivedNoContentMetaChunked
+            }
+            RawWalkerJobType::SCRUB_HG_ALL_CHUNKED => WalkerJobType::ScrubHgAllChunked,
+            RawWalkerJobType::SCRUB_HG_FILE_CONTENT => WalkerJobType::ScrubHgFileContent,
+            RawWalkerJobType::SCRUB_HG_FILE_NODE => WalkerJobType::ScrubHgFileNode,
+            RawWalkerJobType::SCRUB_UNODE_ALL_CHUNKED => WalkerJobType::ScrubUnodeAllChunked,
+            RawWalkerJobType::SCRUB_UNODE_BLAME => WalkerJobType::ScrubUnodeBlame,
+            RawWalkerJobType::SCRUB_UNODE_FASTLOG => WalkerJobType::ScrubUnodeFastlog,
+            RawWalkerJobType::SHALLOW_HG_SCRUB => WalkerJobType::ShallowHgScrub,
+            RawWalkerJobType::VALIDATE_ALL => WalkerJobType::ValidateAll,
+            RawWalkerJobType::UNKNOWN => WalkerJobType::Unknown,
+            v => return Err(anyhow!("Invalid value {} for enum WalkerJobType", v)),
+        };
+        Ok(job_type)
+    }
+}
+
+impl Convert for RawWalkerJobParams {
+    type Output = WalkerJobParams;
+
+    fn convert(self) -> Result<Self::Output> {
+        Ok(WalkerJobParams {
+            scheduled_max_concurrency: self.scheduled_max_concurrency,
+            qps_limit: self.qps_limit,
+            exclude_node_type: self.exclude_node_type,
+            allow_remaining_deferred: self.allow_remaining_deferred.map_or(false, |v| v),
+            error_as_node_data_type: self.error_as_node_data_type,
+        })
+    }
+}
+
+impl Convert for RawWalkerConfig {
+    type Output = WalkerConfig;
+
+    fn convert(self) -> Result<Self::Output> {
+        Ok(WalkerConfig {
+            scrub_enabled: self.scrub_enabled,
+            validate_enabled: self.validate_enabled,
+            params: self
+                .params
+                .map(|p| {
+                    p.into_iter()
+                        .map(|(k, v)| anyhow::Ok((k.convert()?, v.convert()?)))
+                        .collect::<Result<_, _>>()
+                })
+                .transpose()?,
+        })
+    }
+}
+
+impl Convert for RawCrossRepoCommitValidationConfig {
+    type Output = CrossRepoCommitValidation;
+
+    fn convert(self) -> Result<Self::Output> {
+        let skip_bookmarks = self
+            .skip_bookmarks
+            .into_iter()
+            .map(BookmarkName::new)
+            .collect::<Result<_, _>>()?;
+        Ok(CrossRepoCommitValidation { skip_bookmarks })
     }
 }

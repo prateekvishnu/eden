@@ -17,8 +17,7 @@
 #include "eden/fs/inodes/InodeOrTreeOrEntry.h"
 #include "eden/fs/utils/PathFuncs.h"
 
-namespace facebook {
-namespace eden {
+namespace facebook::eden {
 
 class CheckoutAction;
 class CheckoutContext;
@@ -221,6 +220,17 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
    * and potentially calling this function again.
    */
   ImmediateFuture<folly::Unit> removeRecursively(
+      PathComponentPiece name,
+      InvalidationRequired invalidate,
+      ObjectFetchContext& context);
+
+  /**
+   * Internal method intended for removeRecursively to use. This method does not
+   * flush invalidation so the caller won't see the up-to-date content after
+   * return. Call EdenMount::flushInvalidations to ensure any changes to the
+   * inode will be visible after it returns.
+   */
+  ImmediateFuture<folly::Unit> removeRecursivelyNoFlushInvalidation(
       PathComponentPiece name,
       InvalidationRequired invalidate,
       ObjectFetchContext& context);
@@ -444,7 +454,7 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
       InodePtr inode,
       std::shared_ptr<const Tree> oldTree,
       std::shared_ptr<const Tree> newTree,
-      const std::optional<TreeEntry>& newScmEntry);
+      const std::optional<Tree::value_type>& newScmEntry);
 
   /**
    * Returns a copy of this inode's metadata.
@@ -645,17 +655,6 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
   FOLLY_NODISCARD static int checkPreRemove(const FileInodePtr& child);
 
   /**
-   * Internal method intended for removeRecursively to use. This method does not
-   * flush invalidation so the caller won't see the up-to-date content after
-   * return. Call EdenMount::flushInvalidations to ensure any changes to the
-   * inode will be visible after it returns.
-   */
-  ImmediateFuture<folly::Unit> removeRecursivelyNoFlushInvalidation(
-      PathComponentPiece name,
-      InvalidationRequired invalidate,
-      ObjectFetchContext& context);
-
-  /**
    * This helper function starts loading a currently unloaded child inode.
    * It must be held with the contents_ lock held.  (The Dir argument is only
    * required as a parameter to ensure that the caller is actually holding the
@@ -733,8 +732,8 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
   std::unique_ptr<CheckoutAction> processCheckoutEntry(
       CheckoutContext* ctx,
       TreeInodeState& contents,
-      const TreeEntry* oldScmEntry,
-      const TreeEntry* newScmEntry,
+      const Tree::value_type* oldScmEntry,
+      const Tree::value_type* newScmEntry,
       std::vector<IncompleteInodeLoad>& pendingLoads,
       bool& wasDirectoryListModified);
   void saveOverlayPostCheckout(CheckoutContext* ctx, const Tree* tree);
@@ -791,5 +790,4 @@ std::optional<std::vector<std::string>> findEntryDifferences(
     const DirContents& dir,
     const Tree& tree);
 
-} // namespace eden
-} // namespace facebook
+} // namespace facebook::eden

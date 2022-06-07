@@ -14,7 +14,7 @@ using namespace folly::io;
 
 bool operator==(const Tree& tree1, const Tree& tree2) {
   return (tree1.getHash() == tree2.getHash()) &&
-      (tree1.getTreeEntries() == tree2.getTreeEntries());
+      (tree1.entries_ == tree2.entries_);
 }
 
 bool operator!=(const Tree& tree1, const Tree& tree2) {
@@ -30,7 +30,7 @@ size_t Tree::getSizeBytes() const {
       folly::goodMallocSize(sizeof(TreeEntry) * entries_.capacity());
 
   for (auto& entry : entries_) {
-    indirect_size += entry.getIndirectSizeBytes();
+    indirect_size += estimateIndirectMemoryUsage(entry.first.value());
   }
   return internal_size + indirect_size;
 }
@@ -38,7 +38,7 @@ size_t Tree::getSizeBytes() const {
 IOBuf Tree::serialize() const {
   size_t serialized_size = sizeof(uint32_t) + sizeof(uint32_t);
   for (auto& entry : entries_) {
-    serialized_size += entry.serializedSize();
+    serialized_size += entry.second.serializedSize(entry.first);
   }
   IOBuf buf(IOBuf::CREATE, serialized_size);
   Appender appender(&buf, 0);
@@ -49,7 +49,7 @@ IOBuf Tree::serialize() const {
   appender.write<uint32_t>(V1_VERSION);
   appender.write<uint32_t>(numberOfEntries);
   for (auto& entry : entries_) {
-    entry.serialize(appender);
+    entry.second.serialize(entry.first, appender);
   }
   return buf;
 }
@@ -76,14 +76,14 @@ std::unique_ptr<Tree> Tree::tryDeserialize(
   memcpy(&num_entries, data.data(), sizeof(uint32_t));
   data.advance(sizeof(uint32_t));
 
-  std::vector<TreeEntry> entries;
+  Tree::container entries{kPathMapDefaultCaseSensitive};
   entries.reserve(num_entries);
   for (size_t i = 0; i < num_entries; i++) {
     auto entry = TreeEntry::deserialize(data);
     if (!entry) {
       return nullptr;
     }
-    entries.push_back(*entry);
+    entries.emplace(entry->first, std::move(entry->second));
   }
 
   if (data.size() != 0u) {

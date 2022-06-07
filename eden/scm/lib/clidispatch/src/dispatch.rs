@@ -64,7 +64,7 @@ fn last_chance_to_abort(opts: &HgGlobalOpts) -> Result<()> {
     }
 
     if opts.help {
-        return Err(errors::FallbackToPython.into());
+        return Err(errors::FallbackToPython("help").into());
     }
 
     Ok(())
@@ -174,20 +174,32 @@ impl Dispatcher {
         let cwd = util::path::absolute(cwd)?;
 
         // Load repo and configuration.
-        let mut optional_repo =
-            OptionalRepo::from_repository_path_and_cwd(&global_opts.repository, &cwd)?;
-        override_config(
-            optional_repo.config_mut(),
-            &global_opts.configfile,
-            &global_opts.config,
-        )?;
+        match OptionalRepo::from_repository_path_and_cwd(&global_opts.repository, &cwd) {
+            Ok(mut optional_repo) => {
+                override_config(
+                    optional_repo.config_mut(),
+                    &global_opts.configfile,
+                    &global_opts.config,
+                )?;
 
-        Ok(Self {
-            args,
-            early_result,
-            global_opts,
-            optional_repo,
-        })
+                Ok(Self {
+                    args,
+                    early_result,
+                    global_opts,
+                    optional_repo,
+                })
+            }
+            Err(err) => {
+                // If we failed to load the repo, make one last ditch effort to load a repo-less config.
+                // This might allow us to run the network doctor even if this repo's dynamic config is not loadable.
+                if let Ok(mut config) = configparser::hg::load::<String, String>(None, None) {
+                    override_config(&mut config, &global_opts.configfile, &global_opts.config)?;
+                    Err(errors::triage_error(&config, err))
+                } else {
+                    Err(err)
+                }
+            }
+        }
     }
 
     /// Get a reference to the parsed config.
@@ -207,16 +219,37 @@ impl Dispatcher {
         }
     }
 
-    /// Run a command. Return exit code if the command completes.
-    pub fn run_command(self, command_table: &CommandTable, io: &IO) -> Result<u8> {
+    /// Return config without a repo's influence even if we are in a repo.
+    pub fn no_repo_config(self) -> Result<ConfigSet, (Error, ConfigSet)> {
+        if let OptionalRepo::None(config) = self.optional_repo {
+            return Ok(config);
+        }
+
+        self.load_repoless_config()
+            .map_err(|e| (e, self.optional_repo.take_config()))
+    }
+
+    fn load_repoless_config(&self) -> Result<ConfigSet> {
+        let mut config = configparser::hg::load::<String, String>(None, None)?;
+        override_config(
+            &mut config,
+            &self.global_opts.configfile,
+            &self.global_opts.config,
+        )?;
+        Ok(config)
+    }
+
+    fn prepare_command<'a>(
+        &self,
+        command_table: &'a CommandTable,
+        io: &IO,
+    ) -> Result<(&'a CommandDefinition, ParseOutput)> {
         let args = &self.args;
         let early_result = &self.early_result;
-        let optional_repo = self.optional_repo;
-        let config = optional_repo.config();
-        let global_opts = self.global_opts;
+        let config = self.optional_repo.config();
 
-        if !global_opts.cwd.is_empty() {
-            env::set_current_dir(global_opts.cwd)?;
+        if !self.global_opts.cwd.is_empty() {
+            env::set_current_dir(&self.global_opts.cwd)?;
         }
 
         initialize_indexedlog(&config)?;
@@ -282,26 +315,37 @@ impl Dispatcher {
         new_args.push(command_name.clone());
         new_args.extend_from_slice(&expanded[command_arg_len..]);
 
-        let full_args = new_args;
-
         let def = command_table.get(&command_name).unwrap();
-        let parsed = parse(&def, &full_args)?;
+        let parsed = parse(def, &new_args)?;
 
         let global_opts: HgGlobalOpts = parsed.clone().try_into()?;
         last_chance_to_abort(&global_opts)?;
 
-        initialize_blackbox(&optional_repo)?;
+        initialize_blackbox(&self.optional_repo)?;
 
         if global_opts.pager == "always" {
-            io.start_pager(optional_repo.config())?;
+            io.start_pager(self.optional_repo.config())?;
         }
 
-        let handler = def.func();
-        match handler {
+        Ok((def, parsed))
+    }
+
+    /// Run a command. Return exit code if the command completes.
+    pub fn run_command(
+        mut self,
+        command_table: &CommandTable,
+        io: &IO,
+    ) -> Result<u8, (ConfigSet, Error)> {
+        let (handler, parsed) = match self.prepare_command(command_table, io) {
+            Ok((name, args)) => (name, args),
+            Err(e) => return Err((self.optional_repo.take_config(), e)),
+        };
+
+        match handler.func() {
             CommandFunc::Repo(f) => {
-                match optional_repo {
-                    OptionalRepo::Some(repo) => f(parsed, io, repo),
-                    OptionalRepo::None(_config) => {
+                let res = match self.optional_repo {
+                    OptionalRepo::Some(ref mut repo) => f(parsed, io, repo),
+                    OptionalRepo::None(_) => {
                         // FIXME: Try to "infer repo" here.
                         Err(errors::RepoRequired(
                             env::current_dir()
@@ -311,12 +355,24 @@ impl Dispatcher {
                         )
                         .into())
                     }
-                }
+                };
+                res.map_err(|e| (self.optional_repo.take_config(), e))
             }
-            CommandFunc::OptionalRepo(f) => f(parsed, io, optional_repo),
-            CommandFunc::NoRepo(f) => f(parsed, io, optional_repo.take_config()),
+            CommandFunc::OptionalRepo(f) => f(parsed, io, &mut self.optional_repo)
+                .map_err(|e| (self.optional_repo.take_config(), e)),
+            CommandFunc::NoRepo(f) => {
+                let mut config = match self.no_repo_config() {
+                    Ok(config) => config,
+                    Err((e, config)) => return Err((config, e)),
+                };
+                f(parsed, io, &mut config).map_err(|e| (config, e))
+            }
             CommandFunc::NoRepoGlobalOpts(f) => {
-                f(parsed, global_opts, io, optional_repo.take_config())
+                let mut config = match self.no_repo_config() {
+                    Ok(config) => config,
+                    Err((e, config)) => return Err((config, e)),
+                };
+                f(parsed, io, &mut config).map_err(|e| (config, e))
             }
         }
     }

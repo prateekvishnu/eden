@@ -3,7 +3,7 @@
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2.
 
-# Copyright Matt Mackall <mpm@selenic.com> and others
+# Copyright Olivia Mackall <olivia@selenic.com> and others
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -84,8 +84,7 @@ ispypy = "PyPy" in sys.version
 
 
 import distutils
-from distutils import file_util
-from distutils import log
+from distutils import file_util, log
 from distutils.ccompiler import new_compiler
 from distutils.command.build import build
 from distutils.command.build_ext import build_ext
@@ -94,16 +93,15 @@ from distutils.command.build_scripts import build_scripts
 from distutils.command.install import install
 from distutils.command.install_lib import install_lib
 from distutils.command.install_scripts import install_scripts
-from distutils.core import Command, Extension
-from distutils.core import setup
+from distutils.core import Command, Extension, setup
 from distutils.dir_util import copy_tree
 from distutils.dist import Distribution
 from distutils.errors import CCompilerError, DistutilsExecError
-from distutils.spawn import spawn, find_executable
+from distutils.spawn import find_executable, spawn
 from distutils.sysconfig import get_config_var
 from distutils.version import StrictVersion
 
-from distutils_rust import RustBinary, RustExtension, BuildRustExt, InstallRustExt
+from distutils_rust import BuildRustExt, InstallRustExt, RustBinary, RustExtension
 
 havefb = os.path.exists("fb")
 isgetdepsbuild = os.environ.get("GETDEPS_BUILD") == "1"
@@ -943,6 +941,10 @@ class buildembedded(Command):
             # copy .pyd's from ./build/lib.win-amd64/, not from ./
             parentdir = pjoin(scriptdir, "build", distutils_dir_name("lib"))
         copy_to(pjoin(parentdir, "edenscmnative"), pjoin(dirforexts, "edenscmnative"))
+        # copy the conch_parser extension, not living in the edenscmnative directory
+        for pattern in ["*.pyd", "*.so"]:
+            for path in glob.glob(pjoin(parentdir, pattern)):
+                copy_to(path, dirforexts)
 
     def _zip_pyc_files(self, zipname):
         """Modify a zip archive to include edenscm .pyc files"""
@@ -1330,8 +1332,6 @@ packages = [
     "edenscm.hgext.absorb",
     "edenscm.hgext.amend",
     "edenscm.hgext.commitcloud",
-    "edenscm.hgext.convert",
-    "edenscm.hgext.convert.repo",
     "edenscm.hgext.extlib",
     "edenscm.hgext.extlib.phabricator",
     "edenscm.hgext.extlib.pywatchman",
@@ -1810,7 +1810,7 @@ if havefb and iswindows:
 setup(
     name="edenscm",
     version=setupversion,
-    author="Matt Mackall and many others",
+    author="Olivia Mackall and many others",
     author_email="mercurial@mercurial-scm.org",
     url="https://mercurial-scm.org/",
     download_url="https://mercurial-scm.org/release/",

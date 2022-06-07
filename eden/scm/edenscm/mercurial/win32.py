@@ -5,7 +5,7 @@
 
 # win32.py - utility functions that use win32 API
 #
-# Copyright 2005-2009 Matt Mackall <mpm@selenic.com> and others
+# Copyright 2005-2009 Olivia Mackall <olivia@selenic.com> and others
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -391,7 +391,7 @@ def _raiseoserror(name):
     # See https://bugs.python.org/issue28474
     code = _kernel32.GetLastError()
     if code > 0x7FFFFFFF:
-        code -= 2 ** 32
+        code -= 2**32
     err = ctypes.WinError(code=code)
     raise OSError(err.errno, "%s: %s" % (name, encoding.strtolocal(err.strerror)))
 

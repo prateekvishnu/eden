@@ -25,8 +25,7 @@
 #include <sys/vfs.h>
 #endif
 
-namespace facebook {
-namespace eden {
+namespace facebook::eden {
 
 namespace overlay {
 class OverlayDir;
@@ -196,6 +195,8 @@ class FsOverlay : public IOverlay {
 
   bool hasOverlayData(InodeNumber inodeNumber) override;
 
+  void maintenance() override {}
+
   static constexpr folly::StringPiece kMetadataFile{"metadata.table"};
 
   /**
@@ -282,5 +283,4 @@ class InodePath {
   std::array<char, kMaxPathLength> path_;
 };
 
-} // namespace eden
-} // namespace facebook
+} // namespace facebook::eden

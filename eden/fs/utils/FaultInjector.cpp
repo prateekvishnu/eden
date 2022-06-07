@@ -15,8 +15,7 @@ using folly::SemiFuture;
 using folly::StringPiece;
 using folly::Unit;
 
-namespace facebook {
-namespace eden {
+namespace facebook::eden {
 
 FaultInjector::Fault::Fault(StringPiece regex, FaultBehavior&& b, size_t count)
     : keyValueRegex(regex.begin(), regex.end()),
@@ -39,7 +38,7 @@ SemiFuture<Unit> FaultInjector::checkAsyncImpl(
     StringPiece keyClass,
     StringPiece keyValue) {
   auto behavior = findFault(keyClass, keyValue);
-  return boost::apply_visitor(
+  return std::visit(
       folly::overload(
           [&](const Unit&) { return folly::makeSemiFuture(); },
           [&](const FaultInjector::Block&) {
@@ -65,7 +64,7 @@ SemiFuture<Unit> FaultInjector::checkAsyncImpl(
 
 void FaultInjector::checkImpl(StringPiece keyClass, StringPiece keyValue) {
   auto behavior = findFault(keyClass, keyValue);
-  boost::apply_visitor(
+  std::visit(
       folly::overload(
           [](const Unit&) {},
           [&](const FaultInjector::Block&) {
@@ -321,7 +320,7 @@ std::vector<FaultInjector::BlockedCheck> FaultInjector::extractBlockedChecks(
 
 size_t FaultInjector::unblockAllImpl(
     std::optional<folly::exception_wrapper> error) {
-  folly::StringKeyedUnorderedMap<std::vector<BlockedCheck>> blockedChecks;
+  folly::F14NodeMap<std::string, std::vector<BlockedCheck>> blockedChecks;
   {
     auto state = state_.wlock();
     state->blockedChecks.swap(blockedChecks);
@@ -341,5 +340,4 @@ size_t FaultInjector::unblockAllImpl(
   return numUnblocked;
 }
 
-} // namespace eden
-} // namespace facebook
+} // namespace facebook::eden

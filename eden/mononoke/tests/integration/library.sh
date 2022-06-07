@@ -107,6 +107,10 @@ function mononoke_address {
   fi
 }
 
+function scs_address {
+  echo -n "$(mononoke_host):$SCS_PORT"
+}
+
 # return random value from [1, max_value]
 function random_int() {
   max_value=$1
@@ -1064,10 +1068,6 @@ types=["blame", "changeset_info", "deleted_manifest", "fastlog", "filenodes", "f
 CONFIG
 fi
 
-cat >> "repos/$reponame/server.toml" <<CONFIG
-deleted_manifest_version = 2
-CONFIG
-
 if [[ -n "${BLAME_VERSION}" ]]; then
   cat >> "repos/$reponame/server.toml" <<CONFIG
 blame_version = $BLAME_VERSION
@@ -1220,24 +1220,29 @@ function s_client {
         -ign_eof "$@"
 }
 
-function start_and_wait_for_scs_server {
-  export SCS_PORT
-  local SCS_SERVER_ADDR_FILE
-  SCS_SERVER_ADDR_FILE="$TESTTMP/scs_server_addr.txt"
-  rm -f "$SCS_SERVER_ADDR_FILE"
+function scs {
+  rm -f "$TESTTMP/scs_server_addr.txt"
   GLOG_minloglevel=5 "$SCS_SERVER" "$@" \
     --host "$LOCALIP" \
     --port 0 \
     --log-level DEBUG \
     --mononoke-config-path "$TESTTMP/mononoke-config" \
-    --bound-address-file "$SCS_SERVER_ADDR_FILE" \
+    --bound-address-file "$TESTTMP/scs_server_addr.txt" \
     "${COMMON_ARGS[@]}" >> "$TESTTMP/scs_server.out" 2>&1 &
   export SCS_SERVER_PID=$!
   echo "$SCS_SERVER_PID" >> "$DAEMON_PIDS"
+}
 
+function wait_for_scs {
+  export SCS_PORT
   wait_for_server "SCS server" SCS_PORT "$TESTTMP/scs_server.out" \
-    "${MONONOKE_SCS_START_TIMEOUT:-"$MONONOKE_SCS_DEFAULT_START_TIMEOUT"}" "$SCS_SERVER_ADDR_FILE" \
+    "${MONONOKE_SCS_START_TIMEOUT:-"$MONONOKE_SCS_DEFAULT_START_TIMEOUT"}" "$TESTTMP/scs_server_addr.txt" \
     scsc repos
+}
+
+function start_and_wait_for_scs_server {
+  scs "$@"
+  wait_for_scs
 }
 
 function megarepo_async_worker {
@@ -1313,7 +1318,10 @@ function lfs_server {
         --tls-ticket-seeds "$TEST_CERTDIR/server.pem.seeds"
       )
       shift
-    elif [[ "$1" = "--always-wait-for-upstream" ]]; then
+    elif
+      [[ "$1" = "--always-wait-for-upstream" ]] ||
+      [[ "$1" = "--git-blob-upload-allowed" ]]
+    then
       opts=("${opts[@]}" "$1")
       shift
     elif
@@ -1890,14 +1898,6 @@ function background_segmented_changelog_tailer() {
 function microwave_builder() {
   "$MONONOKE_MICROWAVE_BUILDER" \
     "${COMMON_ARGS[@]}" \
-    --mononoke-config-path "${TESTTMP}/mononoke-config" \
-    "$@"
-}
-
-function unbundle_replay() {
-  "$MONONOKE_UNBUNDLE_REPLAY" \
-    "${COMMON_ARGS[@]}" \
-    --repo-id "$REPOID" \
     --mononoke-config-path "${TESTTMP}/mononoke-config" \
     "$@"
 }

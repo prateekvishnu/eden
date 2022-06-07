@@ -33,6 +33,8 @@ def testsetup(t: TestTmp):
     testfile = t.getenv("TESTFILE")
     testdir = t.getenv("TESTDIR")
     featurespy = os.path.join(testdir, "features.py")
+
+    inprocesshg = True
     if os.path.exists(featurespy):
         with open(featurespy, "r") as f:
             globalenv = {}
@@ -41,6 +43,7 @@ def testsetup(t: TestTmp):
             if setup:
                 testname = os.path.basename(testfile)
                 setup(testname, str(hgrcpath))
+                inprocesshg = globalenv.get("inprocesshg", inprocesshg)
 
     # the 'f' utility in $TESTDIR/f
     fpath = os.path.join(testdir, "f")
@@ -59,6 +62,14 @@ def testsetup(t: TestTmp):
                 return int(e.code)
             else:
                 return 0
+
+    # extra pattern substitutions in $TESTDIR/common-pattern.py
+    fpath = os.path.join(testdir, "common-pattern.py")
+    if os.path.exists(fpath):
+        t.substitutions += _execpython(fpath).get("substitutions") or []
+    t.substitutions += [
+        (r"\bHG_TXNID=TXN:[a-f0-9]{40}\b", r"HG_TXNID=TXN:$ID$"),
+    ]
 
     environ = {
         "CHGDISABLE": "0",
@@ -119,7 +130,7 @@ def testsetup(t: TestTmp):
 
     # change the 'hg' shell command to run inline without spawning
     # (about 2x faster than chg)
-    if run is not None:
+    if run is not None and inprocesshg:
         t.command(hg)
 
 
@@ -149,7 +160,7 @@ def hg(stdin: BinaryIO, stdout: BinaryIO, stderr: BinaryIO, env: Env) -> int:
         return python(args, stdin, stdout, stderr, env)
 
     import bindings
-    from edenscm.mercurial import encoding, pycompat, util, extensions
+    from edenscm.mercurial import encoding, extensions, pycompat, util
 
     # emulate ui.system via sheval
     rawsystem = partial(_rawsystem, env, stdin, stdout, stderr)

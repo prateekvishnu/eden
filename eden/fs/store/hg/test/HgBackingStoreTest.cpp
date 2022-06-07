@@ -25,6 +25,7 @@
 #include "eden/fs/telemetry/EdenStats.h"
 #include "eden/fs/telemetry/NullStructuredLogger.h"
 #include "eden/fs/testharness/HgRepo.h"
+#include "eden/fs/utils/ImmediateFuture.h"
 
 using namespace facebook::eden;
 using namespace std::chrono_literals;
@@ -49,7 +50,7 @@ struct TestRepo {
     repo.writeFile("foo/bar.txt", "bar\n");
     repo.mkdir("src");
     repo.writeFile("src/hello.txt", "world\n");
-    repo.hg("add");
+    repo.hg("add", "foo", "src");
     commit1 = repo.commit("Initial commit");
     manifest1 = repo.getManifestForCommit(commit1);
   }
@@ -67,10 +68,10 @@ struct HgBackingStoreTest : TestRepo, ::testing::Test {
         backingStore,
         treeCache,
         stats,
-        &folly::QueuedImmediateExecutor::instance(),
         std::make_shared<ProcessNameCache>(),
         std::make_shared<NullStructuredLogger>(),
-        rawEdenConfig);
+        rawEdenConfig,
+        kPathMapDefaultCaseSensitive);
   }
 
   std::shared_ptr<MemoryLocalStore> localStore{
@@ -102,8 +103,8 @@ namespace {
 std::vector<PathComponent> getTreeNames(
     const std::shared_ptr<const Tree>& tree) {
   std::vector<PathComponent> names;
-  for (const auto& entry : tree->getTreeEntries()) {
-    names.emplace_back(entry.getName());
+  for (const auto& entry : *tree) {
+    names.emplace_back(entry.first);
   }
   return names;
 }

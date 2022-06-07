@@ -36,6 +36,7 @@ use maplit::hashset;
 use mononoke_types::BlobstoreBytes;
 use samplingblob::SamplingHandler;
 use slog::info;
+use std::sync::atomic::AtomicBool;
 use std::{
     cmp::min,
     collections::{HashMap, HashSet},
@@ -296,6 +297,7 @@ pub async fn compression_benefit(
     fb: FacebookInit,
     job_params: JobParams,
     command: SizingCommand,
+    cancellation_requested: Arc<AtomicBool>,
 ) -> Result<(), Error> {
     let JobParams {
         walk_params,
@@ -308,7 +310,14 @@ pub async fn compression_benefit(
 
         command.apply_repo(&repo_params);
 
-        let walk = run_one(fb, walk_params, sub_params, repo_params, command);
+        let walk = run_one(
+            fb,
+            walk_params,
+            sub_params,
+            repo_params,
+            command,
+            Arc::clone(&cancellation_requested),
+        );
         all_walks.push(walk);
     }
     try_join_all(all_walks).await.map(|_| ())
@@ -320,6 +329,7 @@ async fn run_one(
     sub_params: RepoSubcommandParams,
     repo_params: RepoWalkParams,
     command: SizingCommand,
+    cancellation_requested: Arc<AtomicBool>,
 ) -> Result<(), Error> {
     let sizing_progress_state =
         ProgressStateMutex::new(ProgressStateCountByType::<SizingStats, SizingStats>::new(
@@ -388,6 +398,7 @@ async fn run_one(
         sub_params.tail_params,
         walk_state,
         make_sink,
+        cancellation_requested,
     )
     .await
 }

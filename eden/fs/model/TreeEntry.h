@@ -13,12 +13,14 @@
 #include "eden/fs/utils/PathFuncs.h"
 
 #include <folly/String.h>
+#include <folly/Try.h>
 #include <folly/io/Cursor.h>
 #include <folly/io/IOBuf.h>
 #include <iosfwd>
 #include <optional>
 
 namespace facebook::eden {
+class BlobMetadata;
 
 /**
  * Represents the allowed types of entries in version control trees.
@@ -30,6 +32,20 @@ enum class TreeEntryType : uint8_t {
   REGULAR_FILE,
   EXECUTABLE_FILE,
   SYMLINK,
+};
+
+class EntryAttributes {
+ public:
+  EntryAttributes(
+      folly::Try<Hash20> contentsHash,
+      folly::Try<uint64_t> fileLength,
+      folly::Try<TreeEntryType> fileType);
+
+  EntryAttributes(BlobMetadata blobMetadata, TreeEntryType fileType);
+
+  folly::Try<Hash20> sha1;
+  folly::Try<uint64_t> size;
+  folly::Try<TreeEntryType> type;
 };
 
 /**
@@ -45,30 +61,21 @@ std::optional<TreeEntryType> treeEntryTypeFromMode(mode_t mode);
 
 class TreeEntry {
  public:
-  explicit TreeEntry(
-      const ObjectId& hash,
-      PathComponent name,
-      TreeEntryType type)
-      : type_(type), hash_(hash), name_(std::move(name)) {}
+  explicit TreeEntry(const ObjectId& hash, TreeEntryType type)
+      : type_(type), hash_(std::move(hash)) {}
 
   explicit TreeEntry(
       const ObjectId& hash,
-      PathComponent name,
       TreeEntryType type,
       std::optional<uint64_t> size,
       std::optional<Hash20> contentSha1)
       : type_(type),
-        hash_(hash),
-        name_(std::move(name)),
+        hash_(std::move(hash)),
         size_(size),
         contentSha1_(contentSha1) {}
 
   const ObjectId& getHash() const {
     return hash_;
-  }
-
-  const PathComponent& getName() const {
-    return name_;
   }
 
   bool isTree() const {
@@ -108,7 +115,7 @@ class TreeEntry {
     }
   }
 
-  std::string toLogString() const;
+  std::string toLogString(PathComponentPiece name) const;
 
   const std::optional<uint64_t>& getSize() const {
     return size_;
@@ -119,30 +126,24 @@ class TreeEntry {
   }
 
   /**
-   * An estimate of the memory footprint of this treeEntry outside of the data
-   * directly stored in this object.
-   */
-  size_t getIndirectSizeBytes() const;
-
-  /**
    * Computes exact serialized size of this entry.
    */
-  size_t serializedSize() const;
+  size_t serializedSize(PathComponentPiece name) const;
 
   /**
    * Serializes entry into appender, consuming exactly serializedSize() bytes.
    */
-  void serialize(folly::io::Appender& appender) const;
+  void serialize(PathComponentPiece name, folly::io::Appender& appender) const;
 
   /**
    * Deserialize tree entry.
    */
-  static std::optional<TreeEntry> deserialize(folly::StringPiece& data);
+  static std::optional<std::pair<PathComponent, TreeEntry>> deserialize(
+      folly::StringPiece& data);
 
  private:
   TreeEntryType type_;
   ObjectId hash_;
-  PathComponent name_;
   std::optional<uint64_t> size_;
   std::optional<Hash20> contentSha1_;
 

@@ -12,6 +12,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::filestate::FileStateV2;
+use crate::filestate::StateFlags;
 use crate::filestore::FileStore;
 use crate::serialization::Serializable;
 use crate::store::BlockId;
@@ -63,6 +64,10 @@ impl TreeState {
                 Ok(TreeState { store, tree, root })
             }
         }
+    }
+
+    pub fn path(&self) -> &Path {
+        self.store.path()
     }
 
     /// Flush dirty entries. Return new `root_id` that can be passed to `open`.
@@ -157,6 +162,23 @@ impl TreeState {
             .visit_advanced(&self.store, visitor, visit_dir, visit_file)
     }
 
+    pub fn visit_by_state(&mut self, state_required_any: StateFlags) -> Result<Vec<Vec<u8>>> {
+        let mut result = Vec::new();
+        self.visit(
+            &mut |path_components, _| {
+                result.push(path_components.concat());
+                Ok(VisitorResult::NotChanged)
+            },
+            &|_, dir| match dir.get_aggregated_state() {
+                None => true,
+                Some(aggregated_state) => aggregated_state.union.intersects(state_required_any),
+            },
+            &|_, file| file.state.intersects(state_required_any),
+        )?;
+
+        Ok(result)
+    }
+
     pub fn get_filtered_key<F>(
         &mut self,
         name: KeyRef,
@@ -183,6 +205,58 @@ impl TreeState {
     {
         self.tree
             .path_complete(&self.store, prefix, full_paths, acceptable, visitor)
+    }
+
+    // Distrust changed files with a mtime of `fsnow`. Rewrite their mtime to -1.
+    // See mercurial/pure/parsers.py:pack_dirstate in core Mercurial for motivation.
+    // Basically, this is required for the following case:
+    //
+    // $ hg update rev; write foo; hg commit -m update-foo
+    //
+    //   Time (second) | 0   | 1           |
+    //   hg update       ...----|
+    //   write foo               |--|
+    //   hg commit                   |---...
+    //
+    // If "write foo" changes a file without changing its mtime and size, the file
+    // change won't be detected. Therefore if mtime is `fsnow`, reset it to a different
+    // value and mark it as NEED_CHECK, at the end of update to workaround the issue.
+    // Here, hg assumes nobody else is touching the working copy when it holds wlock
+    // (ex. during second 0).
+    //
+    // This is used before "flush" or "saveas".
+    //
+    // Note: In TreeState's case, NEED_CHECK might mean "perform a quick mtime check",
+    // or "perform a content check" depending on the caller. Be careful when removing
+    // "mtime = -1" statement.
+    pub fn invalidate_mtime(&mut self, now: i32) -> Result<()> {
+        self.visit(
+            &mut |_, state| {
+                if state.mtime >= now {
+                    state.mtime = -1;
+                    state.state |= StateFlags::NEED_CHECK;
+                    Ok(VisitorResult::Changed)
+                } else {
+                    Ok(VisitorResult::NotChanged)
+                }
+            },
+            &|_, dir| {
+                if !dir.is_changed() {
+                    false
+                } else {
+                    match dir.get_aggregated_state() {
+                        Some(x) => x
+                            .union
+                            .intersects(StateFlags::EXIST_P1 | StateFlags::EXIST_P2),
+                        None => true,
+                    }
+                }
+            },
+            &|_, file| {
+                file.state
+                    .intersects(StateFlags::EXIST_P1 | StateFlags::EXIST_P2)
+            },
+        )
     }
 }
 
@@ -336,23 +410,6 @@ mod tests {
         assert!(!state.has_dir(b"rust/radixbuf/.git2/objects/").unwrap());
     }
 
-    fn visit_all(tree: &mut TreeState, state_required_any: StateFlags) -> Vec<Vec<u8>> {
-        let mut result = Vec::new();
-        tree.visit(
-            &mut |ref path_components, _| {
-                result.push(path_components.concat());
-                Ok(VisitorResult::NotChanged)
-            },
-            &|_, dir| match dir.get_aggregated_state() {
-                None => true,
-                Some(aggregated_state) => aggregated_state.union.intersects(state_required_any),
-            },
-            &|_, file| file.state.intersects(state_required_any),
-        )
-        .expect("visit");
-        result
-    }
-
     #[test]
     fn test_visit_query_by_flags() {
         let dir = TempDir::new("treestate").expect("tempdir");
@@ -366,10 +423,10 @@ mod tests {
         file.state = StateFlags::COPIED | StateFlags::EXIST_P2;
         state.insert(b"a/c/3", &file).expect("insert");
 
-        let files = visit_all(&mut state, StateFlags::IGNORED);
+        let files = state.visit_by_state(StateFlags::IGNORED).unwrap();
         assert_eq!(files, vec![b"a/b/1", b"a/b/2"]);
 
-        let files = visit_all(&mut state, StateFlags::EXIST_P2);
+        let files = state.visit_by_state(StateFlags::EXIST_P2).unwrap();
         assert_eq!(files, vec![b"a/b/2", b"a/c/3"]);
     }
 
@@ -429,7 +486,7 @@ mod tests {
                         &|_, _| true,
                     )
                     .expect("visit");
-                let files = visit_all(&mut state, bit);
+                let files = state.visit_by_state(bit).unwrap();
                 assert_eq!(files, expected);
             }
         }

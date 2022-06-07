@@ -8,8 +8,10 @@ edition = "2021"
 license = "GPLv2+"
 
 [dependencies]
+acl_regions = { version = "0.1.0", path = "../acl_regions" }
 anyhow = "1.0.56"
-async-trait = "0.1.52"
+async-recursion = "0.3.2"
+async-trait = "0.1.56"
 blame = { version = "0.1.0", path = "../derived_data/blame" }
 blobrepo = { version = "0.1.0", path = "../blobrepo" }
 blobrepo_hg = { version = "0.1.0", path = "../blobrepo/blobrepo_hg" }
@@ -26,7 +28,7 @@ chrono = { version = "0.4", features = ["clock", "serde", "std"], default-featur
 cloned = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 context = { version = "0.1.0", path = "../server/context" }
 cross_repo_sync = { version = "0.1.0", path = "../commit_rewriting/cross_repo_sync" }
-deleted_files_manifest = { version = "0.1.0", path = "../derived_data/deleted_files_manifest" }
+deleted_manifest = { version = "0.1.0", path = "../derived_data/deleted_manifest" }
 derived_data = { version = "0.1.0", path = "../derived_data" }
 derived_data_manager = { version = "0.1.0", path = "../derived_data/manager" }
 edenapi_types = { version = "0.1.0", path = "../../scm/lib/edenapi/types" }
@@ -72,6 +74,7 @@ skeleton_manifest = { version = "0.1.0", path = "../derived_data/skeleton_manife
 skiplist = { version = "0.1.0", path = "../reachabilityindex/skiplist" }
 slog = { version = "2.7", features = ["max_level_trace", "nested-values"] }
 sorted_vector_map = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
+sparse = { version = "0.1.0", path = "../../scm/lib/sparse" }
 sql_construct = { version = "0.1.0", path = "../common/sql_construct" }
 sql_ext = { version = "0.1.0", path = "../common/rust/sql_ext" }
 stats = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
@@ -90,6 +93,6 @@ cross_repo_sync_test_utils = { version = "0.1.0", path = "../commit_rewriting/cr
 derived_data_utils = { version = "0.1.0", path = "../derived_data/utils" }
 fbinit-tokio = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 fixtures = { version = "0.1.0", path = "../tests/fixtures" }
-pretty_assertions = "0.6"
+pretty_assertions = { version = "1.2", features = ["alloc"], default-features = false }
 test_repo_factory = { version = "0.1.0", path = "../repo_factory/test_repo_factory" }
 tests_utils = { version = "0.1.0", path = "../tests/utils" }

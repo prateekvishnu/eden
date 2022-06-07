@@ -32,7 +32,7 @@ define_flags! {
     }
 }
 
-pub fn run(opts: StatusOpts, io: &IO, repo: Repo) -> Result<u8> {
+pub fn run(opts: StatusOpts, io: &IO, repo: &mut Repo) -> Result<u8> {
     let repopath = repo.path();
     let config = repo.config();
 
@@ -82,4 +82,8 @@ pub fn name() -> &'static str {
 
 pub fn doc() -> &'static str {
     "pull a repository using segmented changelog. This command does not do discovery and requrires specifying old/new master revisions"
+}
+
+pub fn synopsis() -> Option<&'static str> {
+    None
 }

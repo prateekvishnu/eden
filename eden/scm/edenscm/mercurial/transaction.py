@@ -11,7 +11,7 @@
 # effectively log-structured, this should amount to simply truncating
 # anything that isn't referenced in the changelog.
 #
-# Copyright 2005, 2006 Matt Mackall <mpm@selenic.com>
+# Copyright 2005, 2006 Olivia Mackall <olivia@selenic.com>
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -21,9 +21,9 @@ from __future__ import absolute_import
 import errno
 import functools
 
-from . import encoding, error, pycompat, util, json
+from . import encoding, error, json, pycompat, util
 from .i18n import _
-from .node import hex, bin
+from .node import bin, hex
 from .pycompat import decodeutf8, encodeutf8
 
 

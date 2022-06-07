@@ -22,6 +22,10 @@ use mercurial_mutation::HgMutationStoreRef;
 use metaconfig_types::{BookmarkAttrs, InfinitepushParams, PushParams, PushrebaseParams};
 use mononoke_types::{BonsaiChangeset, ChangesetId};
 use pushrebase::PushrebaseError;
+#[cfg(fbcode_build)]
+use pushrebase_client::SCSPushrebaseClient;
+use pushrebase_client::{LocalPushrebaseClient, PushrebaseClient};
+
 use reachabilityindex::LeastCommonAncestorsHint;
 use repo_identity::RepoIdentityRef;
 use repo_read_write_status::RepoReadWriteFetcher;
@@ -505,6 +509,14 @@ async fn run_bookmark_only_pushrebase(
     })
 }
 
+fn should_use_scs() -> bool {
+    let pct = tunables()
+        .get_pushrebase_redirect_to_scs_pct()
+        .clamp(0, 100) as f64
+        / 100.0;
+    cfg!(fbcode_build) && rand::random::<f64>() < pct
+}
+
 async fn normal_pushrebase<'a>(
     ctx: &'a CoreContext,
     repo: &'a impl Repo,
@@ -521,23 +533,37 @@ async fn normal_pushrebase<'a>(
     cross_repo_push_source: CrossRepoPushSource,
     readonly_fetcher: &RepoReadWriteFetcher,
 ) -> Result<(ChangesetId, Vec<pushrebase::PushrebaseChangesetPair>), BundleResolverError> {
-    match bookmarks_movement::PushrebaseOntoBookmarkOp::new(bookmark, changesets)
-        .only_if_public()
-        .with_pushvars(maybe_pushvars)
-        .with_hg_replay_data(maybe_hg_replay_data.as_ref())
-        .with_push_source(cross_repo_push_source)
-        .run(
+    let repo_name = repo.repo_identity().name().to_string();
+    let result = if should_use_scs() {
+        #[cfg(fbcode_build)]
+        {
+            if let Ok(host_port) = std::env::var("SCS_SERVER_HOST_PORT") {
+                SCSPushrebaseClient::from_host_port(ctx.fb, host_port)?
+            } else {
+                SCSPushrebaseClient::new(ctx.fb)?
+            }
+            .pushrebase(repo_name, bookmark, changesets, maybe_pushvars)
+            .await
+        }
+        #[cfg(not(fbcode_build))]
+        unreachable!()
+    } else {
+        LocalPushrebaseClient {
             ctx,
             repo,
-            lca_hint,
-            infinitepush_params,
             pushrebase_params,
+            lca_hint,
+            maybe_hg_replay_data,
             bookmark_attrs,
+            infinitepush_params,
             hook_manager,
+            cross_repo_push_source,
             readonly_fetcher,
-        )
+        }
+        .pushrebase(repo_name, bookmark, changesets, maybe_pushvars)
         .await
-    {
+    };
+    match result {
         Ok(outcome) => Ok((outcome.head, outcome.rebased_changesets)),
         Err(err) => match err {
             BookmarkMovementError::PushrebaseError(PushrebaseError::Conflicts(conflicts)) => {

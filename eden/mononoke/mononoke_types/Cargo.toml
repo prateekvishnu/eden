@@ -13,7 +13,7 @@ abomonation_derive = "0.5"
 anyhow = "1.0.56"
 ascii = "1.0"
 async-recursion = "0.3.2"
-async-trait = "0.1.52"
+async-trait = "0.1.56"
 bincode = "1.3.3"
 bit-set = "0.5"
 blake2 = "0.9"
@@ -24,7 +24,7 @@ bytes = { version = "1.1", features = ["serde"] }
 chrono = { version = "0.4", features = ["clock", "serde", "std"], default-features = false }
 chrono-english = { git = "https://github.com/tiamunley/chrono-english.git", rev = "19f055d9290ab39032951f5ccd213d616cd8af85" }
 context = { version = "0.1.0", path = "../server/context" }
-derivative = "2.1"
+derivative = "2.2"
 edenapi_types = { version = "0.1.0", path = "../../scm/lib/edenapi/types" }
 faster-hex = "0.6.1"
 fbthrift = { version = "0.0.1+unstable", git = "https://github.com/facebook/fbthrift.git", branch = "main" }
@@ -52,7 +52,7 @@ xdiff = { version = "0.1.0", path = "../../scm/lib/xdiff" }
 fbinit = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 fbinit-tokio = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 memblob = { version = "0.1.0", path = "../blobstore/memblob" }
-pretty_assertions = "0.6"
+pretty_assertions = { version = "1.2", features = ["alloc"], default-features = false }
 quickcheck_async = "0.1.1"
 serde_json = { version = "1.0.79", features = ["float_roundtrip", "unbounded_depth"] }
 tokio = { version = "1.15", features = ["full", "test-util", "tracing"] }

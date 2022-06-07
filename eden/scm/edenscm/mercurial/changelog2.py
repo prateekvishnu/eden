@@ -23,10 +23,10 @@ from . import (
     revlog,
     smartset,
     util,
-    visibility,
     vfs as vfsmod,
+    visibility,
 )
-from .changelog import changelogrevision, hgcommittext, gitcommittext, readfiles
+from .changelog import changelogrevision, gitcommittext, hgcommittext, readfiles
 from .i18n import _
 from .node import hex, nullid, nullrev, wdirid, wdirrev
 from .pycompat import encodeutf8
@@ -816,18 +816,15 @@ def migratetolazy(repo):
     if repo.changelog.algorithmbackend == "revlog":
         migratetodoublewrite(repo)
 
-    if (
-        not any(
-            s in repo.storerequirements
-            for s in (
-                "lazytextchangelog",
-                "hybridchangelog",
-                "doublewritechangelog",
-                "lazytext",
-            )
+    if not any(
+        s in repo.storerequirements
+        for s in (
+            "lazytextchangelog",
+            "hybridchangelog",
+            "doublewritechangelog",
+            "lazytext",
         )
-        and not _isempty(repo)
-    ):
+    ) and not _isempty(repo):
         raise error.Abort(
             _(
                 "lazy backend can only be migrated from hybrid or doublewrite, or lazytext"

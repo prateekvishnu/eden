@@ -6,6 +6,7 @@
  */
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -14,8 +15,10 @@ use clidispatch::errors;
 use clidispatch::global_flags::HgGlobalOpts;
 use cliparser::define_flags;
 use edenapi::Builder;
+use migration::feature::deprecate;
 use repo::constants::HG_PATH;
 use repo::repo::Repo;
+use types::HgId;
 
 use super::ConfigSet;
 use super::Result;
@@ -33,7 +36,7 @@ define_flags! {
         #[short('u')]
         updaterev: String,
 
-        /// include the specified changeset
+        /// include the specified changeset (DEPRECATED)
         #[short('r')]
         rev: String,
 
@@ -50,13 +53,16 @@ define_flags! {
         git: bool,
 
         /// enable a sparse profile
-        enable_profile: String,
+        enable_profile: Vec<String>,
 
-        /// files to include in a sparse profile
+        /// files to include in a sparse profile (DEPRECATED)
         include: String,
 
-        /// files to exclude in a sparse profile
+        /// files to exclude in a sparse profile (DEPRECATED)
         exclude: String,
+
+        /// use EdenFs (EXPERIMENTAL)
+        eden: bool,
 
         #[arg]
         source: String,
@@ -69,55 +75,90 @@ define_flags! {
 pub fn run(
     mut clone_opts: CloneOpts,
     global_opts: HgGlobalOpts,
-    _io: &IO,
-    mut config: ConfigSet,
+    io: &IO,
+    config: &mut ConfigSet,
 ) -> Result<u8> {
-    if !config.get_or_default::<bool>("clone", "use-rust")? {
-        return Err(errors::FallbackToPython.into());
+    let deprecated_options = [
+        ("--rev", "rev-option", clone_opts.rev.is_empty()),
+        (
+            "--include",
+            "clone-include-option",
+            clone_opts.include.is_empty(),
+        ),
+        (
+            "--exclude",
+            "clone-exclude-option",
+            clone_opts.exclude.is_empty(),
+        ),
+    ];
+    for (option_name, option_config, option_is_empty) in deprecated_options {
+        if !option_is_empty {
+            deprecate(
+                config,
+                option_config,
+                format!("the {} option has been deprecated", option_name),
+            )?;
+        }
     }
 
-    if !clone_opts.noupdate
-        || !clone_opts.updaterev.is_empty()
+    let force_rust = config
+        .get_or_default::<Vec<String>>("commands", "force-rust")?
+        .contains(&name().to_owned());
+    let use_rust = force_rust || config.get_or_default("clone", "use-rust")?;
+    if !use_rust {
+        return Err(errors::FallbackToPython(name()).into());
+    }
+
+    if !clone_opts.updaterev.is_empty()
         || !clone_opts.rev.is_empty()
         || clone_opts.pull
         || clone_opts.stream
         || !clone_opts.shallow
         || clone_opts.git
-        || !clone_opts.enable_profile.is_empty()
-        || !clone_opts.include.is_empty()
-        || !clone_opts.exclude.is_empty()
+        || clone_opts.eden
     {
-        return Err(errors::FallbackToPython.into());
+        return Err(errors::FallbackToPython(name()).into());
     }
 
-    // Rust clone only supports segmented changelog clone
-    // TODO: add binding for python streaming revlog download
     config.set(
         "paths",
         "default",
         Some(clone_opts.source.clone()),
         &"arg".into(),
     );
-    let edenapi = Builder::from_config(&config)?
+
+    let reponame = match config.get_opt::<String>("remotefilelog", "reponame")? {
+        // This gets the reponame from the --configfile config. Ingore
+        // bogus "no-repo" value that dynamicconfig sets when there is
+        // no repo name.
+        Some(c) if c != "no-repo" => c,
+        Some(_) | None => match configparser::hg::repo_name_from_url(&clone_opts.source) {
+            Some(name) => {
+                config.set(
+                    "remotefilelog",
+                    "reponame",
+                    Some(&name),
+                    &"clone source".into(),
+                );
+                name
+            }
+            None => return Err(errors::Abort("could not determine repo name".into()).into()),
+        },
+    };
+
+    // Rust clone only supports segmented changelog clone
+    // TODO: add binding for python streaming revlog download
+    let edenapi = Builder::from_config(config)?
         .correlator(Some(edenapi::DEFAULT_CORRELATOR.as_str()))
         .build()?;
-    let capabilities: Vec<String> = block_on(edenapi.capabilities())??;
+    let capabilities: Vec<String> =
+        block_on(edenapi.capabilities())?.map_err(|e| e.tag_network())?;
     if !capabilities
         .iter()
         .any(|cap| cap == SEGMENTED_CHANGELOG_CAPABILITY)
     {
-        return Err(errors::FallbackToPython.into());
+        return Err(errors::FallbackToPython(name()).into());
     }
-
-    let source = clone_opts.source;
-    // This gets the reponame from the --configfile config.
-    // TODO: Parse the reponame from the source so the configfile isn't needed
-    let reponame = match config.get_opt::<String>("remotefilelog", "reponame")? {
-        Some(c) => c,
-        None => {
-            return Err(errors::Abort("remotefilelog.reponame config is not set".into()).into());
-        }
-    };
 
     let destination = match clone_opts.args.pop() {
         Some(dest) => PathBuf::from(dest),
@@ -125,7 +166,7 @@ pub fn run(
             if configparser::hg::is_plain(Some("default_clone_dir")) {
                 return Err(errors::Abort("DEST was not specified".into()).into());
             } else {
-                clone::get_default_directory(&config)?.join(&reponame)
+                clone::get_default_directory(config)?.join(&reponame)
             }
         }
     };
@@ -138,35 +179,62 @@ pub fn run(
         );
     }
 
-    if let Err(e) = clone_metadata(global_opts, config, source, &destination) {
-        let removal_dir = if dest_preexists {
-            destination.join(HG_PATH)
-        } else {
-            destination
-        };
-        fs::remove_dir_all(removal_dir)?;
-        return Err(e);
+    match clone_metadata(
+        io,
+        &clone_opts,
+        global_opts,
+        config,
+        &destination,
+        &reponame,
+    ) {
+        Ok((mut repo, target)) => {
+            if let Some(target) = target {
+                clone::init_working_copy(&mut repo, target, clone_opts.enable_profile.clone())?;
+            }
+        }
+        Err(e) => {
+            let removal_dir = if dest_preexists {
+                destination.join(HG_PATH)
+            } else {
+                destination
+            };
+            fs::remove_dir_all(removal_dir)?;
+            return Err(e);
+        }
     }
 
     Ok(0)
 }
 
 fn clone_metadata(
+    io: &IO,
+    clone_opts: &CloneOpts,
     global_opts: HgGlobalOpts,
-    mut config: ConfigSet,
-    source: String,
+    config: &mut ConfigSet,
     destination: &Path,
-) -> Result<u8> {
+    reponame: &str,
+) -> Result<(Repo, Option<HgId>)> {
     tracing::trace!("performing rust clone");
+    tracing::debug!(target: "rust_clone", rust_clone="true");
 
-    let mut hgrc_content = global_opts
-        .configfile
+    let mut includes = global_opts.configfile.clone();
+    if let Some(mut repo_config) = config.get_opt::<PathBuf>("clone", "repo-specific-config-dir")? {
+        repo_config.push(format!("{}.rc", reponame));
+        if repo_config.exists() {
+            let repo_config = repo_config.into_os_string().into_string().unwrap();
+            if !includes.contains(&repo_config) {
+                includes.push(repo_config);
+            }
+        }
+    }
+
+    let mut hgrc_content = includes
         .into_iter()
         .map(|file| format!("%include {}\n", file))
         .collect::<String>();
-    hgrc_content.push_str(format!("\n[paths]\ndefault = {}\n", source).as_str());
+    hgrc_content.push_str(format!("\n[paths]\ndefault = {}\n", clone_opts.source).as_str());
 
-    let mut repo = Repo::init(&destination, &mut config, Some(hgrc_content))?;
+    let mut repo = Repo::init(destination, config, Some(hgrc_content))?;
 
     repo.config_mut().set_overrides(&global_opts.config)?;
     repo.add_store_requirement("lazychangelog")?;
@@ -177,13 +245,42 @@ fn clone_metadata(
     let commits = repo.dag_commits()?;
     let config = repo.config();
 
+    let bookmark_names: Vec<String> = match config.get_opt("remotenames", "selectivepulldefault")? {
+        Some(bms) => bms,
+        None => {
+            return Err(
+                errors::Abort("remotenames.selectivepulldefault config is not set".into()).into(),
+            );
+        }
+    };
+
     tracing::trace!("fetching lazy commit data and bookmarks");
-    exchange::clone(config, edenapi, &mut metalog.write(), &mut commits.write())?;
+    let bookmark_ids = exchange::clone(
+        edenapi,
+        &mut metalog.write(),
+        &mut commits.write(),
+        bookmark_names.clone(),
+    )?;
 
     ::fail::fail_point!("run::clone", |_| {
         Err(errors::Abort("Injected clone failure".to_string().into()).into())
     });
-    Ok(0)
+
+    if !clone_opts.noupdate {
+        if let Some(default_bm) = bookmark_names.first() {
+            if let Some(target) = bookmark_ids.get(default_bm) {
+                return Ok((repo, Some(target.clone())));
+            } else if !global_opts.quiet {
+                write!(
+                    io.error(),
+                    "Server has no '{}' bookmark - skipping checkout.\n",
+                    default_bm
+                )?;
+            }
+        }
+    }
+
+    Ok((repo, None))
 }
 
 pub fn name() -> &'static str {
@@ -290,4 +387,8 @@ pub fn doc() -> &'static str {
     See :hg:`help urls` for details on specifying URLs.
 
     Returns 0 on success."#
+}
+
+pub fn synopsis() -> Option<&'static str> {
+    Some("[OPTION]... SOURCE [DEST]")
 }

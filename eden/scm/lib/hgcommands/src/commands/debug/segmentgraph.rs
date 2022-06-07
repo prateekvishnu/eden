@@ -27,7 +27,7 @@ define_flags! {
     }
 }
 
-pub fn run(opts: GraphOpts, io: &IO, repo: Repo) -> Result<u8> {
+pub fn run(opts: GraphOpts, io: &IO, repo: &mut Repo) -> Result<u8> {
     let group = match opts.group.as_ref() {
         "master" => dag::Group::MASTER,
         "non_master" => dag::Group::NON_MASTER,
@@ -54,4 +54,8 @@ pub fn name() -> &'static str {
 
 pub fn doc() -> &'static str {
     "display segment graph for a given group and level"
+}
+
+pub fn synopsis() -> Option<&'static str> {
+    None
 }

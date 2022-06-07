@@ -5,7 +5,7 @@
 
 # merge.py - directory-level update/merge handling for Mercurial
 #
-# Copyright 2006, 2007 Matt Mackall <mpm@selenic.com>
+# Copyright 2006, 2007 Olivia Mackall <olivia@selenic.com>
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -17,9 +17,11 @@ import hashlib
 import shutil
 import struct
 
-from bindings import checkout as nativecheckout
-from bindings import status as nativestatus
-from bindings import worker as rustworker
+from bindings import (
+    checkout as nativecheckout,
+    status as nativestatus,
+    worker as rustworker,
+)
 from edenscm import tracing
 
 from . import (
@@ -37,10 +39,10 @@ from . import (
     progress,
     pycompat,
     scmutil,
+    treestate,
     util,
     worker,
 )
-from . import treestate
 from .i18n import _
 from .node import addednodeid, bin, hex, modifiednodeid, nullhex, nullid, nullrev
 from .pycompat import decodeutf8, encodeutf8

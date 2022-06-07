@@ -33,6 +33,7 @@ use mercurial_derived_data::MappedHgChangesetId;
 use mononoke_types::{ChangesetId, RepositoryId, Timestamp};
 use phases::PhasesArc;
 use slog::{info, Logger};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     cmp::{max, min},
     collections::HashSet,
@@ -61,7 +62,6 @@ fn roots_for_chunk(
                 }),
                 NodeType::ChangesetInfo => Node::ChangesetInfo(id),
                 NodeType::ChangesetInfoMapping => Node::ChangesetInfoMapping(id),
-                NodeType::DeletedManifestMapping => Node::DeletedManifestMapping(id),
                 NodeType::DeletedManifestV2Mapping => Node::DeletedManifestV2Mapping(id),
                 NodeType::FsnodeMapping => Node::FsnodeMapping(id),
                 NodeType::SkeletonManifestMapping => Node::SkeletonManifestMapping(id),
@@ -187,6 +187,7 @@ pub async fn walk_exact_tail<RunFac, SinkFac, SinkOut, V, VOut, Route>(
     tail_params: TailParams,
     mut visitor: V,
     make_run: RunFac,
+    cancellation_requested: Arc<AtomicBool>,
 ) -> Result<(), Error>
 where
     RunFac: 'static + Clone + Send + Sync + FnOnce(&CoreContext, &RepoWalkParams) -> SinkFac,
@@ -208,7 +209,8 @@ where
         n == Some(MappedHgChangesetId::NAME) || n == Some(FilenodesOnlyPublic::NAME)
     });
 
-    loop {
+    // At every iteration, check if cancellation is requested by the caller.
+    while !cancellation_requested.load(Ordering::Relaxed) {
         cloned!(job_params, tail_params, type_params, make_run);
         let tail_secs = tail_params.tail_secs;
         // Each loop get new ctx and thus session id so we can distinguish runs
@@ -365,6 +367,12 @@ where
         let mut last_chunk_upper = None;
 
         futures::pin_mut!(chunk_stream);
+        // Before beginning processing, check if the caller expects us to
+        // stop. Can directly return from here since no meaningful work has
+        // been performed so far.
+        if cancellation_requested.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         while let Some(chunk_members) = chunk_stream.try_next().await? {
             if is_chunking && chunk_members.is_empty() {
                 continue;
@@ -492,6 +500,14 @@ where
                     }
                 }
             }
+            // Before processing the next chunk, check if cancellation has been requested.
+            // Don't return directly since checkpointing needs to be performed to save the
+            // progress made till now.
+            // NOTE: This check is not part of the while conditional since using
+            // let + condition is currently unstable.
+            if cancellation_requested.load(Ordering::Relaxed) {
+                break;
+            }
         }
 
         if let Some(chunking) = tail_params.chunking.as_ref() {
@@ -536,4 +552,5 @@ where
             None => return Ok(()),
         }
     }
+    Ok(())
 }

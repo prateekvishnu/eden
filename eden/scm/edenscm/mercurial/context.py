@@ -5,7 +5,7 @@
 
 # context.py - changeset and file context objects for mercurial
 #
-# Copyright 2006, 2007 Matt Mackall <mpm@selenic.com>
+# Copyright 2006, 2007 Olivia Mackall <olivia@selenic.com>
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -47,15 +47,15 @@ from .node import (
     bin,
     hex,
     modifiednodeid,
-    nullid,
     nullhex,
+    nullid,
     nullrev,
     short,
     wdirid,
     wdirnodes,
     wdirrev,
 )
-from .pycompat import encodeutf8, range, isint
+from .pycompat import encodeutf8, isint, range
 from .thirdparty import attr
 
 

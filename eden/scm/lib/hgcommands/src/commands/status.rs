@@ -12,13 +12,13 @@ use clidispatch::errors;
 use clidispatch::io::CanColor;
 use clidispatch::io::IO;
 use cliparser::define_flags;
+use print::PrintConfig;
+use print::PrintConfigStatusTypes;
 use repo::repo::Repo;
 use types::path::RepoPathRelativizer;
 
 use crate::commands::FormatterOpts;
 use crate::commands::WalkOpts;
-use print::PrintConfig;
-use print::PrintConfigStatusTypes;
 
 define_flags! {
     pub struct StatusOpts {
@@ -87,7 +87,7 @@ define_flags! {
     }
 }
 
-pub fn run(opts: StatusOpts, io: &IO, repo: Repo) -> Result<u8> {
+pub fn run(opts: StatusOpts, io: &IO, repo: &mut Repo) -> Result<u8> {
     let rev_check = opts.rev.is_empty() || (opts.rev.len() == 1 && opts.rev[0] == ".");
 
     let args_check = opts.args.is_empty() || (opts.args.len() == 1 && opts.args[0] == "re:.");
@@ -101,7 +101,7 @@ pub fn run(opts: StatusOpts, io: &IO, repo: Repo) -> Result<u8> {
         || !opts.formatter_opts.template.is_empty()
         || !args_check
     {
-        return Err(errors::FallbackToPython.into());
+        return Err(errors::FallbackToPython(name()).into());
     }
 
     let StatusOpts {
@@ -249,4 +249,8 @@ pub fn doc() -> &'static str {
           hg status -v -t mardu
 
     Returns 0 on success."#
+}
+
+pub fn synopsis() -> Option<&'static str> {
+    Some("[OPTION]... [FILE]...")
 }

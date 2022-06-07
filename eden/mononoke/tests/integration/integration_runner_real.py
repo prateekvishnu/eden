@@ -37,6 +37,14 @@ DISABLE_ALL_NETWORK_ACCESS_SKIPLIST: Set[str] = {
     "test-cat-auth.t",
     "test-hook-verify-integrity.t",
     "test-bypass-readonly-acl.t",
+    # Components linked with SM library invoke some network calls to loopback
+    # address for configerator and ODS even without being part of actual execution
+    # Whitelisting the below tests until RCA is completed for SM integration so
+    # that integration tests do not time-out due to failed network call retries.
+    # TODO(rajshar): Investigate root cause for network calls from SM Client.
+    "test-new-walker-checkpoint.t",
+    "test-new-walker-count-objects.t",
+    "test-new-walker-count-public-chunked.t",
 }
 
 
@@ -120,18 +128,22 @@ def maybe_use_local_test_paths(manifest_env: ManifestEnv) -> None:
 
     fbsource = subprocess.check_output(["hg", "root"], encoding="utf-8").strip()
     fbcode = os.path.join(fbsource, "fbcode")
-    tests = os.path.join(fbcode, "eden/mononoke/tests/integration")
+    tests = os.path.join(
+        fbcode,
+        manifest_env.get("VERBATIM_LOCAL_PATH", "eden/mononoke/tests/integration"),
+    )
+    fixtures = os.path.join(fbcode, "eden/mononoke/tests/integration")
 
     updates_to_apply = {
         "TEST_ROOT_PUBLIC": tests,
-        "TEST_FIXTURES": tests,
+        "TEST_FIXTURES": fixtures,
         "RUN_TESTS_LIBRARY": os.path.join(fbcode, "eden/scm/tests"),
     }
 
     if is_oss_build:
-        updates_to_apply["TEST_CERTS"] = os.path.join(tests, "certs")
+        updates_to_apply["TEST_CERTS"] = os.path.join(fixtures, "certs")
     else:
-        updates_to_apply["TEST_CERTS"] = os.path.join(tests, "certs/facebook")
+        updates_to_apply["TEST_CERTS"] = os.path.join(fixtures, "certs/facebook")
         updates_to_apply["TEST_ROOT_FACEBOOK"] = os.path.join(tests, "facebook")
 
     manifest_env.update(updates_to_apply)
@@ -389,7 +401,12 @@ def run(
             with open(manifest_path) as f:
                 manifest_env = json.load(f)
 
-            return {k: os.path.join(buck_out, v) for k, v in manifest_env.items()}
+            def process_value(key: str, value: str, buck_out: str) -> str:
+                if key.startswith("VERBATIM_"):
+                    return value
+                return os.path.join(buck_out, value)
+
+            return {k: process_value(k, v, buck_out) for k, v in manifest_env.items()}
 
         set_simple_logging(logging.INFO)
         manifest_env: ManifestEnv = load_manifest_env(manifest)

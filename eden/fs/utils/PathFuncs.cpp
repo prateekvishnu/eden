@@ -27,8 +27,7 @@
 using folly::Expected;
 using folly::StringPiece;
 
-namespace facebook {
-namespace eden {
+namespace facebook::eden {
 
 StringPiece dirname(StringPiece path) {
   auto dirSeparator = detail::rfindPathSeparator(path);
@@ -385,27 +384,4 @@ AbsolutePath executablePath() {
 #endif
 }
 
-CompareResult comparePathComponent(
-    PathComponentPiece left,
-    PathComponentPiece right,
-    CaseSensitivity caseSensitivity) {
-  if (caseSensitivity == CaseSensitivity::Insensitive) {
-    if (left.stringPiece().equals(
-            right.stringPiece(), folly::AsciiCaseInsensitive())) {
-      return CompareResult::EQUAL;
-    }
-  } else {
-    if (left == right) {
-      return CompareResult::EQUAL;
-    }
-  }
-
-  if (left < right) {
-    return CompareResult::BEFORE;
-  } else {
-    return CompareResult::AFTER;
-  }
-}
-
-} // namespace eden
-} // namespace facebook
+} // namespace facebook::eden

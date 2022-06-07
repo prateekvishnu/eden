@@ -5,8 +5,6 @@
  * GNU General Public License version 2.
  */
 
-#![deny(warnings)]
-
 use blobrepo::AsBlobRepo;
 use bonsai_git_mapping::BonsaiGitMappingArc;
 use bonsai_globalrev_mapping::BonsaiGlobalrevMappingArc;
@@ -38,6 +36,7 @@ mod repo_lock;
 mod restrictions;
 mod update;
 
+pub use bookmarks_types::BookmarkKind;
 pub use hooks::{CrossRepoPushSource, HookRejection};
 pub use pushrebase::PushrebaseOutcome;
 
@@ -45,7 +44,7 @@ pub use crate::create::CreateBookmarkOp;
 pub use crate::delete::DeleteBookmarkOp;
 pub use crate::hook_running::run_hooks;
 pub use crate::pushrebase_onto::{get_pushrebase_hooks, PushrebaseOntoBookmarkOp};
-pub use crate::restrictions::{check_bookmark_sync_config, BookmarkKind};
+pub use crate::restrictions::check_bookmark_sync_config;
 pub use crate::update::{BookmarkUpdatePolicy, BookmarkUpdateTargets, UpdateBookmarkOp};
 
 /// Trait alias for bookmarks movement repositories.
@@ -66,7 +65,9 @@ pub trait Repo = AsBlobRepo
     + RepoBlobstoreRef
     + RepoCrossRepoRef
     + RepoIdentityRef
-    + RepoPermissionCheckerRef;
+    + RepoPermissionCheckerRef
+    + Send
+    + Sync;
 
 /// An error encountered during an attempt to move a bookmark.
 #[derive(Debug, Error)]
@@ -101,9 +102,9 @@ pub enum BookmarkMovementError {
     },
 
     #[error(
-        "Invalid public bookmark: {bookmark} (only scratch bookmarks may match pattern {pattern})"
+        "Invalid publishing bookmark: {bookmark} (only scratch bookmarks may match pattern {pattern})"
     )]
-    InvalidPublicBookmark {
+    InvalidPublishingBookmark {
         bookmark: BookmarkName,
         pattern: String,
     },
@@ -158,8 +159,10 @@ pub enum BookmarkMovementError {
         descendant_bookmark: BookmarkName,
     },
 
-    #[error("Bookmark '{bookmark}' cannot be moved because public bookmarks are being redirected")]
-    PushRedirectorEnabledForPublic { bookmark: BookmarkName },
+    #[error(
+        "Bookmark '{bookmark}' cannot be moved because publishing bookmarks are being redirected"
+    )]
+    PushRedirectorEnabledForPublishing { bookmark: BookmarkName },
 
     #[error(
         "Bookmark '{bookmark}' cannot be moved because scratch bookmarks are being redirected"

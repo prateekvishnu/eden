@@ -37,46 +37,45 @@ const auto hash8 =
 const auto hash9 =
     ObjectId::fromHex("0000000000000000000000000000000000000009");
 
-const auto entry0 =
-    TreeEntry{hash0, PathComponent{"a"}, TreeEntryType::REGULAR_FILE};
-const auto entry1 =
-    TreeEntry{hash1, PathComponent{"b"}, TreeEntryType::REGULAR_FILE};
-const auto entry2 =
-    TreeEntry{hash2, PathComponent{"c"}, TreeEntryType::REGULAR_FILE};
-const auto entry3 =
-    TreeEntry{hash3, PathComponent{"d"}, TreeEntryType::REGULAR_FILE};
-const auto entry4 =
-    TreeEntry{hash4, PathComponent{"e"}, TreeEntryType::REGULAR_FILE};
+const auto entry0Name = PathComponent{"a"};
+const auto entry1Name = PathComponent{"b"};
+const auto entry2Name = PathComponent{"c"};
+const auto entry3Name = PathComponent{"d"};
+const auto entry4Name = PathComponent{"e"};
+
+const auto entry0 = TreeEntry{hash0, TreeEntryType::REGULAR_FILE};
+const auto entry1 = TreeEntry{hash1, TreeEntryType::REGULAR_FILE};
+const auto entry2 = TreeEntry{hash2, TreeEntryType::REGULAR_FILE};
+const auto entry3 = TreeEntry{hash3, TreeEntryType::REGULAR_FILE};
+const auto entry4 = TreeEntry{hash4, TreeEntryType::REGULAR_FILE};
 
 const auto tree0 = std::make_shared<const Tree>(
-    std::vector<TreeEntry>{
-        entry0,
-    },
+    Tree::container{{{entry0Name, entry0}}, kPathMapDefaultCaseSensitive},
     hash5);
 
 const auto tree1 = std::make_shared<const Tree>(
-    std::vector<TreeEntry>{
-        entry1,
-    },
+    Tree::container{{{entry1Name, entry1}}, kPathMapDefaultCaseSensitive},
     hash6);
 
 const auto tree2 = std::make_shared<const Tree>(
-    std::vector<TreeEntry>{
-        entry2,
-    },
+    Tree::container{{{entry2Name, entry2}}, kPathMapDefaultCaseSensitive},
     hash7);
 
 const auto tree3 = std::make_shared<const Tree>(
-    std::vector<TreeEntry>{
-        entry3,
-    },
+    Tree::container{{{entry3Name, entry3}}, kPathMapDefaultCaseSensitive},
     hash8);
 
 const auto tree4 = std::make_shared<const Tree>(
-    std::vector<TreeEntry>{entry0, entry1, entry2, entry3, entry4},
+    Tree::container{
+        {{entry0Name, entry0},
+         {entry1Name, entry1},
+         {entry2Name, entry2},
+         {entry3Name, entry3},
+         {entry4Name, entry4}},
+        kPathMapDefaultCaseSensitive},
     hash9);
 
-const auto entrySize = sizeof(entry0) + entry0.getIndirectSizeBytes();
+const auto entrySize = sizeof(entry0);
 const auto smallTreeSize = tree0 -> getSizeBytes();
 const auto bigTreeSize = tree4 -> getSizeBytes();
 const auto cacheMaxSize = smallTreeSize * 3 + 1; // cache fits 3 small trees
@@ -112,7 +111,7 @@ TEST_F(TreeCacheTest, testAssumptions) {
 
   // we assume all the entries have the same size
   for (auto& entry : {entry0, entry1, entry2, entry3, entry4}) {
-    EXPECT_EQ(entrySize, sizeof(entry) + entry.getIndirectSizeBytes());
+    EXPECT_EQ(entrySize, sizeof(entry));
   }
 
   // we assume all the little trees are the same size

@@ -5,7 +5,6 @@
  * GNU General Public License version 2.
  */
 
-#include <folly/executors/QueuedImmediateExecutor.h>
 #include <folly/portability/GTest.h>
 #include <folly/test/TestUtils.h>
 
@@ -44,16 +43,15 @@ struct ObjectStoreTest : ::testing::Test {
     fakeBackingStore = std::make_shared<FakeBackingStore>();
     backingStore = std::make_shared<LocalStoreCachedBackingStore>(
         fakeBackingStore, localStore, stats);
-    executor = &folly::QueuedImmediateExecutor::instance();
     objectStore = ObjectStore::create(
         localStore,
         backingStore,
         treeCache,
         stats,
-        executor,
         std::make_shared<ProcessNameCache>(),
         std::make_shared<NullStructuredLogger>(),
-        EdenConfig::createTestEdenConfig());
+        EdenConfig::createTestEdenConfig(),
+        kPathMapDefaultCaseSensitive);
 
     readyBlobId = putReadyBlob("readyblob");
     readyTreeId = putReadyTree();
@@ -78,7 +76,6 @@ struct ObjectStoreTest : ::testing::Test {
   std::shared_ptr<TreeCache> treeCache;
   std::shared_ptr<EdenStats> stats;
   std::shared_ptr<ObjectStore> objectStore;
-  folly::QueuedImmediateExecutor* executor;
 
   ObjectId readyBlobId;
   ObjectId readyTreeId;
@@ -169,10 +166,10 @@ TEST_F(ObjectStoreTest, getBlobSizeFromLocalStore) {
       nullptr,
       treeCache,
       stats,
-      executor,
       std::make_shared<ProcessNameCache>(),
       std::make_shared<NullStructuredLogger>(),
-      EdenConfig::createTestEdenConfig());
+      EdenConfig::createTestEdenConfig(),
+      kPathMapDefaultCaseSensitive);
 
   size_t expectedSize = data.size();
   size_t size = objectStore->getBlobSize(id, context).get();

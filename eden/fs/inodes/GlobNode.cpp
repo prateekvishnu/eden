@@ -15,8 +15,7 @@ using std::string;
 using std::unique_ptr;
 using std::vector;
 
-namespace facebook {
-namespace eden {
+namespace facebook::eden {
 
 namespace {
 
@@ -145,8 +144,8 @@ struct TreeRoot {
 
   /** We don't need to lock the contents, so we just return a reference
    * to the entries */
-  const std::vector<TreeEntry>& lockContents() {
-    return tree->getTreeEntries();
+  const Tree& lockContents() {
+    return *tree;
   }
 
   /** Return an object that can be used in a generic for()
@@ -154,9 +153,8 @@ struct TreeRoot {
    * the object you obtained via lockContents().
    * The returned iterator yields ENTRY elements that can be
    * used with the entryXXX methods below. */
-  const std::vector<TreeEntry>& iterate(
-      const std::vector<TreeEntry>& contents) {
-    return contents;
+  const Tree& iterate(const Tree& tree) {
+    return tree;
   }
 
   /** We can never load a TreeInodePtr from a raw Tree, so this always
@@ -172,18 +170,21 @@ struct TreeRoot {
     return false;
   }
 
-  template <typename CONTENTS>
-  auto* FOLLY_NULLABLE lookupEntry(CONTENTS&, PathComponentPiece name) {
-    return tree->getEntryPtr(name);
+  const TreeEntry* FOLLY_NULLABLE
+  lookupEntry(const Tree& tree, PathComponentPiece name) {
+    auto it = tree.find(name);
+    if (it != tree.cend()) {
+      return &it->second;
+    }
+    return nullptr;
   }
 
-  template <typename ENTRY>
-  PathComponentPiece entryName(const ENTRY& entry) {
-    return entry.getName();
+  PathComponentPiece entryName(const Tree::value_type& entry) {
+    return entry.first;
   }
-  template <typename ENTRY>
-  bool entryIsTree(const ENTRY& entry) {
-    return entry.isTree();
+
+  bool entryIsTree(const Tree::value_type& entry) {
+    return entry.second.isTree();
   }
   bool entryIsTree(const TreeEntry* entry) {
     return entry->isTree();
@@ -195,9 +196,8 @@ struct TreeRoot {
     return !entryIsTree(entry);
   }
 
-  template <typename ENTRY>
-  const ObjectId entryHash(const ENTRY& entry) {
-    return entry.getHash();
+  const ObjectId entryHash(const Tree::value_type& entry) {
+    return entry.second.getHash();
   }
   const ObjectId entryHash(const TreeEntry* entry) {
     return entry->getHash();
@@ -213,9 +213,10 @@ struct TreeRoot {
 
   GlobNode::GlobResult entryToResult(
       RelativePath&& entryPath,
-      const TreeEntry& entry,
+      const Tree::value_type& entry,
       const RootId& originRootId) {
-    return this->entryToResult(std::move(entryPath), &entry, originRootId);
+    return this->entryToResult(
+        std::move(entryPath), &entry.second, originRootId);
   }
 };
 } // namespace
@@ -655,5 +656,4 @@ void GlobNode::debugDump(int currentDepth) const {
   }
 }
 
-} // namespace eden
-} // namespace facebook
+} // namespace facebook::eden

@@ -22,14 +22,7 @@ Config::
     # It is currently only useful for test compatibility.
     hook-pull = true
 """
-from ..mercurial import (
-    commands,
-    extensions,
-    mutation,
-    phases,
-    registrar,
-    visibility,
-)
+from ..mercurial import commands, extensions, mutation, phases, registrar, visibility
 from ..mercurial.i18n import _, _n
 from ..mercurial.node import short
 from .extlib.phabricator import arcconfig, diffprops, graphql
@@ -146,6 +139,13 @@ def _cleanuplanded(repo, dryrun=False):
         return
     if not dryrun:
         with unfi.lock(), unfi.transaction("pullcreatemarkers"):
+            # Any commit hash's added to the idmap in the earlier code will have
+            # been dropped by the repo.invalidate() that happens at lock time.
+            # Let's refetch those hashes now. If we don't then the
+            # mutation/obsolete computation will fail to consider this mutation
+            # marker, since it ignores markers for which we don't have the hash
+            # for the mutation target.
+            unfi.changelog.filternodes(list(e.succ() for e in mutationentries))
             if mutation.enabled(unfi):
                 mutation.recordentries(unfi, mutationentries, skipexisting=False)
             if visibility.tracking(unfi):

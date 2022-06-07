@@ -9,7 +9,6 @@
 //! deserialized from TOML files from metaconfig repo
 
 #![deny(missing_docs)]
-#![deny(warnings)]
 
 use anyhow::{anyhow, Error, Result};
 use std::{
@@ -209,6 +208,10 @@ pub struct RepoConfig {
     pub backup_repo_config: Option<BackupRepoConfig>,
     /// ACL region configuration
     pub acl_region_config: Option<AclRegionConfig>,
+    /// Walker configuration
+    pub walker_config: Option<WalkerConfig>,
+    /// Cross-repo commit validation config
+    pub cross_repo_commit_validation_config: Option<CrossRepoCommitValidation>,
 }
 
 /// Backup repo configuration
@@ -298,9 +301,6 @@ pub struct DerivedDataTypesConfig {
 
     /// What blame version should be used.
     pub blame_version: BlameVersion,
-
-    /// What deleted manifest version should be used.
-    pub deleted_manifest_version: DeletedManifestVersion,
 }
 
 /// What type of unode derived data to generate
@@ -330,21 +330,6 @@ pub enum BlameVersion {
 impl Default for BlameVersion {
     fn default() -> Self {
         BlameVersion::V1
-    }
-}
-
-/// What type of deleted manifest derived data to generate
-#[derive(Eq, Clone, Copy, Debug, PartialEq)]
-pub enum DeletedManifestVersion {
-    /// Deleted manifest v1
-    V1,
-    /// Deleted manifest v2
-    V2,
-}
-
-impl Default for DeletedManifestVersion {
-    fn default() -> Self {
-        Self::V1
     }
 }
 
@@ -1647,7 +1632,7 @@ pub struct AclRegion {
 
     /// List of path prefixes that apply to this region.  Prefixes are in terms of
     /// path elements, so the prefix a/b applies to a/b/c but not a/bb.
-    pub path_prefixes: Vec<MPath>,
+    pub path_prefixes: Vec<Option<MPath>>,
 }
 
 /// ACL region rule consisting of multiple regions and path prefixes
@@ -1669,4 +1654,92 @@ pub struct AclRegionRule {
 pub struct AclRegionConfig {
     /// List of rules that grant access to regions of the repo.
     pub allow_rules: Vec<AclRegionRule>,
+}
+
+/// Walker parameters that are specific to type of job and repo.
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct WalkerJobParams {
+    /// Controls max concurrency for MySQL and other dependencies
+    pub scheduled_max_concurrency: Option<i64>,
+    /// Controls the max blobstore read QPS for a given repo
+    pub qps_limit: Option<i64>,
+    /// The type of nodes to be excluded during walk
+    pub exclude_node_type: Option<String>,
+    /// Whether to allow remaining deferred edges after chunks complete.
+    pub allow_remaining_deferred: bool,
+    /// Control whether walker continues in the face of error for specified
+    /// node types
+    pub error_as_node_data_type: Option<String>,
+}
+
+#[derive(Debug, Copy, clap::ArgEnum, Clone, Eq, PartialEq, Hash)]
+/// The type of walker jobs deployed in production
+pub enum WalkerJobType {
+    /// Invalid value
+    Unknown,
+    /// Validate Job
+    ValidateAll,
+    /// ScrubAllChunked Job
+    ScrubAllChunked,
+    /// ScrubHgAllChunked Job
+    ScrubHgAllChunked,
+    /// ScrubHgFileContent Job
+    ScrubHgFileContent,
+    /// ScrubHgFileNode Job
+    ScrubHgFileNode,
+    /// ScrubUnodeAllChunked Job
+    ScrubUnodeAllChunked,
+    /// ScrubUnodeBlame Job
+    ScrubUnodeBlame,
+    /// ScrubDerivedNoContentMeta Job
+    ScrubDerivedNoContentMeta,
+    /// ScrubDerivedNoContentMetaChunked Job
+    ScrubDerivedNoContentMetaChunked,
+    /// ScrubUnodeFastlog Job
+    ScrubUnodeFastlog,
+    /// ScrubDerivedChunked Job
+    ScrubDerivedChunked,
+    /// ShallowHgScrub Job
+    ShallowHgScrub,
+}
+
+impl fmt::Display for WalkerJobType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let str_val = match &self {
+            Self::Unknown => "unknown",
+            Self::ScrubAllChunked => "scrub-all-chunked",
+            Self::ScrubDerivedChunked => "scrub-derived-chunked",
+            Self::ScrubDerivedNoContentMeta => "scrub-derived-no-content-meta",
+            Self::ScrubDerivedNoContentMetaChunked => "scrub-derived-no-content-meta-chunked",
+            Self::ScrubHgAllChunked => "scrub-hg-all-chunked",
+            Self::ScrubHgFileContent => "scrub-hg-file-content",
+            Self::ScrubHgFileNode => "scrub-hg-file-node",
+            Self::ScrubUnodeAllChunked => "scrub-unode-all-chunked",
+            Self::ScrubUnodeBlame => "scrub-unode-blame",
+            Self::ScrubUnodeFastlog => "scrub-unode-fastlog",
+            Self::ShallowHgScrub => "shallow-hg-scrub",
+            Self::ValidateAll => "validate-all",
+        };
+        write!(f, "{}", str_val)
+    }
+}
+
+/// Configuration relevant to walker job.
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct WalkerConfig {
+    /// Determines if the walker should scrub blobs.
+    pub scrub_enabled: bool,
+    /// Determines if the walker should validate blobs.
+    pub validate_enabled: bool,
+    /// Parameters for different walker jobs.
+    pub params: Option<HashMap<WalkerJobType, WalkerJobParams>>,
+}
+
+/// Configuration relevant to cross-repo commit validation
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct CrossRepoCommitValidation {
+    /// A set of bookmarks whose changelog entries are deemed to be valid
+    /// Commits that are only found via the changelog for this named bookmark
+    /// are skipped for validation (e.g. import bookmarks can be skipped)
+    pub skip_bookmarks: HashSet<BookmarkName>,
 }

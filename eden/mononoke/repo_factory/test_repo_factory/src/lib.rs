@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use acl_regions::{build_acl_regions, ArcAclRegions};
 use anyhow::Result;
 use blame::BlameRoot;
 use blobstore::Blobstore;
@@ -25,7 +26,7 @@ use changesets::ArcChangesets;
 use changesets_impl::SqlChangesetsBuilder;
 use context::CoreContext;
 use dbbookmarks::{ArcSqlBookmarks, SqlBookmarksBuilder};
-use deleted_files_manifest::RootDeletedManifestV2Id;
+use deleted_manifest::RootDeletedManifestV2Id;
 use derived_data_filenodes::FilenodesOnlyPublic;
 use derived_data_manager::BonsaiDerivable;
 use ephemeral_blobstore::{ArcRepoEphemeralStore, RepoEphemeralStore};
@@ -42,7 +43,7 @@ use memblob::Memblob;
 use mercurial_derived_data::MappedHgChangesetId;
 use mercurial_mutation::{ArcHgMutationStore, SqlHgMutationStoreBuilder};
 use metaconfig_types::{
-    ArcRepoConfig, DeletedManifestVersion, DerivedDataConfig, DerivedDataTypesConfig, RepoConfig,
+    ArcRepoConfig, BlameVersion, DerivedDataConfig, DerivedDataTypesConfig, RepoConfig,
     SegmentedChangelogConfig, SegmentedChangelogHeadConfig, UnodeVersion,
 };
 use mononoke_types::RepositoryId;
@@ -59,6 +60,7 @@ use repo_blobstore::{ArcRepoBlobstore, RepoBlobstore};
 use repo_cross_repo::{ArcRepoCrossRepo, RepoCrossRepo};
 use repo_derived_data::{ArcRepoDerivedData, RepoDerivedData};
 use repo_identity::{ArcRepoIdentity, RepoIdentity};
+use repo_lock::SqlRepoLock;
 use repo_permission_checker::{AlwaysAllowMockRepoPermissionChecker, ArcRepoPermissionChecker};
 use requests_table::SqlLongRunningRequestsQueue;
 use scuba_ext::MononokeScubaSampleBuilder;
@@ -111,7 +113,7 @@ pub fn default_test_repo_config() -> RepoConfig {
             RootSkeletonManifestId::NAME.to_string(),
         },
         unode_version: UnodeVersion::V2,
-        deleted_manifest_version: DeletedManifestVersion::V2,
+        blame_version: BlameVersion::V2,
         ..Default::default()
     };
     RepoConfig {
@@ -176,6 +178,7 @@ impl TestRepoFactory {
         metadata_con.execute_batch(SqlMutableRenamesStore::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlSyncedCommitMapping::CREATION_QUERY)?;
         metadata_con.execute_batch(SegmentedChangelogSqlConnections::CREATION_QUERY)?;
+        metadata_con.execute_batch(SqlRepoLock::CREATION_QUERY)?;
         let metadata_db =
             SqlConnectionsWithSchema::new_single(Connection::with_sqlite(metadata_con));
 
@@ -516,5 +519,19 @@ impl TestRepoFactory {
             SqlMutableCountersBuilder::from_sql_connections(self.metadata_db.clone().into())
                 .build(repo_identity.id()),
         ))
+    }
+
+    /// ACL regions
+    pub fn acl_regions(
+        &self,
+        repo_config: &ArcRepoConfig,
+        skiplist_index: &ArcSkiplistIndex,
+        changeset_fetcher: &ArcChangesetFetcher,
+    ) -> ArcAclRegions {
+        build_acl_regions(
+            repo_config.acl_region_config.as_ref(),
+            skiplist_index.clone(),
+            changeset_fetcher.clone(),
+        )
     }
 }

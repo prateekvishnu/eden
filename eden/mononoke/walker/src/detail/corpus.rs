@@ -36,6 +36,7 @@ use mononoke_types::datetime::DateTime;
 use percent_encoding::{percent_encode, AsciiSet, CONTROLS};
 use regex::Regex;
 use samplingblob::SamplingHandler;
+use std::sync::atomic::AtomicBool;
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
@@ -183,8 +184,6 @@ fn dump_with_extension(node_type: NodeType) -> bool {
         NodeType::Blame => false,
         NodeType::ChangesetInfo => false,
         NodeType::ChangesetInfoMapping => false,
-        NodeType::DeletedManifest => false,
-        NodeType::DeletedManifestMapping => false,
         NodeType::DeletedManifestV2 => false,
         NodeType::DeletedManifestV2Mapping => false,
         NodeType::FastlogBatch => false,
@@ -363,6 +362,7 @@ pub async fn corpus(
     fb: FacebookInit,
     job_params: JobParams,
     command: CorpusCommand,
+    cancellation_requested: Arc<AtomicBool>,
 ) -> Result<(), Error> {
     let JobParams {
         walk_params,
@@ -375,7 +375,14 @@ pub async fn corpus(
 
         command.apply_repo(&repo_params);
 
-        let walk = run_one(fb, walk_params, sub_params, repo_params, command);
+        let walk = run_one(
+            fb,
+            walk_params,
+            sub_params,
+            repo_params,
+            command,
+            Arc::clone(&cancellation_requested),
+        );
         all_walks.push(walk);
     }
     try_join_all(all_walks).await.map(|_| ())
@@ -387,6 +394,7 @@ async fn run_one(
     sub_params: RepoSubcommandParams,
     repo_params: RepoWalkParams,
     command: CorpusCommand,
+    cancellation_requested: Arc<AtomicBool>,
 ) -> Result<(), Error> {
     let sizing_progress_state =
         ProgressStateMutex::new(ProgressStateCountByType::<ScrubStats, ScrubStats>::new(
@@ -449,6 +457,7 @@ async fn run_one(
         sub_params.tail_params,
         walk_state,
         make_sink,
+        cancellation_requested,
     )
     .await
 }

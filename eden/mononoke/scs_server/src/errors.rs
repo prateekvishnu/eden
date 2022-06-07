@@ -125,6 +125,11 @@ impl From<MononokeError> for ServiceError {
                 reason,
                 ..Default::default()
             }),
+            error @ MononokeError::MergeConflicts { .. } => Self::Request(thrift::RequestError {
+                kind: thrift::RequestErrorKind::MERGE_CONFLICTS,
+                reason: error.to_string(),
+                ..Default::default()
+            }),
             error @ MononokeError::PermissionDenied { .. } => Self::Request(thrift::RequestError {
                 kind: thrift::RequestErrorKind::PERMISSION_DENIED,
                 reason: error.to_string(),
@@ -201,6 +206,7 @@ impl_into_thrift_error!(service::RepoCreateBookmarkExn);
 impl_into_thrift_error!(service::RepoMoveBookmarkExn);
 impl_into_thrift_error!(service::RepoDeleteBookmarkExn);
 impl_into_thrift_error!(service::RepoLandStackExn);
+impl_into_thrift_error!(service::RepoBookmarkInfoExn);
 impl_into_thrift_error!(service::RepoStackInfoExn);
 impl_into_thrift_error!(service::CommitCommonBaseWithExn);
 impl_into_thrift_error!(service::CommitFileDiffsExn);
@@ -212,6 +218,7 @@ impl_into_thrift_error!(service::CommitIsAncestorOfExn);
 impl_into_thrift_error!(service::CommitFindFilesExn);
 impl_into_thrift_error!(service::CommitHistoryExn);
 impl_into_thrift_error!(service::CommitListDescendantBookmarksExn);
+impl_into_thrift_error!(service::CommitRunHooksExn);
 impl_into_thrift_error!(service::CommitPathExistsExn);
 impl_into_thrift_error!(service::CommitPathInfoExn);
 impl_into_thrift_error!(service::CommitMultiplePathInfoExn);
@@ -230,6 +237,7 @@ impl_into_thrift_error!(service::FileDiffExn);
 impl_into_thrift_error!(service::CommitLookupXrepoExn);
 impl_into_thrift_error!(service::RepoListHgManifestExn);
 impl_into_thrift_error!(service::MegarepoAddSyncTargetConfigExn);
+impl_into_thrift_error!(service::MegarepoReadTargetConfigExn);
 impl_into_thrift_error!(service::MegarepoAddSyncTargetExn);
 impl_into_thrift_error!(service::MegarepoAddSyncTargetPollExn);
 impl_into_thrift_error!(service::MegarepoAddBranchingSyncTargetExn);

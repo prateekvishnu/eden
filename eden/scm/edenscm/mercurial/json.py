@@ -5,7 +5,7 @@
 
 # json.py - json encoding
 #
-# Copyright 2005-2008 Matt Mackall <mpm@selenic.com>
+# Copyright 2005-2008 Olivia Mackall <olivia@selenic.com>
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -88,7 +88,7 @@ def loads(string):
         # XXX: This should round-trip with "dumps". But it might be non-trivial to
         # do so.
         def encode(s):
-            if isinstance(s, type(u"")):
+            if isinstance(s, type("")):
                 return pycompat.decodeutf8(s.encode("utf-8"))
             else:
                 return s

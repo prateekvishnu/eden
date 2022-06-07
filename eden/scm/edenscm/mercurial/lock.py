@@ -5,7 +5,7 @@
 
 # lock.py - simple advisory locking scheme for mercurial
 #
-# Copyright 2005, 2006 Matt Mackall <mpm@selenic.com>
+# Copyright 2005, 2006 Olivia Mackall <olivia@selenic.com>
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -16,7 +16,6 @@ import contextlib
 import copy
 import errno
 import os
-import random
 import socket
 import sys
 import time
@@ -364,12 +363,7 @@ class pythonlock(object):
                 errno.EAGAIN, self.vfs.join(self.f), self.desc, emptylockinfo
             )
 
-        lockrust = self.andrust
-        # Randomly acquire rust lock in tests to get some more coverage.
-        if util.istest() and random.choice((True, False)):
-            lockrust = True
-
-        if lockrust:
+        if self.andrust:
             try:
                 self._rustlock = rustlock(
                     self.vfs,

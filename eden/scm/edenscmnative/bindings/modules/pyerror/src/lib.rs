@@ -76,7 +76,14 @@ fn register_error_handlers() {
             }
         }
 
-        if let Some(hgcommits::Error::Dag(e)) = e.downcast_ref::<hgcommits::Error>() {
+        let mut dag_error = None;
+        if let Some(e) = e.downcast_ref::<dag::Error>() {
+            dag_error = Some(e);
+        } else if let Some(hgcommits::Error::Dag(e)) = e.downcast_ref::<hgcommits::Error>() {
+            dag_error = Some(e);
+        }
+
+        if let Some(e) = dag_error {
             match e {
                 dag::Error::Backend(ref backend_error) => match backend_error.as_ref() {
                     dag::errors::BackendError::Io(e) => {
@@ -101,16 +108,20 @@ fn register_error_handlers() {
             }
         }
 
-        if let Some(e) = e.downcast_ref::<vfs::LockError>() {
-            return match e {
-                vfs::LockError::Contended(vfs::LockContendedError { contents, .. }) => {
-                    Some(PyErr::new::<LockContendedError, _>(
+        if let Some(e) = e.downcast_ref::<repolock::LockError>() {
+            match e {
+                repolock::LockError::Contended(repolock::LockContendedError {
+                    contents, ..
+                }) => {
+                    return Some(PyErr::new::<LockContendedError, _>(
                         py,
                         cpython_ext::Str::from(contents.clone()),
-                    ))
+                    ));
                 }
-                vfs::LockError::Io(e) => Some(cpython_ext::error::translate_io_error(py, e)),
-                vfs::LockError::PathError(_) => None,
+                repolock::LockError::Io(e) => {
+                    return Some(cpython_ext::error::translate_io_error(py, e));
+                }
+                _ => {}
             };
         }
 
@@ -183,6 +194,15 @@ fn register_error_handlers() {
                     cpython_ext::Str::from(format!("{}", e)),
                 ))
             }
+        } else if let Some(e) = e.downcast_ref::<types::errors::NetworkError>() {
+            // If we don't handle inner error specifically, default to
+            // HttpError which will trigger the network doctor.
+            specific_error_handler(py, &e.0).or_else(|| {
+                Some(PyErr::new::<HttpError, _>(
+                    py,
+                    cpython_ext::Str::from(e.0.to_string()),
+                ))
+            })
         } else if let Some(e) = e.downcast_ref::<cpython_ext::PyErr>() {
             Some(e.clone(py).into())
         } else {

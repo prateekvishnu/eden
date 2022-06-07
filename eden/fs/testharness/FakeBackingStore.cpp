@@ -28,8 +28,7 @@ using folly::StringPiece;
 using std::make_unique;
 using std::unique_ptr;
 
-namespace facebook {
-namespace eden {
+namespace facebook::eden {
 
 FakeBackingStore::FakeBackingStore() = default;
 
@@ -55,12 +54,9 @@ folly::SemiFuture<std::unique_ptr<TreeEntry>>
 FakeBackingStore::getTreeEntryForRootId(
     const RootId& commitID,
     TreeEntryType treeEntryType,
-    facebook::eden::PathComponentPiece pathComponentPiece,
     ObjectFetchContext& /* context */) {
-  return folly::makeSemiFuture(std::make_unique<TreeEntry>(
-      ObjectId{commitID.value()},
-      PathComponent{pathComponentPiece},
-      treeEntryType));
+  return folly::makeSemiFuture(
+      std::make_unique<TreeEntry>(ObjectId{commitID.value()}, treeEntryType));
 }
 
 SemiFuture<unique_ptr<Tree>> FakeBackingStore::getRootTree(
@@ -191,28 +187,30 @@ FakeBackingStore::TreeEntryData::TreeEntryData(
     const Blob& blob,
     FakeBlobType type)
     : entry{
-          blob.getHash(),
           PathComponent{name},
-          treeEntryTypeFromBlobType(type)} {}
+          TreeEntry{blob.getHash(), treeEntryTypeFromBlobType(type)}} {}
 
 FakeBackingStore::TreeEntryData::TreeEntryData(
     folly::StringPiece name,
     const StoredBlob* blob,
     FakeBlobType type)
     : entry{
-          blob->get().getHash(),
           PathComponent{name},
-          treeEntryTypeFromBlobType(type)} {}
+          TreeEntry{blob->get().getHash(), treeEntryTypeFromBlobType(type)}} {}
 
 FakeBackingStore::TreeEntryData::TreeEntryData(
     folly::StringPiece name,
     const Tree& tree)
-    : entry{tree.getHash(), PathComponent{name}, TreeEntryType::TREE} {}
+    : entry{
+          PathComponent{name},
+          TreeEntry{tree.getHash(), TreeEntryType::TREE}} {}
 
 FakeBackingStore::TreeEntryData::TreeEntryData(
     folly::StringPiece name,
     const StoredTree* tree)
-    : entry{tree->get().getHash(), PathComponent{name}, TreeEntryType::TREE} {}
+    : entry{
+          PathComponent{name},
+          TreeEntry{tree->get().getHash(), TreeEntryType::TREE}} {}
 
 StoredTree* FakeBackingStore::putTree(
     const std::initializer_list<TreeEntryData>& entryArgs) {
@@ -228,16 +226,12 @@ StoredTree* FakeBackingStore::putTree(
   return putTreeImpl(hash, std::move(entries));
 }
 
-StoredTree* FakeBackingStore::putTree(std::vector<TreeEntry> entries) {
-  sortTreeEntries(entries);
+StoredTree* FakeBackingStore::putTree(Tree::container entries) {
   auto hash = computeTreeHash(entries);
   return putTreeImpl(hash, std::move(entries));
 }
 
-StoredTree* FakeBackingStore::putTree(
-    ObjectId hash,
-    std::vector<TreeEntry> entries) {
-  sortTreeEntries(entries);
+StoredTree* FakeBackingStore::putTree(ObjectId hash, Tree::container entries) {
   return putTreeImpl(hash, std::move(entries));
 }
 
@@ -247,32 +241,23 @@ std::pair<StoredTree*, bool> FakeBackingStore::maybePutTree(
 }
 
 std::pair<StoredTree*, bool> FakeBackingStore::maybePutTree(
-    std::vector<TreeEntry> entries) {
-  sortTreeEntries(entries);
+    Tree::container entries) {
   auto hash = computeTreeHash(entries);
   return maybePutTreeImpl(hash, std::move(entries));
 }
 
-std::vector<TreeEntry> FakeBackingStore::buildTreeEntries(
+Tree::container FakeBackingStore::buildTreeEntries(
     const std::initializer_list<TreeEntryData>& entryArgs) {
-  std::vector<TreeEntry> entries;
+  Tree::container entries{kPathMapDefaultCaseSensitive};
   for (const auto& arg : entryArgs) {
-    entries.push_back(arg.entry);
+    entries.insert(arg.entry);
   }
 
-  sortTreeEntries(entries);
   return entries;
 }
 
-void FakeBackingStore::sortTreeEntries(std::vector<TreeEntry>& entries) {
-  auto cmpEntry = [](const TreeEntry& a, const TreeEntry& b) {
-    return a.getName() < b.getName();
-  };
-  std::sort(entries.begin(), entries.end(), cmpEntry);
-}
-
 ObjectId FakeBackingStore::computeTreeHash(
-    const std::vector<TreeEntry>& sortedEntries) {
+    const Tree::container& sortedEntries) {
   // Compute a SHA-1 hash over the entry contents.
   // This doesn't match how we generate hashes for either git or mercurial
   // backed stores, but that doesn't really matter.  We only need to be
@@ -281,9 +266,9 @@ ObjectId FakeBackingStore::computeTreeHash(
   digest.hash_init(EVP_sha1());
 
   for (const auto& entry : sortedEntries) {
-    digest.hash_update(ByteRange{entry.getName().stringPiece()});
-    digest.hash_update(entry.getHash().getBytes());
-    mode_t mode = modeFromTreeEntryType(entry.getType());
+    digest.hash_update(ByteRange{entry.first.stringPiece()});
+    digest.hash_update(entry.second.getHash().getBytes());
+    mode_t mode = modeFromTreeEntryType(entry.second.getType());
     digest.hash_update(
         ByteRange(reinterpret_cast<const uint8_t*>(&mode), sizeof(mode)));
   }
@@ -296,7 +281,7 @@ ObjectId FakeBackingStore::computeTreeHash(
 
 StoredTree* FakeBackingStore::putTreeImpl(
     ObjectId hash,
-    std::vector<TreeEntry>&& sortedEntries) {
+    Tree::container&& sortedEntries) {
   auto ret = maybePutTreeImpl(hash, std::move(sortedEntries));
   if (!ret.second) {
     throw std::domain_error(
@@ -307,7 +292,7 @@ StoredTree* FakeBackingStore::putTreeImpl(
 
 std::pair<StoredTree*, bool> FakeBackingStore::maybePutTreeImpl(
     ObjectId hash,
-    std::vector<TreeEntry>&& sortedEntries) {
+    Tree::container&& sortedEntries) {
   auto storedTree =
       make_unique<StoredTree>(Tree{std::move(sortedEntries), hash});
 
@@ -400,5 +385,4 @@ void FakeBackingStore::discardOutstandingRequests() {
 size_t FakeBackingStore::getAccessCount(const ObjectId& hash) const {
   return folly::get_default(data_.rlock()->accessCounts, hash, 0);
 }
-} // namespace eden
-} // namespace facebook
+} // namespace facebook::eden

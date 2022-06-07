@@ -5,7 +5,7 @@
 
 # dispatch.py - command dispatching for mercurial
 #
-# Copyright 2005-2007 Matt Mackall <mpm@selenic.com>
+# Copyright 2005-2007 Olivia Mackall <olivia@selenic.com>
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -103,7 +103,13 @@ class request(object):
         # Silence potential EPIPE or SIGPIPE errors when writing to stdout or
         # stderr.
         if util.safehasattr(signal, "SIGPIPE"):
-            util.signal(signal.SIGPIPE, signal.SIG_IGN)
+            try:
+                util.signal(signal.SIGPIPE, signal.SIG_IGN)
+            except ValueError:
+                # This can happen if the command runs as a library from a
+                # non-main thread.
+                if not util.istest():
+                    raise
 
         class ignoreerrorui(self.ui.__class__):
             def _write(self, *args, **kwargs):
@@ -260,7 +266,6 @@ def _preimportmodules():
         "clienttelemetry",
         "commitcloud",
         "conflictinfo",
-        "convert",
         "copytrace",
         "crdump",
         "debugcommitmessage",
@@ -545,7 +550,7 @@ def dispatch(req):
                 return millis
 
             for power in range(3, 19):
-                threshold = 10 ** power
+                threshold = 10**power
                 if millis < threshold:
                     factor = int(threshold / 1000)
                     return int(millis / factor) * factor
@@ -1257,7 +1262,7 @@ def _dispatch(req):
             elif rpath:
                 ui.warn(_("warning: --repository ignored\n"))
 
-            from . import mdiff, match as matchmod
+            from . import match as matchmod, mdiff
 
             mdiff.init(ui)
             matchmod.init(ui)

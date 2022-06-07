@@ -29,7 +29,7 @@ define_flags! {
     }
 }
 
-pub fn run(opts: DebugDumpConfigOpts, io: &IO, config: ConfigSet) -> Result<u8> {
+pub fn run(opts: DebugDumpConfigOpts, io: &IO, config: &mut ConfigSet) -> Result<u8> {
     #[cfg(feature = "fb")]
     {
         let reponame = opts.reponame;
@@ -71,4 +71,8 @@ Without arguments, print the dynamic config in hgrc format.
 Otherwise, print config values specified by the arguments.
 An argument should be in the format ``section.name``.
 "
+}
+
+pub fn synopsis() -> Option<&'static str> {
+    None
 }

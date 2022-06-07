@@ -21,7 +21,7 @@ from __future__ import absolute_import
 import os
 import shutil
 import tempfile
-from typing import IO, Any, Optional, Union
+from typing import Any, IO, Optional, Union
 
 from . import (
     bundle2,
@@ -430,7 +430,7 @@ class bundlerepository(localrepo.localrepository):
         with util.fdopen(fdtemp, "wb") as fptemp:
             fptemp.write(pycompat.encodeutf8(header))
             while True:
-                chunk = readfn(2 ** 18)
+                chunk = readfn(2**18)
                 if not chunk:
                     break
                 fptemp.write(chunk)

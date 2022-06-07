@@ -5,7 +5,7 @@
 
 # drawdag.py - convert ASCII revision DAG to actual changesets
 #
-# Copyright Matt Mackall <mpm@selenic.com> and others
+# Copyright Olivia Mackall <olivia@selenic.com> and others
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -86,15 +86,7 @@ import re
 
 import bindings
 
-from . import (
-    bookmarks,
-    context,
-    error,
-    mutation,
-    pycompat,
-    scmutil,
-    visibility,
-)
+from . import bookmarks, context, error, mutation, pycompat, scmutil, visibility
 from .i18n import _
 from .node import hex, nullid, short
 

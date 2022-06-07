@@ -1,4 +1,5 @@
 #chg-compatible
+#debugruntest-compatible
 
   $ cat >> foo.py << EOF
   > from edenscm.mercurial import registrar
@@ -9,7 +10,11 @@
   >     ui.write('This is the foo command\n')
   > EOF
 
-  $ setconfig "extensions.foo=python-base64:`hg debugsh -c 'import base64; ui.writebytes(base64.b64encode(open(\"foo.py\", \"rb\").read()).decode("utf-8").replace(\"\\n\",\"\").encode("utf-8"))'`"
+  >>> import base64
+  >>> with open('foo.py', 'rb') as inf, open('foo.txt', 'wb') as outf:
+  ...   outf.write(base64.b64encode(inf.read())) and None
+
+  $ setconfig "extensions.foo=python-base64:$(cat foo.txt)"
 
   $ hg foo
   This is the foo command

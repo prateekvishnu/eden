@@ -271,7 +271,9 @@ FOLLY_NODISCARD folly::Future<folly::Unit> EdenMount::initialize(
       .thenValue([this, parent](auto&&) {
         static auto context = ObjectFetchContext::getNullContextWithCauseDetail(
             "EdenMount::initialize");
-        return objectStore_->getRootTree(parent, *context);
+        return objectStore_->getRootTree(parent, *context)
+            .semi()
+            .via(&folly::QueuedImmediateExecutor::instance());
       })
       .thenValue([this,
                   progressCallback = std::move(progressCallback),
@@ -636,7 +638,7 @@ TreeEntryType toEdenTreeEntryType(facebook::eden::ObjectType objectType) {
 
 } // namespace
 
-folly::Future<SetPathObjectIdResultAndTimes> EdenMount::setPathObjectId(
+ImmediateFuture<SetPathObjectIdResultAndTimes> EdenMount::setPathObjectId(
     RelativePathPiece path,
     const RootId& rootId,
     ObjectType objectType,
@@ -674,41 +676,41 @@ folly::Future<SetPathObjectIdResultAndTimes> EdenMount::setPathObjectId(
   setLastCheckoutTime(EdenTimestamp{clock_->getRealtime()});
   bool isTree = (objectType == facebook::eden::ObjectType::TREE);
 
-  auto getTargetTreeInodeFuture =
-      ensureDirectoryExists(
-          isTree ? path : path.dirname(), ctx->getFetchContext())
-          .semi()
-          .via(&folly::QueuedImmediateExecutor::instance());
+  auto getTargetTreeInodeFuture = ensureDirectoryExists(
+      isTree ? path : path.dirname(), ctx->getFetchContext());
 
   auto getRootTreeFuture = isTree
       ? objectStore_->getRootTree(rootId, ctx->getFetchContext())
       : objectStore_
             ->getTreeEntryForRootId(
-                rootId,
-                toEdenTreeEntryType(objectType),
-                path.basename(),
-                ctx->getFetchContext())
-            .thenValue([](std::shared_ptr<TreeEntry> treeEntry) {
-              // Make up a fake ObjectId for this tree.
-              // WARNING: This is dangerous -- this ObjectId cannot be used to
-              // look up this synthesized tree from the BackingStore.
-              ObjectId fakeObjectId{};
-              return std::make_shared<Tree>(
-                  std::vector<TreeEntry>{*treeEntry}, fakeObjectId);
-            });
+                rootId, toEdenTreeEntryType(objectType), ctx->getFetchContext())
+            .thenValue(
+                [name = PathComponent{path.basename()},
+                 caseSensitive = getCheckoutConfig()->getCaseSensitive()](
+                    std::shared_ptr<TreeEntry> treeEntry) {
+                  // Make up a fake ObjectId for this tree.
+                  // WARNING: This is dangerous -- this ObjectId cannot be used
+                  // to look up this synthesized tree from the BackingStore.
+                  ObjectId fakeObjectId{};
+                  Tree::container treeEntries{caseSensitive};
+                  treeEntries.emplace(name, std::move(*treeEntry));
+                  return std::make_shared<const Tree>(
+                      std::move(treeEntries), fakeObjectId);
+                });
 
-  return collectSafe(getTargetTreeInodeFuture, getRootTreeFuture)
+  return collectAllSafe(getTargetTreeInodeFuture, getRootTreeFuture)
       .thenValue([ctx, setPathObjectIdTime, stopWatch, rootId](
                      std::tuple<TreeInodePtr, shared_ptr<const Tree>> results) {
         setPathObjectIdTime->didLookupTreesOrGetInodeByPath =
             stopWatch.elapsed();
         auto [targetTreeInode, incomingTree] = results;
         targetTreeInode->unloadChildrenUnreferencedByFs();
-        return targetTreeInode->checkout(ctx.get(), nullptr, incomingTree);
+        return targetTreeInode->checkout(ctx.get(), nullptr, incomingTree)
+            .semi();
       })
       .thenValue([ctx, setPathObjectIdTime, stopWatch, rootId](auto&&) {
         setPathObjectIdTime->didCheckout = stopWatch.elapsed();
-        return ctx->flush();
+        return ctx->flush().semi();
       })
       .thenValue([ctx, setPathObjectIdTime, stopWatch](
                      std::vector<CheckoutConflict>&& conflicts) {
@@ -1003,28 +1005,28 @@ class TreeLookupProcessor {
       std::shared_ptr<const Tree> tree) {
     using RetType = std::variant<std::shared_ptr<const Tree>, TreeEntry>;
     auto name = *iter_++;
-    auto* treeEntry = tree->getEntryPtr(name);
+    auto it = tree->find(name);
 
-    if (!treeEntry) {
+    if (it == tree->cend()) {
       return makeImmediateFuture<RetType>(
           std::system_error(ENOENT, std::generic_category()));
     }
 
     if (iter_ == iterRange_.end()) {
-      if (treeEntry->isTree()) {
-        return objectStore_->getTree(treeEntry->getHash(), context_)
+      if (it->second.isTree()) {
+        return objectStore_->getTree(it->second.getHash(), context_)
             .thenValue([](std::shared_ptr<const Tree> tree) -> RetType {
               return tree;
             });
       } else {
-        return ImmediateFuture{RetType{*treeEntry}};
+        return ImmediateFuture{RetType{it->second}};
       }
     } else {
-      if (!treeEntry->isTree()) {
+      if (!it->second.isTree()) {
         return makeImmediateFuture<RetType>(
             std::system_error(ENOTDIR, std::generic_category()));
       } else {
-        return objectStore_->getTree(treeEntry->getHash(), context_)
+        return objectStore_->getTree(it->second.getHash(), context_)
             .thenValue([this](std::shared_ptr<const Tree> tree) {
               return next(std::move(tree));
             });
@@ -1077,23 +1079,23 @@ class CanonicalizeProcessor {
 
   ImmediateFuture<RelativePath> next(std::shared_ptr<const Tree> tree) {
     auto name = *iter_++;
-    auto* treeEntry = tree->getEntryPtr(name);
+    auto it = tree->find(name);
 
-    if (!treeEntry) {
+    if (it == tree->cend()) {
       return makeImmediateFuture<RelativePath>(
           std::system_error(ENOENT, std::generic_category()));
     }
 
-    retPath_ = retPath_ + treeEntry->getName();
+    retPath_ = retPath_ + it->first;
 
     if (iter_ == iterRange_.end()) {
       return ImmediateFuture{retPath_};
     } else {
-      if (!treeEntry->isTree()) {
+      if (!it->second.isTree()) {
         return makeImmediateFuture<RelativePath>(
             std::system_error(ENOTDIR, std::generic_category()));
       } else {
-        return objectStore_->getTree(treeEntry->getHash(), context_)
+        return objectStore_->getTree(it->second.getHash(), context_)
             .thenValue([this](std::shared_ptr<const Tree> tree) {
               return next(std::move(tree));
             });
@@ -1373,7 +1375,9 @@ folly::Future<CheckoutResult> EdenMount::checkout(
             objectStore_->getRootTree(parent1Hash, ctx->getFetchContext());
         auto toTreeFuture =
             objectStore_->getRootTree(snapshotHash, ctx->getFetchContext());
-        return collectSafe(fromTreeFuture, toTreeFuture);
+        return collectAllSafe(fromTreeFuture, toTreeFuture)
+            .semi()
+            .via(&folly::QueuedImmediateExecutor::instance());
       })
       .thenValue(
           [this](std::tuple<shared_ptr<const Tree>, shared_ptr<const Tree>>
@@ -1626,11 +1630,11 @@ Future<Unit> EdenMount::diff(DiffContext* ctxPtr, const RootId& commitHash)
   auto rootInode = getRootInode();
   return objectStore_->getRootTree(commitHash, ctxPtr->getFetchContext())
       .thenValue([this](std::shared_ptr<const Tree> rootTree) {
-        return waitForPendingNotifications()
-            .thenValue(
-                [rootTree = std::move(rootTree)](auto&&) { return rootTree; })
-            .semi();
+        return waitForPendingNotifications().thenValue(
+            [rootTree = std::move(rootTree)](auto&&) { return rootTree; });
       })
+      .semi()
+      .via(&folly::QueuedImmediateExecutor::instance())
       .thenValue([ctxPtr, rootInode = std::move(rootInode)](
                      std::shared_ptr<const Tree>&& rootTree) {
         return rootInode->diff(
@@ -1812,7 +1816,8 @@ std::unique_ptr<FuseChannel, FuseChannelDeleter> makeFuseChannel(
       mount->getServerState()->getNotifier(),
       mount->getCheckoutConfig()->getCaseSensitive(),
       mount->getCheckoutConfig()->getRequireUtf8Path(),
-      edenConfig->fuseMaximumRequests.getValue())};
+      edenConfig->fuseMaximumRequests.getValue(),
+      mount->getCheckoutConfig()->getUseWriteBackCache())};
 }
 
 folly::Future<NfsServer::NfsMountInfo> makeNfsChannel(

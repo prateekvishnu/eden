@@ -605,6 +605,11 @@ impl SourceControlService for SourceControlServiceThriftImpl {
             params: thrift::CommitListDescendantBookmarksParams,
         ) -> Result<thrift::CommitListDescendantBookmarksResponse, service::CommitListDescendantBookmarksExn>;
 
+        async fn commit_run_hooks(
+            commit: thrift::CommitSpecifier,
+            params: thrift::CommitRunHooksParams,
+        ) -> Result<thrift::CommitRunHooksResponse, service::CommitRunHooksExn>;
+
         async fn commit_lookup_xrepo(
             commit: thrift::CommitSpecifier,
             params: thrift::CommitLookupXRepoParams,
@@ -690,6 +695,11 @@ impl SourceControlService for SourceControlServiceThriftImpl {
             params: thrift::RepoCreateCommitParams,
         ) -> Result<thrift::RepoCreateCommitResponse, service::RepoCreateCommitExn>;
 
+        async fn repo_bookmark_info(
+            repo: thrift::RepoSpecifier,
+            params: thrift::RepoBookmarkInfoParams,
+        ) -> Result<thrift::RepoBookmarkInfoResponse, service::RepoBookmarkInfoExn>;
+
         async fn repo_stack_info(
             repo: thrift::RepoSpecifier,
             params: thrift::RepoStackInfoParams,
@@ -718,6 +728,10 @@ impl SourceControlService for SourceControlServiceThriftImpl {
         async fn megarepo_add_sync_target_config(
             params: thrift::MegarepoAddConfigParams,
         ) -> Result<thrift::MegarepoAddConfigResponse, service::MegarepoAddSyncTargetConfigExn>;
+
+        async fn megarepo_read_target_config(
+            params: thrift::MegarepoReadConfigParams,
+        ) -> Result<thrift::MegarepoReadConfigResponse, service::MegarepoReadTargetConfigExn>;
 
         async fn megarepo_add_sync_target(
             params: thrift::MegarepoAddTargetParams,

@@ -235,9 +235,13 @@ impl ConfigSetHgExt for ConfigSet {
             opts = opts.readonly_items(readonly_items);
         }
 
+        errors.append(&mut self.parse(HG_PY_CORE_CONFIG, &opts.clone().source("builtin.rc")));
+
         // Only load builtin configs if HGRCPATH is not set.
         if std::env::var(HGRCPATH).is_err() {
-            errors.append(&mut self.parse(MERGE_TOOLS_CONFIG, &"merge-tools.rc".into()));
+            errors.append(
+                &mut self.parse(MERGE_TOOLS_CONFIG, &opts.clone().source("merge-tools.rc")),
+            );
         }
         #[cfg(feature = "fb")]
         errors.append(&mut self.load_dynamic(repo_path, opts.clone())?);
@@ -383,6 +387,7 @@ impl ConfigSetHgExt for ConfigSet {
         // Regenerate if mtime is old.
         let generation_time: Option<u64> = self.get_opt("configs", "generationtime")?;
         let recursion_marker = env::var("HG_DEBUGDYNAMICCONFIG");
+        let mut skip_reason = None;
 
         if recursion_marker.is_err() {
             if let Some(generation_time) = generation_time {
@@ -394,18 +399,39 @@ impl ConfigSetHgExt for ConfigSet {
                     // is brand new and has an age of 0.
                     .unwrap_or(Duration::from_secs(0));
                 if mtime_age > generation_time {
-                    let mut command = Command::new("hg");
-                    command
-                        .arg("debugdynamicconfig")
-                        .env("HG_DEBUGDYNAMICCONFIG", "1");
+                    let config_regen_command: Vec<String> =
+                        self.get_or("configs", "regen-command", || {
+                            vec!["hg".to_string(), "debugdynamicconfig".to_string()]
+                        })?;
+                    tracing::debug!(
+                        "spawn {:?} because mtime {:?} > generation_time {:?}",
+                        &config_regen_command,
+                        mtime_age,
+                        generation_time
+                    );
+                    if !config_regen_command.is_empty() {
+                        let mut command = Command::new(&config_regen_command[0]);
+                        command
+                            .args(&config_regen_command[1..])
+                            .env("HG_DEBUGDYNAMICCONFIG", "1");
 
-                    if let Some(repo_path) = repo_path {
-                        command.args(&["--cwd", &repo_path.to_string_lossy()]);
+                        if let Some(repo_path) = repo_path {
+                            command.current_dir(&repo_path);
+                        }
+
+                        let _ = run_background(command);
                     }
-
-                    let _ = run_background(command);
+                } else {
+                    skip_reason = Some("mtime <= configs.generationtime");
                 }
+            } else {
+                skip_reason = Some("configs.generationtime is not set");
             }
+        } else {
+            skip_reason = Some("HG_DEBUGDYNAMICCONFIG is set");
+        }
+        if let Some(reason) = skip_reason {
+            tracing::debug!("skip spawning debugdynamicconfig because {}", reason);
         }
 
         Ok(errors)
@@ -485,7 +511,7 @@ fn read_set_repo_name(config: &mut ConfigSet, repo_path: &Path) -> crate::Result
         if name.is_empty() {
             tracing::warn!("repo name: no remotefilelog.reponame");
             let path: String = config.get_or_default("paths", "default")?;
-            name = get_url_basename(&path).unwrap_or_default();
+            name = repo_name_from_url(&path).unwrap_or_default();
             if name.is_empty() {
                 tracing::warn!("repo name: no path.default reponame: {}", &path);
             }
@@ -601,7 +627,7 @@ impl ConfigSet {
     }
 }
 
-fn get_url_basename(s: &str) -> Option<String> {
+pub fn repo_name_from_url(s: &str) -> Option<String> {
     // Use a base_url to support non-absolute urls.
     let base_url = Url::parse("file:///.").unwrap();
     let parse_opts = Url::options().base_url(Some(&base_url));
@@ -699,6 +725,12 @@ pub fn generate_dynamicconfig(
     use filetime::FileTime;
     use tempfile::tempfile_in;
 
+    tracing::debug!(
+        repo_path = ?repo_path,
+        canary = ?canary,
+        "generate_dynamicconfig",
+    );
+
     // Resolve sharedpath
     let config_dir = get_config_dir(repo_path)?;
 
@@ -733,9 +765,12 @@ pub fn generate_dynamicconfig(
 
     // If the file exists and will be unchanged, just update the mtime.
     if hgrc_path.exists() && read_to_string(&hgrc_path).unwrap_or_default() == config_str {
-        set_file_mtime(hgrc_path, FileTime::now())?;
+        let time = FileTime::now();
+        tracing::debug!("bump {:?} mtime to {:?}", &hgrc_path, &time);
+        set_file_mtime(hgrc_path, time)?;
     } else {
-        util::file::atomic_write(hgrc_path, 0o644, true, |f| {
+        tracing::debug!("rewrite {:?}", &hgrc_path);
+        util::file::atomic_write(&hgrc_path, |f| {
             f.write_all(config_str.as_bytes())?;
             Ok(())
         })?;
@@ -1019,6 +1054,13 @@ mod tests {
         assert_eq!(cfg.get("y", "b"), None);
         assert_eq!(cfg.get("z", "c"), Some("3".into()));
     }
+
+    #[test]
+    fn test_py_core_items() {
+        let mut cfg = ConfigSet::new();
+        cfg.load::<String, String>(None, None).unwrap();
+        assert_eq!(cfg.get("treestate", "repackfactor").unwrap(), "3");
+    }
 }
 
 const MERGE_TOOLS_CONFIG: &str = r#"# Some default global settings for common merge tools
@@ -1167,4 +1209,19 @@ UltraCompare.gui = True
 UltraCompare.binary = True
 UltraCompare.check = conflicts,changed
 UltraCompare.diffargs=$child $parent -title1 $clabel -title2 $plabel1
+"#;
+
+// Config items from python's configitems.py which previously were
+// only available in Python. They have the lowest priority.
+static HG_PY_CORE_CONFIG: &str = r#"
+[treestate]
+mingcage=900
+minrepackthreshold=10M
+repackfactor=3
+
+[ui]
+timeout=600
+
+[checkout]
+resumable=True
 "#;

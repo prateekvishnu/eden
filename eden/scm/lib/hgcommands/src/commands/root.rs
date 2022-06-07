@@ -17,7 +17,7 @@ define_flags! {
     }
 }
 
-pub fn run(opts: RootOpts, io: &IO, repo: Repo) -> Result<u8> {
+pub fn run(opts: RootOpts, io: &IO, repo: &mut Repo) -> Result<u8> {
     let path = if opts.shared {
         repo.shared_path()
     } else {
@@ -41,4 +41,8 @@ pub fn doc() -> &'static str {
     Print the root directory of the current repository.
 
     Returns 0 on success."#
+}
+
+pub fn synopsis() -> Option<&'static str> {
+    None
 }

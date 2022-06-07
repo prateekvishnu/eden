@@ -12,8 +12,8 @@ from ctypes.wintypes import (
     BOOL as _BOOL,
     DWORD as _DWORD,
     HANDLE as _HANDLE,
-    LPWSTR as _LPWSTR,
     LPDWORD as _LPDWORD,
+    LPWSTR as _LPWSTR,
 )
 from pathlib import Path
 from typing import Iterable, NoReturn, Optional, Type
@@ -35,7 +35,6 @@ if sys.platform == "win32":
 
     def raise_win_error() -> NoReturn:
         raise ctypes.WinError()
-
 
 else:
     # This entire file is only ever imported in Windows.  However on our continuous

@@ -5,8 +5,6 @@
  * GNU General Public License version 2.
  */
 
-#![deny(warnings)]
-
 /// Mononoke pushrebase implementation. The main goal of pushrebase is to decrease push contention.
 /// Commits that client pushed are rebased on top of `onto_bookmark` on the server
 ///
@@ -74,15 +72,24 @@ use mononoke_types::{
 };
 use revset::RangeNodeStream;
 use slog::info;
+use stats::prelude::*;
 use std::cmp::{max, Ordering};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::Instant;
 use thiserror::Error;
 use tunables::tunables;
 
 use pushrebase_hook::{
     PushrebaseCommitHook, PushrebaseHook, PushrebaseTransactionHook, RebasedChangesets,
 };
+
+define_stats! {
+    prefix = "mononoke.pushrebase";
+    critical_section_success_duration_us: dynamic_timeseries("{}.critical_section_success_duration_us", (reponame: String); Average, Sum, Count),
+    critical_section_failure_duration_us: dynamic_timeseries("{}.critical_section_failure_duration_us", (reponame: String); Average, Sum, Count),
+    critical_section_retries_failed: dynamic_timeseries("{}.critical_section_retries_failed", (reponame: String); Average, Sum),
+}
 
 const MAX_REBASE_ATTEMPTS: usize = 100;
 
@@ -338,6 +345,7 @@ async fn rebase_in_loop(
     let mut latest_rebase_attempt = root;
     let mut pushrebase_distance = PushrebaseDistance(0);
 
+    let repo_args = (repo.name().to_string(),);
     for retry_num in 0..MAX_REBASE_ATTEMPTS {
         let retry_num = PushrebaseRetryNum(retry_num);
 
@@ -347,6 +355,7 @@ async fn rebase_in_loop(
                 .map(|h| h.prepushrebase().map_err(PushrebaseError::from)),
         );
 
+        let start_critical_section = Instant::now();
         let (hooks, bookmark_val) =
             try_join(hooks, get_bookmark_value(&ctx, &repo, onto_bookmark)).await?;
 
@@ -398,7 +407,15 @@ async fn rebase_in_loop(
         )
         .await?;
 
+        let critical_section_duration_us: i64 = start_critical_section
+            .elapsed()
+            .as_nanos()
+            .try_into()
+            .unwrap_or(i64::MAX);
         if let Some((head, rebased_changesets)) = rebase_outcome {
+            STATS::critical_section_success_duration_us
+                .add_value(critical_section_duration_us, repo_args.clone());
+            STATS::critical_section_retries_failed.add_value(retry_num.0 as i64, repo_args.clone());
             let res = PushrebaseOutcome {
                 head,
                 retry_num,
@@ -406,10 +423,14 @@ async fn rebase_in_loop(
                 pushrebase_distance,
             };
             return Ok(res);
+        } else {
+            STATS::critical_section_failure_duration_us
+                .add_value(critical_section_duration_us, repo_args.clone());
         }
 
         latest_rebase_attempt = bookmark_val.unwrap_or(root);
     }
+    STATS::critical_section_retries_failed.add_value(MAX_REBASE_ATTEMPTS as i64, repo_args);
 
     Err(PushrebaseInternalError::TooManyRebaseAttempts.into())
 }

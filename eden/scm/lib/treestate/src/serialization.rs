@@ -7,11 +7,15 @@
 
 //! Trait for serialization and deserialization of tree data.
 
+use std::collections::BTreeMap;
 use std::hash::Hasher;
+use std::io::BufRead;
+use std::io::BufReader;
 use std::io::Cursor;
 use std::io::Read;
 use std::io::Write;
 
+use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Result;
 use byteorder::BigEndian;
@@ -21,10 +25,12 @@ use twox_hash::XxHash;
 use vlqencoding::VLQDecode;
 use vlqencoding::VLQEncode;
 
+use crate::dirstate::Dirstate;
 use crate::errors::*;
 use crate::filestate::FileState;
 use crate::filestate::FileStateV2;
 use crate::filestate::StateFlags;
+use crate::metadata::Metadata;
 use crate::store::BlockId;
 use crate::tree::AggregatedState;
 use crate::tree::Key;
@@ -307,5 +313,76 @@ impl Serializable for StateFlags {
 
     fn serialize(&self, w: &mut dyn Write) -> Result<()> {
         Ok(w.write_vlq(self.to_bits())?)
+    }
+}
+
+impl Serializable for Metadata {
+    fn serialize(&self, w: &mut dyn Write) -> Result<()> {
+        for (i, (k, v)) in self.0.iter().enumerate() {
+            if v.is_empty() {
+                continue;
+            }
+
+            if k.contains(&['=', '\0']) || v.contains('\0') {
+                return Err(anyhow!("invalid metadata: {k:?} -> {v:?}"));
+            }
+
+            write!(w, "{k}={v}")?;
+
+            if i < self.0.len() - 1 {
+                w.write_all(&[0])?;
+            }
+        }
+        Ok(())
+    }
+
+    fn deserialize(r: &mut dyn Read) -> Result<Self> {
+        let mut buf_reader = BufReader::new(r);
+        let mut data = BTreeMap::<String, String>::new();
+        loop {
+            let mut key = Vec::<u8>::new();
+            if buf_reader.read_until(b'=', &mut key)? == 0 {
+                break;
+            }
+            if key.pop() != Some(b'=') {
+                return Err(anyhow!("metadata key missing '=': {key:?}"));
+            }
+
+            let mut value = Vec::<u8>::new();
+            buf_reader.read_until(b'\0', &mut value)?;
+            if value.last() == Some(&0) {
+                value.pop();
+            }
+
+            data.insert(String::from_utf8(key)?, String::from_utf8(value)?);
+        }
+        Ok(Self(data))
+    }
+}
+
+const DIRSTATE_HEADER: &[u8] = b"\ntreestate\n\0";
+
+impl Serializable for Dirstate {
+    fn serialize(&self, w: &mut dyn Write) -> Result<()> {
+        w.write_all(self.p0.as_ref())?;
+        w.write_all(self.p1.as_ref())?;
+        w.write_all(DIRSTATE_HEADER)?;
+
+        let mut meta = Metadata(BTreeMap::from([
+            ("filename".to_string(), self.tree_filename.clone()),
+            ("rootid".to_string(), self.tree_root_id.0.to_string()),
+        ]));
+        if let Some(threshold) = self.repack_threshold {
+            meta.0
+                .insert("threshold".to_string(), threshold.to_string());
+        }
+
+        meta.serialize(w)?;
+
+        Ok(())
+    }
+
+    fn deserialize(_r: &mut dyn Read) -> Result<Self> {
+        unimplemented!()
     }
 }

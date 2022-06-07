@@ -17,19 +17,20 @@ import shutil
 import signal
 import subprocess
 import sys
+import traceback
 import typing
 import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Type
 
 import thrift.transport
-from eden.fs.cli.buck import run_buck_command, get_buck_command
+from eden.fs.cli.buck import get_buck_command, run_buck_command
 from eden.fs.cli.telemetry import TelemetrySample
 from eden.fs.cli.util import (
     check_health_using_lockfile,
-    wait_for_instance_healthy,
-    is_apple_silicon,
     get_protocol,
+    is_apple_silicon,
+    wait_for_instance_healthy,
 )
 from eden.thrift.legacy import EdenClient, EdenNotRunningError
 from facebook.eden import EdenService
@@ -56,16 +57,16 @@ from . import (
     util,
     version as version_mod,
 )
-from .cmd_util import get_eden_instance, require_checkout, prompt_confirmation
+from .cmd_util import get_eden_instance, prompt_confirmation, require_checkout
 from .config import EdenCheckout, EdenInstance, ListMountInfo
 from .stats_print import format_size
 from .subcmd import Subcmd
-from .util import ShutdownError, print_stderr, get_environment_suitable_for_subprocess
+from .util import get_environment_suitable_for_subprocess, print_stderr, ShutdownError
 
 try:
     from .facebook.util import (
-        migration_restart_help,
         get_migration_success_message,
+        migration_restart_help,
         stop_internal_processes,
     )
 except ImportError:
@@ -873,6 +874,12 @@ want nested checkouts, re-run `eden clone` with --allow-nested-checkout or -n.""
 
         return overlay_type == "tree"
 
+    def _get_use_write_back_cache(self, backing_store_type: Optional[str]) -> bool:
+        if backing_store_type is None:
+            return False
+        # Enable write back cache feature for RE CAS backing store
+        return backing_store_type == "recas"
+
     def _get_repo_info(
         self,
         instance: EdenInstance,
@@ -903,6 +910,8 @@ want nested checkouts, re-run `eden clone` with --allow-nested-checkout or -n.""
 
         enable_tree_overlay = self._get_enable_tree_overlay(instance, overlay_type)
 
+        use_write_back_cache = self._get_use_write_back_cache(backing_store_type)
+
         # New clones on macOS and Windows are case insensitive.
         case_sensitive = sys.platform == "linux"
 
@@ -921,6 +930,7 @@ want nested checkouts, re-run `eden clone` with --allow-nested-checkout or -n.""
             predictive_prefetch_profiles_active=False,
             predictive_prefetch_num_dirs=0,
             enable_tree_overlay=enable_tree_overlay,
+            use_write_back_cache=use_write_back_cache,
         )
 
         return repo, repo_config
@@ -1408,11 +1418,19 @@ Any uncommitted changes and shelves in this checkout will be lost forever."""
             try:
                 if remove_type != RemoveType.CLEANUP_ONLY:
                     instance.destroy_mount(mount, args.preserve_mount_point)
-                else:
-                    instance.cleanup_mount(Path(mount), args.preserve_mount_point)
             except Exception as ex:
                 print_stderr(f"error deleting configuration for {mount}: {ex}")
                 exit_code = 1
+                if args.debug:
+                    traceback.print_exc()
+            else:
+                try:
+                    instance.cleanup_mount(Path(mount), args.preserve_mount_point)
+                except Exception as ex:
+                    print_stderr(f"error cleaning up mount {mount}: {ex}")
+                    exit_code = 1
+                    if args.debug:
+                        traceback.print_exc()
                 # Continue around the loop removing any other mount points
 
         if exit_code == 0:
@@ -2002,7 +2020,6 @@ class RageCmd(Subcmd):
             rage_mod.report_edenfs_bug(instance, rage_processor)
             return 0
         else:
-            rage_mod.hint_rage_report()
             if args.dry_run:
                 rage_processor = None
 

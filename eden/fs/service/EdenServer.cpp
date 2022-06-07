@@ -284,8 +284,7 @@ size_t getNumberPendingFuseRequests(const EdenMount* mount) {
 
 } // namespace
 
-namespace facebook {
-namespace eden {
+namespace facebook::eden {
 
 class EdenServer::ThriftServerEventHandler
     : public apache::thrift::server::TServerEventHandler,
@@ -690,6 +689,10 @@ void EdenServer::updatePeriodicTaskIntervals(const EdenConfig& config) {
       std::chrono::duration_cast<std::chrono::milliseconds>(
           config.checkValidityInterval.getValue()));
 #endif
+
+  overlayTask_.updateInterval(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          config.overlayMaintenanceInterval.getValue()));
 
   localStoreTask_.updateInterval(
       std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1428,6 +1431,21 @@ Future<Unit> EdenServer::completeTakeoverStart(
   }
 }
 
+BackingStoreType toBackingStoreType(const std::string& type) {
+  if (type == "git") {
+    return BackingStoreType::GIT;
+  } else if (type == "hg") {
+    return BackingStoreType::HG;
+  } else if (type == "recas") {
+    return BackingStoreType::RECAS;
+  } else if (type == "") {
+    return BackingStoreType::EMPTY;
+  } else {
+    throw std::domain_error(
+        folly::to<std::string>("unsupported backing store type: ", type));
+  }
+}
+
 folly::Future<std::shared_ptr<EdenMount>> EdenServer::mount(
     std::unique_ptr<CheckoutConfig> initialConfig,
     bool readOnly,
@@ -1436,17 +1454,18 @@ folly::Future<std::shared_ptr<EdenMount>> EdenServer::mount(
   folly::stop_watch<> mountStopWatch;
 
   auto backingStore = getBackingStore(
-      initialConfig->getRepoType(), initialConfig->getRepoSource());
+      toBackingStoreType(initialConfig->getRepoType()),
+      initialConfig->getRepoSource());
 
   auto objectStore = ObjectStore::create(
       getLocalStore(),
       backingStore,
       treeCache_,
       getSharedStats(),
-      serverState_->getThreadPool().get(),
       serverState_->getProcessNameCache(),
       serverState_->getStructuredLogger(),
-      serverState_->getReloadableConfig()->getEdenConfig());
+      serverState_->getReloadableConfig()->getEdenConfig(),
+      initialConfig->getCaseSensitive());
   auto journal = std::make_unique<Journal>(getSharedStats());
 
   // Create the EdenMount object and insert the mount into the mountPoints_ map.
@@ -1777,9 +1796,9 @@ Future<CheckoutResult> EdenServer::checkOutRevision(
 }
 
 shared_ptr<BackingStore> EdenServer::getBackingStore(
-    StringPiece type,
+    BackingStoreType type,
     StringPiece name) {
-  BackingStoreKey key{type.str(), name.str()};
+  BackingStoreKey key{type, name.str()};
   auto lockedStores = backingStores_.wlock();
   const auto it = lockedStores->find(key);
   if (it != lockedStores->end()) {
@@ -2105,6 +2124,15 @@ void EdenServer::refreshBackingStore() {
   }
 }
 
+void EdenServer::manageOverlay() {
+  const auto mountPoints = mountPoints_.rlock();
+  for (const auto& [_, info] : *mountPoints) {
+    const auto& mount = info.edenMount;
+
+    mount->getOverlay()->maintenance();
+  }
+}
+
 void EdenServer::reloadConfig() {
   // Get the config, forcing a reload now.
   auto config = serverState_->getReloadableConfig()->getEdenConfig(
@@ -2139,5 +2167,4 @@ void EdenServer::checkLockValidity() {
   stop();
 }
 
-} // namespace eden
-} // namespace facebook
+} // namespace facebook::eden

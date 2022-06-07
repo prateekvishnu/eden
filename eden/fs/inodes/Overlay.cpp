@@ -32,8 +32,7 @@
 #include "eden/fs/inodes/OverlayFile.h"
 #endif // !_WIN32
 
-namespace facebook {
-namespace eden {
+namespace facebook::eden {
 
 namespace {
 constexpr uint64_t ioCountMask = 0x7FFFFFFFFFFFFFFFull;
@@ -229,7 +228,10 @@ void Overlay::initOverlay(
   //
   // HACK: ideally we should not have multiple overlay types. However before
   // the migration is done, this is a reliable way to look for `TreeOverlay`.
-  if (supportsSemanticOperations_) {
+  //
+  // mountPath will be empty during benchmarking so we must check the value
+  // here to skip scanning in that case.
+  if (supportsSemanticOperations_ && mountPath.has_value()) {
     optNextInodeNumber = dynamic_cast<TreeOverlay*>(backingOverlay_.get())
                              ->scanLocalChanges(*mountPath);
   }
@@ -640,5 +642,8 @@ void Overlay::renameChild(
     }
   }
 }
-} // namespace eden
-} // namespace facebook
+
+void Overlay::maintenance() {
+  backingOverlay_->maintenance();
+}
+} // namespace facebook::eden

@@ -2,7 +2,7 @@
 #
 # run-tests.py - Run a set of tests on Mercurial
 #
-# Copyright 2006 Matt Mackall <mpm@selenic.com>
+# Copyright 2006 Olivia Mackall <olivia@selenic.com>
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -183,7 +183,6 @@ if sys.version_info > (3, 5, 0):
             return p
         return p.decode("utf-8")
 
-
 elif sys.version_info >= (3, 0, 0):
     print(
         "%s is only supported on Python 3.5+ and 2.7, not %s"
@@ -270,10 +269,11 @@ else:
 
 
 def Popen4(cmd, wd, timeout, env=None):
+    shell = not isinstance(cmd, list)
     with processlock:
         p = subprocess.Popen(
             cmd,
-            shell=True,
+            shell=shell,
             bufsize=-1,
             cwd=wd,
             env=env,
@@ -375,6 +375,17 @@ def parsettestcases(path):
         if ex.errno != errno.ENOENT:
             raise
     return cases
+
+
+def compatiblewithdebugruntest(path):
+    """check whether a .t test is compatible with debugruntest"""
+    try:
+        with open(path, "r", encoding="utf8") as f:
+            return "#debugruntest-compatible" in f.read(1024)
+    except IOError as ex:
+        if ex.errno != errno.ENOENT:
+            raise
+    return False
 
 
 def getparser():
@@ -860,7 +871,7 @@ def vlog(*msg):
 
 # Bytes that break XML even in a CDATA block: control characters 0-31
 # sans \t, \n and \r
-CDATA_EVIL = re.compile(br"[\000-\010\013\014\016-\037]")
+CDATA_EVIL = re.compile(rb"[\000-\010\013\014\016-\037]")
 
 # Match feature conditionalized output lines in the form, capturing the feature
 # list in group 2, and the preceeding line output in group 1:
@@ -966,7 +977,6 @@ if os.name == "nt":
                 _kernel32.TerminateJobObject(self._hjob, 0)
                 _kernel32.CloseHandle(self._hjob)
                 self._hjob = 0
-
 
 else:
 
@@ -1421,7 +1431,7 @@ class Test(unittest.TestCase):
 
     def _portmap(self, i):
         offset = b"" if i == 0 else b"%d" % i
-        return (br":%d\b" % (self._startport + i), b":$HGPORT%s" % offset)
+        return (rb":%d\b" % (self._startport + i), b":$HGPORT%s" % offset)
 
     def _getreplacements(self):
         """Obtain a mapping of text replacements to apply to test output.
@@ -1438,25 +1448,25 @@ class Test(unittest.TestCase):
             # This hack allows us to have same outputs for ipv4 and v6 urls:
             # [ipv6]:port
             (
-                br"([^0-9:])\[%s\]:[0-9]+" % re.escape(_bytespath(self._localip())),
-                br"\1$LOCALIP:$LOCAL_PORT",
+                rb"([^0-9:])\[%s\]:[0-9]+" % re.escape(_bytespath(self._localip())),
+                rb"\1$LOCALIP:$LOCAL_PORT",
             ),
             # [ipv6]
             (
-                br"([^0-9:])\[%s\]" % re.escape(_bytespath(self._localip())),
-                br"\1$LOCALIP",
+                rb"([^0-9:])\[%s\]" % re.escape(_bytespath(self._localip())),
+                rb"\1$LOCALIP",
             ),
             # ipv4:port
             (
-                br"([^0-9])%s:[0-9]+" % re.escape(_bytespath(self._localip())),
-                br"\1$LOCALIP:$LOCAL_PORT",
+                rb"([^0-9])%s:[0-9]+" % re.escape(_bytespath(self._localip())),
+                rb"\1$LOCALIP:$LOCAL_PORT",
             ),
             # [ipv4]
-            (br"([^0-9])%s" % re.escape(_bytespath(self._localip())), br"\1$LOCALIP"),
-            (br"\bHG_TXNID=TXN:[a-f0-9]{40}\b", br"HG_TXNID=TXN:$ID$"),
+            (rb"([^0-9])%s" % re.escape(_bytespath(self._localip())), rb"\1$LOCALIP"),
+            (rb"\bHG_TXNID=TXN:[a-f0-9]{40}\b", rb"HG_TXNID=TXN:$ID$"),
         ]
         r.append((_bytespath(self._escapepath(self._testtmp)), b"$TESTTMP"))
-        r.append((br"eager:///", br"eager://"))
+        r.append((rb"eager:///", rb"eager://"))
 
         replacementfile = os.path.join(self._testdir, "common-pattern.py")
 
@@ -1743,15 +1753,6 @@ class PythonTest(Test):
     def refpath(self):
         return os.path.join(self._testdir, "%s.out" % self.basename)
 
-    def readrefout(self):
-        if self._isdotttest():
-            # No reference output.
-            # This prevents a textual diff between the test script output and
-            # the "reference output".
-            return []
-        else:
-            return super(PythonTest, self).readrefout()
-
     def _processoutput(self, output):
         if os.path.exists(self.refpath):
             with open(self.refpath, "rb") as f:
@@ -1797,9 +1798,6 @@ class PythonTest(Test):
             else:
                 debugargs = " -m ipdb "
         cmd = '%s debugpython -- %s "%s"' % (self._hgcommand, debugargs, self.path)
-        if self._options.interactive and self._isdotttest():
-            # --fix is picked up by testutil.autofix, which will autofix the test.
-            cmd += " --fix"
         vlog("# Running", cmd)
         normalizenewlines = os.name == "nt"
         with open(self.path, "r", encoding="utf8") as f:
@@ -1818,18 +1816,6 @@ class PythonTest(Test):
 
         return result[0], self._processoutput(result[1])
 
-    def _isdotttest(self):
-        """Returns true if the test is using testutil.dott"""
-        if self.basename.endswith("-t.py"):
-            return True
-        else:
-            try:
-                with open(self.name) as f:
-                    content = f.read()
-                return " testutil.dott" in content or "sh %" in content
-            except Exception:
-                return False
-
 
 bchr = chr
 if PYTHON3:
@@ -1842,9 +1828,9 @@ class TTest(Test):
     SKIPPED_PREFIX = b"skipped: "
     FAILED_PREFIX = b"hghave check failed: "
 
-    ESCAPESUB = re.compile(br"[\x00-\x08\x0b-\x1f\\\x7f-\xff]").sub
-    ESCAPEMAP = dict((bchr(i), br"\x%02x" % i) for i in range(256))
-    ESCAPEMAP.update({b"\\": b"\\\\", b"\r": br"\r"})
+    ESCAPESUB = re.compile(rb"[\x00-\x08\x0b-\x1f\\\x7f-\xff]").sub
+    ESCAPEMAP = dict((bchr(i), rb"\x%02x" % i) for i in range(256))
+    ESCAPEMAP.update({b"\\": b"\\\\", b"\r": rb"\r"})
 
     def __init__(self, path, *args, **kwds):
         # accept an extra "case" parameter
@@ -2142,7 +2128,7 @@ class TTest(Test):
                 if not lout.endswith(b"\n"):
                     if b"\x1b" in lout or b"\r" in lout:
                         lout = (
-                            lout.replace(b"\x1b", br"\x1b").replace(b"\r", br"\r")
+                            lout.replace(b"\x1b", rb"\x1b").replace(b"\r", rb"\r")
                             + b" (no-eol) (esc)\n"
                         )
                     else:
@@ -2222,8 +2208,8 @@ class TTest(Test):
             el = b"(?:" + el + b")"
             # use \Z to ensure that the regex matches to the end of the string
             if os.name == "nt":
-                return re.match(el + br"\r?\n\Z", l)
-            return re.match(el + br"\n\Z", l)
+                return re.match(el + rb"\r?\n\Z", l)
+            return re.match(el + rb"\n\Z", l)
         except re.error:
             # el is an invalid regex
             return False
@@ -2326,6 +2312,36 @@ class TTest(Test):
     @staticmethod
     def _stringescape(s):
         return TTest.ESCAPESUB(TTest._escapef, s)
+
+
+class DebugRunTestTest(Test):
+    """test compatible with debugruntest runner"""
+
+    @property
+    def refpath(self):
+        return os.path.join(self._testdir, self.basename)
+
+    def _run(self, env):
+        cmdargs = [
+            self._hgcommand,
+            "debugpython",
+            "--",
+            "-m",
+            "edenscm.testing.single",
+            self.path,
+            "-o",
+            self.errpath,
+        ]
+        vlog("# Running", shlex.join(cmdargs))
+        exitcode, out = self._runcommand(cmdargs, env)
+
+        if exitcode == 1 and os.path.exists(self.errpath):
+            with open(self.errpath, "rb") as f:
+                out = f.readlines()
+        if exitcode == 0:
+            out = self._refout
+
+        return exitcode, out
 
 
 firstlock = RLock()
@@ -3109,9 +3125,9 @@ class TextTestRunner(unittest.TextTestRunner):
             data = pread(bisectcmd + ["--command", rtc])
             m = re.search(
                 (
-                    br"\nThe first (?P<goodbad>bad|good) revision "
-                    br"is:\ncommit: +(?P<node>[a-f0-9]+)\n.*\n"
-                    br"summary: +(?P<summary>[^\n]+)\n"
+                    rb"\nThe first (?P<goodbad>bad|good) revision "
+                    rb"is:\ncommit: +(?P<node>[a-f0-9]+)\n.*\n"
+                    rb"summary: +(?P<summary>[^\n]+)\n"
                 ),
                 data,
                 (re.MULTILINE | re.DOTALL),
@@ -3616,6 +3632,9 @@ class TestRunner(object):
             ):
                 continue
             if t.endswith(".t"):
+                if compatiblewithdebugruntest(t):
+                    tests.append({"path": t, "runner": "debugruntest"})
+                    continue
                 # .t file may contain multiple test cases
                 cases = sorted(parsettestcases(t))
                 if cases:
@@ -3630,9 +3649,12 @@ class TestRunner(object):
         def _reloadtest(test, i):
             # convert a test back to its description dict
             desc = {"path": test.path}
-            case = getattr(test, "_case", None)
-            if case:
-                desc["case"] = case
+            if isinstance(test, DebugRunTestTest):
+                desc["runner"] = "debugruntest"
+            else:
+                case = getattr(test, "_case", None)
+                if case:
+                    desc["case"] = case
             return self._gettest(desc, i)
 
         failed = False
@@ -3755,13 +3777,16 @@ class TestRunner(object):
         map to a known type.
         """
         path = testdesc["path"]
-        lctest = path.lower()
-        testcls = Test
+        if testdesc.get("runner") == "debugruntest":
+            testcls = DebugRunTestTest
+        else:
+            lctest = path.lower()
+            testcls = Test
 
-        for ext, cls in self.TESTTYPES:
-            if lctest.endswith(ext):
-                testcls = cls
-                break
+            for ext, cls in self.TESTTYPES:
+                if lctest.endswith(ext):
+                    testcls = cls
+                    break
 
         refpath = os.path.join(self._testdir, path)
         tmpdir = os.path.join(self._hgtmp, "child%d" % count)
@@ -4095,7 +4120,8 @@ def ensureenv():
     newenv = os.environ.copy()
     newenv.update(env)
     # Pick the right Python interpreter
-    p = subprocess.Popen([PYTHON] + sys.argv, env=newenv)
+    python = env.get("PYTHON_SYS_EXECUTABLE", PYTHON)
+    p = subprocess.Popen([python] + sys.argv, env=newenv)
     sys.exit(p.wait())
 
 

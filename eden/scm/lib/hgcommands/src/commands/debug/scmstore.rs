@@ -40,9 +40,9 @@ enum FetchMode {
     Tree,
 }
 
-pub fn run(opts: DebugScmStoreOpts, io: &IO, repo: Repo) -> Result<u8> {
+pub fn run(opts: DebugScmStoreOpts, io: &IO, repo: &mut Repo) -> Result<u8> {
     if opts.python {
-        return Err(errors::FallbackToPython.into());
+        return Err(errors::FallbackToPython(name()).into());
     }
 
     let mode = match opts.mode.as_ref() {
@@ -115,4 +115,8 @@ pub fn name() -> &'static str {
 
 pub fn doc() -> &'static str {
     "test file and tree fetching using scmstore"
+}
+
+pub fn synopsis() -> Option<&'static str> {
+    None
 }

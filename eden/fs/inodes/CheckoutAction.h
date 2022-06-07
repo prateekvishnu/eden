@@ -13,19 +13,17 @@
 #include <vector>
 #include "eden/fs/fuse/Invalidation.h"
 #include "eden/fs/inodes/InodePtr.h"
-#include "eden/fs/model/TreeEntry.h"
+#include "eden/fs/model/Tree.h"
 
 namespace folly {
 class exception_wrapper;
 }
 
-namespace facebook {
-namespace eden {
+namespace facebook::eden {
 
 class Blob;
 class CheckoutContext;
 class ObjectStore;
-class Tree;
 
 /**
  * A helper class representing an action that must be taken as part of a
@@ -50,8 +48,8 @@ class CheckoutAction {
    */
   CheckoutAction(
       CheckoutContext* ctx,
-      const TreeEntry* oldScmEntry,
-      const TreeEntry* newScmEntry,
+      const Tree::value_type* oldScmEntry,
+      const Tree::value_type* newScmEntry,
       InodePtr&& inode);
 
   /**
@@ -66,8 +64,8 @@ class CheckoutAction {
   template <typename InodePtrType>
   CheckoutAction(
       CheckoutContext* ctx,
-      const TreeEntry* oldScmEntry,
-      const TreeEntry* newScmEntry,
+      const Tree::value_type* oldScmEntry,
+      const Tree::value_type* newScmEntry,
       folly::Future<InodePtrType> inodeFuture)
       : CheckoutAction(
             INTERNAL,
@@ -110,8 +108,8 @@ class CheckoutAction {
   CheckoutAction(
       InternalConstructor,
       CheckoutContext* ctx,
-      const TreeEntry* oldScmEntry,
-      const TreeEntry* newScmEntry,
+      const Tree::value_type* oldScmEntry,
+      const Tree::value_type* newScmEntry,
       folly::Future<InodePtr> inodeFuture);
 
   void setOldTree(std::shared_ptr<const Tree> tree);
@@ -141,14 +139,14 @@ class CheckoutAction {
    *
    * This will be none if the entry did not exist in the old Tree.
    */
-  std::optional<TreeEntry> oldScmEntry_;
+  std::optional<Tree::value_type> oldScmEntry_;
 
   /**
    * The TreeEntry in the new Tree that we are checking out.
    *
    * This will be none if the entry is deleted in the new Tree.
    */
-  std::optional<TreeEntry> newScmEntry_;
+  std::optional<Tree::value_type> newScmEntry_;
 
   /**
    * A Future that will be invoked when the inode is loaded.
@@ -195,5 +193,4 @@ class CheckoutAction {
    */
   folly::Promise<InvalidationRequired> promise_;
 };
-} // namespace eden
-} // namespace facebook
+} // namespace facebook::eden

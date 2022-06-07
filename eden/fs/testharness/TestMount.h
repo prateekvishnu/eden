@@ -29,8 +29,7 @@ struct Unit;
 class ManualExecutor;
 } // namespace folly
 
-namespace facebook {
-namespace eden {
+namespace facebook::eden {
 class BlobCache;
 class TreeCache;
 class CheckoutConfig;
@@ -261,6 +260,8 @@ class TestMount {
   TreeInodePtr getTreeInode(folly::StringPiece path) const;
   FileInodePtr getFileInode(RelativePathPiece path) const;
   FileInodePtr getFileInode(folly::StringPiece path) const;
+  InodeOrTreeOrEntry getInodeOrTreeOrEntry(RelativePathPiece path) const;
+  InodeOrTreeOrEntry getInodeOrTreeOrEntry(folly::StringPiece path) const;
 
   /**
    * Walk the entire tree and load all inode objects.
@@ -405,5 +406,4 @@ class TestMount {
 
   std::shared_ptr<ServerState> serverState_;
 };
-} // namespace eden
-} // namespace facebook
+} // namespace facebook::eden

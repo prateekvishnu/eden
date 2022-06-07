@@ -5,7 +5,7 @@
 
 # mdiff.py - diff and patch routines for mercurial
 #
-# Copyright 2005, 2006 Matt Mackall <mpm@selenic.com>
+# Copyright 2005, 2006 Olivia Mackall <olivia@selenic.com>
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -16,7 +16,7 @@ import re
 import struct
 import zlib
 from hashlib import sha1
-from typing import TYPE_CHECKING, Iterator, List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple, TYPE_CHECKING
 
 from edenscmnative import bdiff, mpatch, xdiff
 
@@ -37,7 +37,7 @@ patches = mpatch.patches
 patchedsize = mpatch.patchedsize
 textdiff = bdiff.bdiff
 
-wordsplitter = re.compile(br"(\t+| +|[a-zA-Z0-9_\x80-\xff]+|[^ \ta-zA-Z0-9_\x80-\xff])")
+wordsplitter = re.compile(rb"(\t+| +|[a-zA-Z0-9_\x80-\xff]+|[^ \ta-zA-Z0-9_\x80-\xff])")
 
 # called by dispatch.py
 def init(ui: "UI") -> None:

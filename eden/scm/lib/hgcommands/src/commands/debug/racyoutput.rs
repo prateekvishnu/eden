@@ -44,7 +44,7 @@ define_flags! {
     }
 }
 
-pub fn run(opts: DebugRacyOutputOpts, io: &IO, _config: ConfigSet) -> Result<u8> {
+pub fn run(opts: DebugRacyOutputOpts, io: &IO, _config: &mut ConfigSet) -> Result<u8> {
     add_time_series(opts.time_series as _);
     add_progress_bar_threads(
         opts.progress_bars as _,
@@ -128,4 +128,8 @@ pub fn name() -> &'static str {
 
 pub fn doc() -> &'static str {
     "exercise racy stdout / stderr / progress outputs"
+}
+
+pub fn synopsis() -> Option<&'static str> {
+    None
 }

@@ -176,6 +176,8 @@ fn parse_with_repo_definition(
         segmented_changelog_config,
         repo_client_knobs,
         phabricator_callsign,
+        walker_config,
+        cross_repo_commit_validation_config,
         ..
     } = named_repo_config;
 
@@ -204,6 +206,8 @@ fn parse_with_repo_definition(
         &named_storage_config
             .ok_or_else(|| anyhow!("missing storage_config from configuration"))?,
     )?;
+
+    let walker_config = walker_config.convert()?;
 
     let cache_warmup = cache_warmup.convert()?;
 
@@ -287,6 +291,8 @@ fn parse_with_repo_definition(
         .transpose()?
         .convert()?;
 
+    let cross_repo_commit_validation_config = cross_repo_commit_validation_config.convert()?;
+
     Ok(RepoConfig {
         enabled,
         storage_config,
@@ -324,6 +330,8 @@ fn parse_with_repo_definition(
         phabricator_callsign,
         backup_repo_config,
         acl_region_config,
+        walker_config,
+        cross_repo_commit_validation_config,
     })
 }
 
@@ -467,15 +475,15 @@ mod test {
     use metaconfig_types::{
         AclRegion, AclRegionConfig, AclRegionRule, BlameVersion, BlobConfig, BlobstoreId,
         BookmarkParams, BubbleDeletionMode, Bundle2ReplayParams, CacheWarmupParams,
-        CommitSyncConfig, CommitSyncConfigVersion, DatabaseConfig,
-        DefaultSmallToLargeCommitSyncPathAction, DeletedManifestVersion, DerivedDataConfig,
-        DerivedDataTypesConfig, EphemeralBlobstoreConfig, FilestoreParams, HookBypass, HookConfig,
-        HookManagerParams, HookParams, InfinitepushNamespace, InfinitepushParams, LfsParams,
-        LocalDatabaseConfig, MetadataDatabaseConfig, MultiplexId, MultiplexedStoreType, PushParams,
-        PushrebaseFlags, PushrebaseParams, RemoteDatabaseConfig, RemoteMetadataDatabaseConfig,
-        RepoClientKnobs, SegmentedChangelogConfig, SegmentedChangelogHeadConfig,
-        ShardableRemoteDatabaseConfig, ShardedRemoteDatabaseConfig, SmallRepoCommitSyncConfig,
-        SourceControlServiceMonitoring, SourceControlServiceParams, UnodeVersion,
+        CommitSyncConfig, CommitSyncConfigVersion, CrossRepoCommitValidation, DatabaseConfig,
+        DefaultSmallToLargeCommitSyncPathAction, DerivedDataConfig, DerivedDataTypesConfig,
+        EphemeralBlobstoreConfig, FilestoreParams, HookBypass, HookConfig, HookManagerParams,
+        HookParams, InfinitepushNamespace, InfinitepushParams, LfsParams, LocalDatabaseConfig,
+        MetadataDatabaseConfig, MultiplexId, MultiplexedStoreType, PushParams, PushrebaseFlags,
+        PushrebaseParams, RemoteDatabaseConfig, RemoteMetadataDatabaseConfig, RepoClientKnobs,
+        SegmentedChangelogConfig, SegmentedChangelogHeadConfig, ShardableRemoteDatabaseConfig,
+        ShardedRemoteDatabaseConfig, SmallRepoCommitSyncConfig, SourceControlServiceMonitoring,
+        SourceControlServiceParams, UnodeVersion, WalkerConfig,
     };
     use mononoke_types::MPath;
     use mononoke_types_mocks::changesetid::ONES_CSID;
@@ -740,7 +748,6 @@ mod test {
             [derived_data_config.available_configs.default]
             types = ["fsnodes", "unodes", "blame"]
             unode_version = 2
-            deleted_manifest_version = 2
             blame_filesize_limit = 101
 
             [[bookmarks]]
@@ -817,6 +824,13 @@ mod test {
 
             [backup_config]
             verification_enabled = false
+            
+            [walker_config]
+            scrub_enabled = true
+            validate_enabled = true
+            
+            [cross_repo_commit_validation_config]
+            skip_bookmarks = ["weirdy"]
         "#;
         let fbsource_repo_def = r#"
             repo_id=0
@@ -903,7 +917,7 @@ mod test {
         [[fbsource.allow_rules.regions]]
         roots = ["1111111111111111111111111111111111111111111111111111111111111111"]
         heads = []
-        path_prefixes = ["test/prefix"]
+        path_prefixes = ["test/prefix", ""]
         "#;
 
         let paths = btreemap! {
@@ -1115,7 +1129,6 @@ mod test {
                         blame_filesize_limit: Some(101),
                         hg_set_committer_extra: false,
                         blame_version: BlameVersion::V1,
-                        deleted_manifest_version: DeletedManifestVersion::V2,
                     },],
                     scuba_table: None,
                 },
@@ -1147,10 +1160,18 @@ mod test {
                         regions: vec![AclRegion {
                             roots: vec![ONES_CSID],
                             heads: vec![],
-                            path_prefixes: vec![MPath::new("test/prefix").unwrap()],
+                            path_prefixes: vec![Some(MPath::new("test/prefix").unwrap()), None],
                         }],
                         hipster_acl: "acl_test".to_string(),
                     }],
+                }),
+                walker_config: Some(WalkerConfig {
+                    scrub_enabled: true,
+                    validate_enabled: true,
+                    params: None,
+                }),
+                cross_repo_commit_validation_config: Some(CrossRepoCommitValidation {
+                    skip_bookmarks: [BookmarkName::new("weirdy").unwrap()].into(),
                 }),
             },
         );
@@ -1222,6 +1243,8 @@ mod test {
                 phabricator_callsign: Some("WWW".to_string()),
                 backup_repo_config: None,
                 acl_region_config: None,
+                walker_config: None,
+                cross_repo_commit_validation_config: None,
             },
         );
         assert_eq!(

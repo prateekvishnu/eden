@@ -5,7 +5,7 @@
 
 # filemerge.py - file-level merge handling for Mercurial
 #
-# Copyright 2006, 2007, 2008 Matt Mackall <mpm@selenic.com>
+# Copyright 2006, 2007, 2008 Olivia Mackall <olivia@selenic.com>
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -22,6 +22,7 @@ from . import (
     error,
     formatter,
     match,
+    pathutil,
     pycompat,
     registrar,
     scmutil,
@@ -30,7 +31,6 @@ from . import (
     templatekw,
     templater,
     util,
-    pathutil,
 )
 from .i18n import _
 from .node import nullid, short

@@ -13,9 +13,9 @@ use futures::try_join;
 use itertools::Itertools;
 use maplit::btreemap;
 use mononoke_api::{
-    ChangesetContext, ChangesetId, ChangesetPathContentContext, FileMetadata, FileType,
-    HeaderlessUnifiedDiff, MononokeError, PushrebaseOutcome, RepoContext, TreeEntry, TreeId,
-    TreeSummary, UnifiedDiff,
+    BookmarkInfo, ChangesetContext, ChangesetId, ChangesetPathContentContext, FileMetadata,
+    FileType, HeaderlessUnifiedDiff, MononokeError, PushrebaseOutcome, RepoContext, TreeEntry,
+    TreeId, TreeSummary, UnifiedDiff,
 };
 use source_control as thrift;
 use std::collections::{BTreeMap, BTreeSet};
@@ -298,6 +298,11 @@ impl AsyncIntoResponseWith<Vec<BTreeMap<thrift::CommitIdentityScheme, thrift::Co
     }
 }
 
+fn to_i64(val: usize) -> Result<i64, errors::ServiceError> {
+    val.try_into()
+        .map_err(|_| errors::internal_error("usize too big for i64").into())
+}
+
 #[async_trait]
 impl AsyncIntoResponseWith<thrift::PushrebaseOutcome> for PushrebaseOutcome {
     /// The additional data is the repo context, the set of commit identity
@@ -360,6 +365,31 @@ impl AsyncIntoResponseWith<thrift::PushrebaseOutcome> for PushrebaseOutcome {
         Ok(thrift::PushrebaseOutcome {
             head,
             rebased_commits,
+            pushrebase_distance: to_i64(self.pushrebase_distance.0)?,
+            retry_num: to_i64(self.retry_num.0)?,
+            ..Default::default()
+        })
+    }
+}
+
+#[async_trait]
+impl AsyncIntoResponseWith<thrift::BookmarkInfo> for BookmarkInfo {
+    /// The additional data is the set of commit identity schemes to be
+    /// returned in the response.
+    type Additional = BTreeSet<thrift::CommitIdentityScheme>;
+
+    async fn into_response_with(
+        self,
+        identity_schemes: &BTreeSet<thrift::CommitIdentityScheme>,
+    ) -> Result<thrift::BookmarkInfo, errors::ServiceError> {
+        let (warm_ids, fresh_ids) = try_join!(
+            map_commit_identity(&self.warm_changeset, identity_schemes),
+            map_commit_identity(&self.fresh_changeset, identity_schemes),
+        )?;
+        Ok(thrift::BookmarkInfo {
+            warm_ids,
+            fresh_ids,
+            last_update_timestamp_ns: self.last_update_timestamp.timestamp_nanos(),
             ..Default::default()
         })
     }

@@ -78,19 +78,18 @@ ImmediateFuture<std::vector<PrjfsDirEntry>> PrjfsDispatcherImpl::opendir(
                      std::variant<std::shared_ptr<const Tree>, TreeEntry>
                          treeOrTreeEntry) mutable {
         auto& tree = std::get<std::shared_ptr<const Tree>>(treeOrTreeEntry);
-        auto& treeEntries = tree->getTreeEntries();
 
         std::vector<PrjfsDirEntry> ret;
-        ret.reserve(treeEntries.size() + isRoot);
-        for (const auto& treeEntry : treeEntries) {
-          if (treeEntry.isTree()) {
+        ret.reserve(tree->size() + isRoot);
+        for (const auto& treeEntry : *tree) {
+          if (treeEntry.second.isTree()) {
             ret.emplace_back(
-                treeEntry.getName(), true, ImmediateFuture<uint64_t>(0));
+                treeEntry.first, true, ImmediateFuture<uint64_t>(0));
           } else {
             auto sizeFut =
-                objectStore->getBlobSize(treeEntry.getHash(), *context)
+                objectStore->getBlobSize(treeEntry.second.getHash(), *context)
                     .ensure([context]() {});
-            ret.emplace_back(treeEntry.getName(), false, std::move(sizeFut));
+            ret.emplace_back(treeEntry.first, false, std::move(sizeFut));
           }
         }
 
@@ -221,8 +220,7 @@ ImmediateFuture<std::string> PrjfsDispatcherImpl::read(
                      std::variant<std::shared_ptr<const Tree>, TreeEntry>
                          treeOrTreeEntry) {
         auto& treeEntry = std::get<TreeEntry>(treeOrTreeEntry);
-        return ImmediateFuture{
-            objectStore->getBlob(treeEntry.getHash(), context).semi()}
+        return objectStore->getBlob(treeEntry.getHash(), context)
             .thenValue([](std::shared_ptr<const Blob> blob) {
               // TODO(xavierd): directly return the Blob to the caller.
               std::string res;
@@ -379,22 +377,20 @@ ImmediateFuture<folly::Unit> handleNotPresentFileNotification(
         return createDirInode(mount, dirname.copy(), context)
             .thenValue([basename = basename.copy(),
                         &context](const TreeInodePtr treeInode) {
-              return treeInode
-                  ->removeRecursively(
-                      basename, InvalidationRequired::No, context)
-                  .thenTry([](folly::Try<folly::Unit> try_) {
-                    if (auto* exc =
-                            try_.tryGetExceptionObject<std::system_error>()) {
-                      if (isEnoent(*exc)) {
-                        // ProjectedFS can sometimes send multiple deletion
-                        // notification for the same file, in which case a
-                        // previous deletion will have removed the file already.
-                        // We can safely ignore the error here.
-                        return folly::Try{folly::unit};
-                      }
-                    }
-                    return try_;
-                  });
+              return treeInode->removeRecursively(
+                  basename, InvalidationRequired::No, context);
+            })
+            .thenTry([](folly::Try<folly::Unit> try_) {
+              if (auto* exc = try_.tryGetExceptionObject<std::system_error>()) {
+                if (isEnoent(*exc)) {
+                  // ProjectedFS can sometimes send multiple deletion
+                  // notification for the same file, in which case a
+                  // previous deletion will have removed the file already.
+                  // We can safely ignore the error here.
+                  return folly::Try{folly::unit};
+                }
+              }
+              return try_;
             });
       })
       .ensure([path = std::move(path)] {});
@@ -568,7 +564,12 @@ ImmediateFuture<folly::Unit> fileNotification(
   folly::via(executor, [&mount, path, context = std::move(context)]() mutable {
     return fileNotificationImpl(mount, std::move(path), *context).get();
   }).thenError([path](const folly::exception_wrapper& ew) {
-    XLOG(ERR) << "While handling notification on: " << path << ": " << ew;
+    // These should in theory never happen, but they sometimes happen
+    // due to filesystem errors, antivirus scanning, etc. During
+    // test, these should be treated as fatal errors, so we don't let
+    // errors silently pass tests. In release builds, let's be less
+    // aggressive and just log.
+    XLOG(DFATAL) << "While handling notification on: " << path << ": " << ew;
   });
   return folly::unit;
 }

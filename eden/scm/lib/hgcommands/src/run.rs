@@ -37,6 +37,7 @@ use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use progress_model::Registry;
+use repo::repo::Repo;
 use tracing::dispatcher::Dispatch;
 use tracing::dispatcher::{self};
 use tracing::Level;
@@ -46,7 +47,6 @@ use tracing_sampler::SamplingLayer;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::fmt::Layer as FmtLayer;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 
 use crate::commands;
@@ -65,6 +65,20 @@ pub fn run_command(args: Vec<String>, io: &IO) -> i32 {
         && args.get(3).map(|s| s.as_ref()) == Some("chgunix2")
     {
         return HgPython::new(&args).run_hg(args, io);
+    }
+    // Skip initialization for debugpython. Make it closer to vanilla Python.
+    if args.get(1).map(|s| s.as_str()) == Some("debugpython") {
+        // naive command-line parsing: strip "--".
+        let rest_args = if args.get(2).map(|s| s.as_str()) == Some("--") {
+            &args[3..]
+        } else {
+            &args[2..]
+        };
+        let args: Vec<String> = std::iter::once("hgpython".to_string())
+            .chain(rest_args.iter().cloned())
+            .collect();
+        let mut hgpython = HgPython::new(&args);
+        return hgpython.run_python(&args, io) as i32;
     }
 
     // Extra initialization based on global flags.
@@ -135,6 +149,8 @@ pub fn run_command(args: Vec<String>, io: &IO) -> i32 {
                     sampling_config.set(sc).unwrap();
                 }
 
+                log_repo_path_and_exe_version(dispatcher.repo());
+
                 run_logger = match runlog::Logger::from_repo(dispatcher.repo(), args[1..].to_vec())
                 {
                     Ok(logger) => Some(logger),
@@ -154,42 +170,42 @@ pub fn run_command(args: Vec<String>, io: &IO) -> i32 {
                     Arc::downgrade(&in_scope),
                 );
 
-                dispatcher.run_command(&table, io)
+                dispatcher
+                    .run_command(&table, io)
+                    .map_err(|(config, err)| errors::triage_error(&config, err))
             })
         } {
             Ok(ret) => ret as i32,
             Err(err) => {
-                let should_fallback = if err.downcast_ref::<errors::FallbackToPython>().is_some() {
-                    true
-                } else if err.downcast_ref::<errors::UnknownCommand>().is_some() {
+                let should_fallback = err.is::<errors::FallbackToPython>() ||
                     // XXX: Right now the Rust command table does not have all Python
                     // commands. Therefore Rust "UnknownCommand" needs a fallback.
                     //
                     // Ideally the Rust command table has Python command information and
                     // there is no fallback path (ex. all commands are in Rust, and the
                     // Rust implementation might just call into Python cmdutil utilities).
-                    true
-                } else {
-                    false
-                };
+                    err.is::<errors::UnknownCommand>();
+                let failed_fallback = err.is::<errors::FailedFallbackToPython>();
 
-                if !should_fallback {
-                    errors::print_error(&err, io, &args[1..]);
-                    return 255;
-                }
+                if failed_fallback {
+                    197
+                } else if should_fallback {
+                    // Change the current dir back to the original so it is not surprising to the Python
+                    // code.
+                    let _ = env::set_current_dir(cwd);
 
-                // Change the current dir back to the original so it is not surprising to the Python
-                // code.
-                let _ = env::set_current_dir(cwd);
-
-                let mut interp = HgPython::new(&args);
-                if let Some(opts) = global_opts {
-                    if opts.trace {
-                        // Error is not fatal.
-                        let _ = interp.setup_tracing("*".into());
+                    let mut interp = HgPython::new(&args);
+                    if let Some(opts) = global_opts {
+                        if opts.trace {
+                            // Error is not fatal.
+                            let _ = interp.setup_tracing("*".into());
+                        }
                     }
+                    interp.run_hg(args, io)
+                } else {
+                    errors::print_error(&err, io, &args[1..]);
+                    255
                 }
-                interp.run_hg(args, io)
             }
         };
         span.record("exit_code", &exit_code);
@@ -267,19 +283,34 @@ fn setup_tracing(
     let data = pytracing::DATA.clone();
 
     let is_test = is_inside_test();
-    let log_env_name = ["EDENSCM_LOG", "LOG"]
+    let mut env_filter_dirs: Option<String> = ["EDENSCM_LOG", "LOG"]
         .iter()
         .take(if is_test { 2 } else { 1 }) /* Only consider $LOG in tests */
-        .find(|s| std::env::var_os(s).is_some());
-    if let Some(env_name) = log_env_name {
+        .filter_map(|s| std::env::var(s).ok())
+        .next();
+    // Ensure EnvFilter is used in tests so it can be changed on the
+    // fly. Don't enable if EDENSCM_TRACE_LEVEL is set because that
+    // indicates test is testing tracing/sampling.
+    if is_test && std::env::var("EDENSCM_TRACE_LEVEL").is_err() && env_filter_dirs.is_none() {
+        env_filter_dirs = Some(String::new());
+    }
+
+    if let Some(dirs) = env_filter_dirs {
+        // Apply "reload" side effects first.
+        let error = io.error();
+        let can_color = error.can_color();
+        tracing_reload::update_writer(Box::new(error));
+        tracing_reload::update_env_filter_directives(&dirs)?;
+
+        // This might error out if called 2nd time per process.
+        let env_filter = tracing_reload::reloadable_env_filter()?;
+
         // The env_filter does the actual filtering. No need to filter by level.
         let collector = tracing_collector::default_collector(data.clone(), Level::TRACE);
-        let env_filter = EnvFilter::from_env(env_name);
-        let error = io.error();
         let env_logger = FmtLayer::new()
             .with_span_events(FmtSpan::ACTIVE)
-            .with_ansi(error.can_color())
-            .with_writer(move || error.clone());
+            .with_ansi(can_color)
+            .with_writer(tracing_reload::reloadable_writer);
         if is_test {
             // In tests, disable color and timestamps for cleaner output.
             let env_logger = env_logger.without_time().with_ansi(false);
@@ -648,6 +679,26 @@ fn epoch_ms(time: SystemTime) -> u64 {
 
 fn is_inside_test() -> bool {
     std::env::var_os("TESTTMP").is_some()
+}
+
+fn log_repo_path_and_exe_version(repo: Option<&Repo>) {
+    // The "version" and "repo" fields are consumed by telemetry.
+    if let Some(repo) = repo {
+        let config = repo.config();
+        let opt_path_default: std::result::Result<Option<String>, _> =
+            config.get_or_default("paths", "default");
+        if let Ok(Some(path_default)) = opt_path_default {
+            if let Some(repo_name) = configparser::hg::repo_name_from_url(&path_default) {
+                tracing::info!(
+                    target: "command_info",
+                    version = version::VERSION,
+                    repo = repo_name.as_str(),
+                );
+                return;
+            }
+        }
+    }
+    tracing::info!(target: "command_info", version = version::VERSION);
 }
 
 // TODO: Replace this with the 'exitcode' crate once it's available.

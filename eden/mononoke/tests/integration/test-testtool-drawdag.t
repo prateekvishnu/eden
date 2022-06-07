@@ -21,7 +21,7 @@ You can also customize details about commits with special comments.
 
 The tool will print the commit hash of each commit.
 
-  $ mononoke_testtool drawdag -R repo <<'EOF'
+  $ testtool_drawdag -R repo --derive-all <<'EOF'
   >             I-J-K   P-Q-R     U-V-W
   >            /     \       \   /
   > A-B-C-D---H---L-M-N--O----S-T-X-Y-Z
@@ -30,6 +30,7 @@ The tool will print the commit hash of each commit.
   > # modify: A path/to/file "add additional content"
   > # modify: A a_file old_content
   > # delete: Z path/to/file
+  > # forget: Z Z
   > # copy: B b_file new_content A a_file
   > # bookmark: M main
   > # bookmark: Z zzzz
@@ -59,12 +60,25 @@ The tool will print the commit hash of each commit.
   W=0d50131ffe46b4052ed85d6bc352b93e7e4ef9d5a69b3aeb6af9016f257a7a71
   X=b8eecc665a3fa0a2db4269503b8662b588cdaa0a951a5280fbefa8e1b3adb1ca
   Y=0496bee16414ecd92d98379f536e2306252990c72001f64fe01a6229a3a2c136
-  Z=61cdc752084d23113c190b2475704247d76b191238a1c16a4ce900ffdc041074
+  Z=996698aaf45736eedc0b2496616255ab81f822b831a01723df7a018fc98ea3ad
+
+  $ mononoke_newadmin fetch -R repo -i $Z -p Z
+  Error: Path does not exist: Z
+  [1]
+  $ mononoke_newadmin fetch -R repo -i $Z -p Y
+  File-Type: regular
+  Size: 1
+  Content-Id: 35ccfd1831564764439349755068b3400612b615d0c85e4d73af0cee786c963e
+  Sha1: 23eb4d3f4155395a74e9d534f97ff4c1908f5aac
+  Sha256: 18f5384d58bcb1bba0bcd9e6a6781d1a6ac2cc280c330ecbab6cb7931b721552
+  Git-Sha1: 24de910c13bb1e60fc5ec37a1058d356b1f2fa4d
+  
+  Y
 
 The graph can be extended with more commits.  The node names don't
 need to match the previous graph (although it's probably a good idea).
 
-  $ mononoke_testtool drawdag -R repo <<'EOF'
+  $ testtool_drawdag -R repo <<'EOF'
   >        XX    # modify: XX path/to/file "more additional content"
   >       /  \   # bookmark: XX xxxx
   >     D1    W2
@@ -79,3 +93,22 @@ need to match the previous graph (although it's probably a good idea).
   W1=48288d4775d3e44b2c7a97643638c6c6ce162efb8fef108080ac86a9001ff605
   W2=28354dd9e37c4b5aadd24f3e8eb4699f9a01b6e4b48554f3808fb432da0fafc4
   XX=f6509cec643ab922cf4dbd0583f8c8683701259daf535b4e80da448c1810d6d4
+
+Test HG hashes:
+  $ testtool_drawdag -R repo --print-hg-hashes <<'EOF'
+  > AA-BB-CC
+  > # modify: AA file "content"
+  > EOF
+  AA=73a53b07af3d15928010e8d72630750e98875c4a
+  BB=d005ae50b8698478630ac396568f337d3c24063c
+  CC=2cdf9bb5479e17e147a64e3f443011873bf7347a
+
+  $ mononoke_newadmin fetch -R repo --hg-id $AA -p file
+  File-Type: regular
+  Size: 7
+  Content-Id: 95b845f64a4cb04cf60a55e9715210fcea6e187813221ab49e766b1478dbaa13
+  Sha1: 040f06fd774092478d450774f5ba30c5da78acc8
+  Sha256: ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73
+  Git-Sha1: 6b584e8ece562ebffc15d38808cd6b98fc3d97ea
+  
+  content

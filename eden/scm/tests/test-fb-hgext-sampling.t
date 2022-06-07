@@ -1,4 +1,5 @@
 #chg-compatible
+#require no-fsmonitor
 
 Setup. SCM_SAMPLING_FILEPATH needs to be cleared as some environments may
 have it set.
@@ -120,7 +121,7 @@ Test env-var logging:
 Test rust traces make it to sampling file as well:
   $ > $LOGDIR/samplingpath.txt
   $ setconfig sampling.key.from_rust=hello
-  $ hg debugshell -c "from edenscm import tracing; tracing.info('msg', target='from_rust', hi='there')"
+  $ EDENSCM_TRACE_LEVEL=info hg debugshell -c "from edenscm import tracing; tracing.info('msg', target='from_rust', hi='there')"
   atexit handler executed
   >>> import json
   >>> with open("$LOGDIR/samplingpath.txt") as f:
@@ -161,7 +162,7 @@ Test ui.metrics.gauge API
     metrics_type=metrics
 
 Metrics can be printed if devel.print-metrics is set:
-  $ hg log -r null -T '.\n' --config extensions.gauge=$TESTTMP/a.py --config devel.print-metrics=1
+  $ hg log -r null -T '.\n' --config extensions.gauge=$TESTTMP/a.py --config devel.print-metrics=1 --config devel.skip-metrics=watchman
   .
   atexit handler executed
   { metrics : { bar : 2,  foo : { a : 1,  b : 5}}}
@@ -173,6 +174,7 @@ Metrics is logged to blackbox:
   .
   atexit handler executed
   $ hg blackbox --no-timestamp --no-sid --pattern '{"legacy_log":{"service":"metrics"}}'
+  [legacy][metrics] {'metrics': {'watchmanfilecount': 3, 'watchmanfreshinstances': 0}} (?)
   [legacy][metrics] {'metrics': {'bar': 2, 'foo': {'a': 1, 'b': 5}}}
   [legacy][metrics] {'metrics': {'bar': 2, 'foo': {'a': 1, 'b': 5}}}
   [legacy][metrics] {'metrics': {'bar': 2, 'foo': {'a': 1, 'b': 5}}}

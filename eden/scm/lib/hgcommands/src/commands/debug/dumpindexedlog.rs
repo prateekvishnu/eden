@@ -13,7 +13,7 @@ use super::DebugArgsOpts;
 use super::Result;
 use super::IO;
 
-pub fn run(opts: DebugArgsOpts, io: &IO, _config: ConfigSet) -> Result<u8> {
+pub fn run(opts: DebugArgsOpts, io: &IO, _config: &mut ConfigSet) -> Result<u8> {
     let mut ferr = io.error();
     for path in opts.args {
         let _ = IO::write(&io, format!("{}\n", path));
@@ -41,4 +41,8 @@ pub fn name() -> &'static str {
 
 pub fn doc() -> &'static str {
     "dump indexedlog data"
+}
+
+pub fn synopsis() -> Option<&'static str> {
+    None
 }

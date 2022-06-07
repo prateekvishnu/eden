@@ -59,12 +59,16 @@ class HgImportTest : public ::testing::Test {
   EXPECT_EQ((blob)->getContents().clone()->moveToFbString(), (data))
 
 TEST_F(HgImportTest, importTest) {
+  if (!testEnvironmentSupportsHg()) {
+    GTEST_SKIP();
+  }
+
   // Set up the initial commit
   repo_.mkdir("foo");
   StringPiece barData = "this is a test file\n";
   RelativePathPiece filePath{"foo/bar.txt"};
   repo_.writeFile(filePath, barData);
-  repo_.hg("add");
+  repo_.hg("add", "foo");
   auto commit1 = repo_.commit("Initial commit");
 
   // Import the root tree
@@ -94,6 +98,10 @@ TEST_F(HgImportTest, importTest) {
 // HgImportTest).
 #ifndef _WIN32
 TEST_F(HgImportTest, importerHelperExitsCleanly) {
+  if (!testEnvironmentSupportsHg()) {
+    GTEST_SKIP();
+  }
+
   HgImporter importer(repo_.path(), stats_);
   auto status = importer.debugStopHelperProcess();
   EXPECT_EQ(status.str(), "exited with status 0");

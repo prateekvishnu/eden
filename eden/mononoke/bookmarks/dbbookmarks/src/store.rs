@@ -5,14 +5,12 @@
  * GNU General Public License version 2.
  */
 
-#![deny(warnings)]
-
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use bookmarks::{
     Bookmark, BookmarkKind, BookmarkName, BookmarkPagination, BookmarkPrefix, BookmarkTransaction,
     BookmarkUpdateLog, BookmarkUpdateLogEntry, BookmarkUpdateReason, Bookmarks,
-    BookmarksSubscription, Freshness, RawBundleReplayData,
+    BookmarksSubscription, Freshness,
 };
 use cloned::cloned;
 use context::{CoreContext, PerfCounterType, SessionClass};
@@ -151,13 +149,11 @@ queries! {
 
     read ReadNextBookmarkLogEntries(min_id: u64, repo_id: RepositoryId, limit: u64) -> (
         i64, RepositoryId, BookmarkName, Option<ChangesetId>, Option<ChangesetId>,
-        BookmarkUpdateReason, Timestamp, Option<String>, Option<String>
+        BookmarkUpdateReason, Timestamp
     ) {
-        "SELECT id, repo_id, name, to_changeset_id, from_changeset_id, reason, timestamp,
-              replay.bundle_handle, replay.commit_hashes_json
-         FROM bookmarks_update_log log
-         LEFT JOIN bundle_replay_data replay ON log.id = replay.bookmark_update_log_id
-         WHERE log.id > {min_id} AND log.repo_id = {repo_id}
+        "SELECT id, repo_id, name, to_changeset_id, from_changeset_id, reason, timestamp
+         FROM bookmarks_update_log
+         WHERE id > {min_id} AND repo_id = {repo_id}
          ORDER BY id asc
          LIMIT {limit}"
     }
@@ -640,19 +636,7 @@ impl BookmarkUpdateLog for SqlBookmarks {
             };
             Ok(
                 stream::iter(homogenous_entries.into_iter().map(Ok)).and_then(|entry| async move {
-                    let (
-                        id,
-                        repo_id,
-                        name,
-                        to_cs_id,
-                        from_cs_id,
-                        reason,
-                        timestamp,
-                        bundle_handle,
-                        commit_timestamps_json,
-                    ) = entry;
-                    let bundle_replay_data =
-                        RawBundleReplayData::maybe_new(bundle_handle, commit_timestamps_json)?;
+                    let (id, repo_id, name, to_cs_id, from_cs_id, reason, timestamp) = entry;
                     Ok(BookmarkUpdateLogEntry {
                         id,
                         repo_id,
@@ -661,7 +645,6 @@ impl BookmarkUpdateLog for SqlBookmarks {
                         from_changeset_id: from_cs_id,
                         reason,
                         timestamp,
-                        bundle_replay_data,
                     })
                 }),
             )
@@ -695,19 +678,7 @@ impl BookmarkUpdateLog for SqlBookmarks {
 
             Ok(
                 stream::iter(entries.into_iter().map(Ok)).and_then(|entry| async move {
-                    let (
-                        id,
-                        repo_id,
-                        name,
-                        to_cs_id,
-                        from_cs_id,
-                        reason,
-                        timestamp,
-                        bundle_handle,
-                        commit_timestamps_json,
-                    ) = entry;
-                    let bundle_replay_data =
-                        RawBundleReplayData::maybe_new(bundle_handle, commit_timestamps_json)?;
+                    let (id, repo_id, name, to_cs_id, from_cs_id, reason, timestamp) = entry;
                     Ok(BookmarkUpdateLogEntry {
                         id,
                         repo_id,
@@ -716,7 +687,6 @@ impl BookmarkUpdateLog for SqlBookmarks {
                         from_changeset_id: from_cs_id,
                         reason,
                         timestamp,
-                        bundle_replay_data,
                     })
                 }),
             )

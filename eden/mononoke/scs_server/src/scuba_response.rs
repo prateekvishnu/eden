@@ -42,6 +42,8 @@ impl AddScubaResponse for thrift::RepoResolveBookmarkResponse {}
 
 impl AddScubaResponse for thrift::RepoResolveCommitPrefixResponse {}
 
+impl AddScubaResponse for thrift::RepoBookmarkInfoResponse {}
+
 impl AddScubaResponse for thrift::RepoStackInfoResponse {}
 
 impl AddScubaResponse for thrift::CommitCompareResponse {}
@@ -59,6 +61,8 @@ impl AddScubaResponse for thrift::CommitLookupPushrebaseHistoryResponse {}
 impl AddScubaResponse for thrift::CommitHistoryResponse {}
 
 impl AddScubaResponse for thrift::CommitListDescendantBookmarksResponse {}
+
+impl AddScubaResponse for thrift::CommitRunHooksResponse {}
 
 impl AddScubaResponse for thrift::CommitPathBlameResponse {}
 
@@ -100,6 +104,8 @@ impl AddScubaResponse for thrift::MegarepoAddTargetResult {}
 impl AddScubaResponse for thrift::MegarepoAddBranchingTargetResult {}
 
 impl AddScubaResponse for thrift::MegarepoAddConfigResponse {}
+
+impl AddScubaResponse for thrift::MegarepoReadConfigResponse {}
 
 // Helper fn to report PollResponse types
 fn report_maybe_result<R: AddScubaResponse>(

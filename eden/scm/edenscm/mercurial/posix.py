@@ -5,7 +5,7 @@
 
 # posix.py - Posix utility function implementations for Mercurial
 #
-#  Copyright 2005-2009 Matt Mackall <mpm@selenic.com> and others
+#  Copyright 2005-2009 Olivia Mackall <olivia@selenic.com> and others
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -732,7 +732,6 @@ elif pycompat.sysplatform == "cygwin":
     def checklink(path: str) -> bool:
         return False
 
-
 else:
     # os.path.normcase is a no-op, which doesn't help us on non-native
     # filesystems
@@ -886,10 +885,6 @@ def groupmembers(name):
     name, KeyError if the group does not exist.
     """
     return list(grp.getgrnam(name).gr_mem)
-
-
-def gethgcmd(argv=sys.argv):
-    return argv[:1]
 
 
 def makedir(path: str, notindexed: bool) -> None:

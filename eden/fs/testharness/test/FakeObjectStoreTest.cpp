@@ -29,10 +29,11 @@ ObjectId blobHash("5555555555555555555555555555555555555555");
 TEST(FakeObjectStore, getObjectsOfAllTypesFromStore) {
   FakeObjectStore store;
 
+  auto aFilePath = PathComponent{"a_file"};
+
   // Test getTree().
-  vector<TreeEntry> entries1;
-  entries1.emplace_back(
-      fileHash, PathComponent{"a_file"}, TreeEntryType::REGULAR_FILE);
+  Tree::container entries1{kPathMapDefaultCaseSensitive};
+  entries1.emplace(aFilePath, fileHash, TreeEntryType::REGULAR_FILE);
   Tree tree1(std::move(entries1), tree1Hash);
   store.addTree(std::move(tree1));
   auto foundTree = store.getTree(tree1Hash).get();
@@ -48,9 +49,8 @@ TEST(FakeObjectStore, getObjectsOfAllTypesFromStore) {
   EXPECT_EQ(blobHash, foundBlob->getHash());
 
   // Test getTreeForCommit().
-  vector<TreeEntry> entries2;
-  entries2.emplace_back(
-      fileHash, PathComponent{"a_file"}, TreeEntryType::REGULAR_FILE);
+  Tree::container entries2{kPathMapDefaultCaseSensitive};
+  entries2.emplace(aFilePath, fileHash, TreeEntryType::REGULAR_FILE);
   Tree tree2(std::move(entries2), tree2Hash);
   store.setTreeForCommit(commHash, std::move(tree2));
   auto foundTreeForCommit = store.getRootTree(commHash).get();

@@ -21,32 +21,17 @@ import time
 import typing
 import uuid
 from pathlib import Path
-from typing import (
-    KeysView,
-    IO,
-    Any,
-    Dict,
-    List,
-    Mapping,
-    Optional,
-    Set,
-    Tuple,
-    Union,
-)
+from typing import Any, Dict, IO, KeysView, List, Mapping, Optional, Set, Tuple, Union
 
 import facebook.eden.ttypes as eden_ttypes
 import toml
 from eden.thrift import legacy
 from eden.thrift.legacy import EdenNotRunningError
 from facebook.eden.ttypes import MountInfo as ThriftMountInfo, MountState
-from filelock import FileLock, BaseFileLock
+from filelock import BaseFileLock, FileLock
 
 from . import configinterpolator, configutil, telemetry, util, version
-from .util import (
-    HealthStatus,
-    print_stderr,
-    write_file_atomically,
-)
+from .util import HealthStatus, print_stderr, write_file_atomically
 
 
 try:
@@ -179,6 +164,7 @@ class CheckoutConfig(typing.NamedTuple):
     predictive_prefetch_profiles_active: bool
     predictive_prefetch_num_dirs: int
     enable_tree_overlay: bool
+    use_write_back_cache: bool
 
 
 class ListMountInfo(typing.NamedTuple):
@@ -802,7 +788,9 @@ Do you want to run `eden mount %s` instead?"""
             print("If you want to find out which process is still using the repo, run:")
             print(f"    handle.exe {mount}\n")
             return
-        parsed = [line.split() for line in output.decode().splitlines() if line]
+        parsed = [
+            line.split() for line in output.decode(errors="ignore").splitlines() if line
+        ]
         non_edenfs_process = any(filter(lambda x: x[0].lower() != "edenfs.exe", parsed))
 
         # When no handle is found in the repo, handle.exe will report `"No
@@ -833,7 +821,6 @@ Do you want to run `eden mount %s` instead?"""
         path = Path(path)
         shutil.rmtree(self._get_client_dir_for_mount_point(path))
         self._remove_path_from_directory_map(path)
-        self.cleanup_mount(path, preserve_mount_point)
 
     def cleanup_mount(self, path: Path, preserve_mount_point: bool = False) -> None:
         if sys.platform != "win32":
@@ -1172,6 +1159,7 @@ class EdenCheckout:
                 "case-sensitive": checkout_config.case_sensitive,
                 "require-utf8-path": checkout_config.require_utf8_path,
                 "enable-tree-overlay": checkout_config.enable_tree_overlay,
+                "use-write-back-cache": checkout_config.use_write_back_cache,
             },
             "redirections": redirections,
             "profiles": {
@@ -1306,6 +1294,10 @@ class EdenCheckout:
         if not isinstance(enable_tree_overlay, bool):
             enable_tree_overlay = False
 
+        use_write_back_cache = repository.get("use-write-back-cache")
+        if not isinstance(use_write_back_cache, bool):
+            use_write_back_cache = False
+
         return CheckoutConfig(
             backing_repo=Path(get_field("path")),
             scm_type=scm_type,
@@ -1321,6 +1313,7 @@ class EdenCheckout:
             predictive_prefetch_profiles_active=predictive_prefetch_active,
             predictive_prefetch_num_dirs=predictive_num_dirs,
             enable_tree_overlay=enable_tree_overlay,
+            use_write_back_cache=use_write_back_cache,
         )
 
     def get_snapshot(self) -> SnapshotState:

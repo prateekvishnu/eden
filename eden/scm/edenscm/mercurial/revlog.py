@@ -5,7 +5,7 @@
 
 # revlog.py - storage back-end for mercurial
 #
-# Copyright 2005-2007 Matt Mackall <mpm@selenic.com>
+# Copyright 2005-2007 Olivia Mackall <olivia@selenic.com>
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -26,7 +26,7 @@ import heapq
 import os
 import struct
 import zlib
-from typing import IO, Any, List, Optional, Tuple, Union
+from typing import Any, IO, List, Optional, Tuple, Union
 
 import bindings
 from edenscmnative import parsers

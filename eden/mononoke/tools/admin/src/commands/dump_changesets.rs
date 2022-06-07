@@ -14,6 +14,7 @@ use bulkops::{Direction, PublicChangesetBulkFetch};
 use bytes::Bytes;
 use changesets::{
     deserialize_cs_entries, serialize_cs_entries, ChangesetEntry, Changesets, ChangesetsArc,
+    ChangesetsRef,
 };
 use clap::{ArgEnum, Args, Parser, Subcommand};
 use context::CoreContext;
@@ -53,6 +54,9 @@ pub struct CommandArgs {
     /// What format to write to the file.
     #[clap(long, arg_enum, default_value_t=Format::Thrift)]
     output_format: Format,
+    /// What format to read files with. Plaintext files can be in hg format.
+    #[clap(long, arg_enum, default_value_t=Format::Thrift)]
+    input_format: Format,
 
     #[clap(subcommand)]
     subcommand: DumpChangesetsSubcommand,
@@ -112,6 +116,30 @@ impl Format {
             Self::Plaintext => Bytes::from(entries.into_iter().map(|e| e.cs_id).join("\n")),
         }
     }
+
+    async fn deserialize<'a>(
+        self,
+        ctx: &'a CoreContext,
+        repo: &'a Repo,
+        data: &'a Bytes,
+    ) -> Result<Vec<ChangesetEntry>> {
+        match self {
+            Self::Thrift => deserialize_cs_entries(data),
+            Self::Plaintext => {
+                let ids: Vec<ChangesetId> = stream::iter(
+                    String::from_utf8(data.iter().cloned().collect())?
+                        .split_whitespace()
+                        .map(|s| parse_commit_id(ctx, repo, s))
+                        // prevent compiler bug
+                        .collect::<Vec<_>>(),
+                )
+                .buffered(500)
+                .try_collect()
+                .await?;
+                repo.changesets().get_many(ctx.clone(), ids).await
+            }
+        }
+    }
 }
 
 impl DumpChangesetsSubcommand {
@@ -119,10 +147,11 @@ impl DumpChangesetsSubcommand {
         self,
         ctx: &CoreContext,
         repo: &Repo,
+        input_format: Format,
     ) -> Result<Vec<ChangesetEntry>> {
         match self {
             Self::Convert(_) => Ok(vec![]),
-            Self::FetchPublic(args) => args.fetch_extra_changesets(ctx, repo).await,
+            Self::FetchPublic(args) => args.fetch_extra_changesets(ctx, repo, input_format).await,
         }
     }
 }
@@ -132,12 +161,13 @@ impl FetchPublicArgs {
         self,
         ctx: &CoreContext,
         repo: &Repo,
+        input_format: Format,
     ) -> Result<Vec<ChangesetEntry>> {
         let fetcher = PublicChangesetBulkFetch::new(repo.changesets_arc(), repo.phases_arc());
 
         let start_commit = {
             if let Some(path) = self.start_from_file_end {
-                load_last_commit(path.as_ref()).await?
+                load_last_commit(ctx, repo, path.as_ref(), input_format).await?
             } else if let Some(start_commit) = self.start_commit {
                 Some(parse_commit_id(ctx, repo, &start_commit).await?)
             } else {
@@ -163,19 +193,21 @@ impl FetchPublicArgs {
 pub async fn run(app: MononokeApp, args: CommandArgs) -> Result<()> {
     let ctx = app.new_context();
     let repo: Repo = app.open_repo(&args.repo).await?;
+    let input_format = args.input_format;
 
     let css = {
         let (mut file_css, db_css): (Vec<_>, Vec<_>) = future::try_join(
             stream::iter(
                 args.merge_file
                     .iter()
-                    .map(|path| load_file_contents(path.as_ref()))
+                    .map(|path| load_file_contents(&ctx, &repo, path.as_ref(), input_format))
                     // prevent compiler bug
                     .collect::<Vec<_>>(),
             )
             .buffered(2)
             .try_concat(),
-            args.subcommand.fetch_extra_changesets(&ctx, &repo),
+            args.subcommand
+                .fetch_extra_changesets(&ctx, &repo, input_format),
         )
         .await?;
         file_css.extend(db_css.into_iter());
@@ -188,11 +220,24 @@ pub async fn run(app: MononokeApp, args: CommandArgs) -> Result<()> {
     Ok(())
 }
 
-async fn load_file_contents(filename: &Path) -> Result<Vec<ChangesetEntry>> {
+async fn load_file_contents(
+    ctx: &CoreContext,
+    repo: &Repo,
+    filename: &Path,
+    format: Format,
+) -> Result<Vec<ChangesetEntry>> {
     let file_contents = Bytes::from(tokio::fs::read(filename).await?);
-    deserialize_cs_entries(&file_contents)
+    format.deserialize(ctx, repo, &file_contents).await
 }
 
-async fn load_last_commit(filename: &Path) -> Result<Option<ChangesetId>> {
-    Ok(load_file_contents(filename).await?.last().map(|e| e.cs_id))
+async fn load_last_commit(
+    ctx: &CoreContext,
+    repo: &Repo,
+    filename: &Path,
+    format: Format,
+) -> Result<Option<ChangesetId>> {
+    Ok(load_file_contents(ctx, repo, filename, format)
+        .await?
+        .last()
+        .map(|e| e.cs_id))
 }

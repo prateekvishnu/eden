@@ -8,6 +8,7 @@ edition = "2021"
 license = "GPLv2+"
 
 [dependencies]
+acl_regions = { version = "0.1.0", path = "../../acl_regions" }
 blobrepo = { version = "0.1.0", path = "../../blobrepo" }
 bonsai_git_mapping = { version = "0.1.0", path = "../../bonsai_git_mapping" }
 bonsai_globalrev_mapping = { version = "0.1.0", path = "../../bonsai_globalrev_mapping" }
@@ -18,6 +19,7 @@ changesets = { version = "0.1.0", path = "../../changesets" }
 ephemeral_blobstore = { version = "0.1.0", path = "../../blobstore/ephemeral_blobstore" }
 facet = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 mercurial_mutation = { version = "0.1.0", path = "../../mercurial/mutation" }
+metaconfig_types = { version = "0.1.0", path = "../../metaconfig/types" }
 mutable_counters = { version = "0.1.0", path = "../../mutable_counters" }
 mutable_renames = { version = "0.1.0", path = "../../mutable_renames" }
 phases = { version = "0.1.0", path = "../../phases" }

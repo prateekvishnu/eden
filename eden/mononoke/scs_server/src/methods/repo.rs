@@ -24,7 +24,7 @@ use mononoke_api::{
     FileType, MononokePath,
 };
 use mononoke_api_hg::RepoContextHgExt;
-use mononoke_types::hash::{Sha1, Sha256};
+use mononoke_types::hash::{GitSha1, Sha1, Sha256};
 use source_control as thrift;
 
 use crate::commit_id::{map_commit_identities, map_commit_identity, CommitIdExt};
@@ -130,6 +130,27 @@ impl SourceControlServiceImpl {
         }
     }
 
+    /// Comprehensive bookmark info.
+    ///
+    /// Returns value of the bookmark (both fresh and warm) and the timestamp of
+    /// last update.
+    pub(crate) async fn repo_bookmark_info(
+        &self,
+        ctx: CoreContext,
+        repo: thrift::RepoSpecifier,
+        params: thrift::RepoBookmarkInfoParams,
+    ) -> Result<thrift::RepoBookmarkInfoResponse, errors::ServiceError> {
+        let repo = self.repo(ctx, &repo).await?;
+        let info = repo.bookmark_info(params.bookmark_name).await?;
+        Ok(thrift::RepoBookmarkInfoResponse {
+            info: match info {
+                Some(info) => Some(info.into_response_with(&params.identity_schemes).await?),
+                None => None,
+            },
+            ..Default::default()
+        })
+    }
+
     /// List bookmarks.
     pub(crate) async fn repo_list_bookmarks(
         &self,
@@ -215,12 +236,9 @@ impl SourceControlServiceImpl {
             .try_collect()
             .await?;
 
-        let valid_parent_count =
-            parents.len() == 1 || (parents.len() == 0 && repo.allow_no_parent_writes());
-
-        if !valid_parent_count {
+        if parents.is_empty() && !repo.allow_no_parent_writes() {
             return Err(errors::invalid_request(
-                "repo_create_commit can only create commits with a single parent",
+                "this repo does not permit commits without a parent",
             )
             .into());
         }
@@ -277,6 +295,21 @@ impl SourceControlServiceImpl {
                                     let sha = Sha256::from_request(&sha)?;
                                     let file = repo
                                         .file_by_content_sha256(sha)
+                                        .await?
+                                        .ok_or_else(|| errors::file_not_found(sha.to_string()))?;
+                                    CreateChange::Tracked(
+                                        CreateChangeFile::Existing {
+                                            file_id: file.id().await?,
+                                            file_type,
+                                            maybe_size: None,
+                                        },
+                                        copy_info,
+                                    )
+                                }
+                                thrift::RepoCreateCommitParamsFileContent::content_gitsha1(sha) => {
+                                    let sha = GitSha1::from_request(&sha)?;
+                                    let file = repo
+                                        .file_by_content_gitsha1(sha)
                                         .await?
                                         .ok_or_else(|| errors::file_not_found(sha.to_string()))?;
                                     CreateChange::Tracked(

@@ -12,8 +12,8 @@ use std::io;
 use std::io::BufRead;
 use std::io::BufReader;
 
+use futures::future::BoxFuture;
 use futures::future::FutureExt;
-use futures::future::LocalBoxFuture;
 use futures::Future;
 use types::RepoPath;
 
@@ -31,6 +31,10 @@ pub struct Profile {
     hidden: Option<String>,
     version: Option<String>,
 }
+
+/// Root represents the root sparse profile (usually .hg/sparse).
+#[derive(Debug)]
+pub struct Root(Profile);
 
 #[derive(Debug, Clone, PartialEq)]
 enum Pattern {
@@ -90,8 +94,103 @@ pub enum Error {
     GlobsetError(#[from] globset::Error),
 }
 
-impl Profile {
+impl Root {
     pub fn from_bytes(data: impl AsRef<[u8]>, source: String) -> Result<Self, io::Error> {
+        Ok(Self(Profile::from_bytes(data, source)?))
+    }
+
+    pub async fn matcher<B: Future<Output = anyhow::Result<Option<Vec<u8>>>> + Send>(
+        &self,
+        mut fetch: impl FnMut(String) -> B + Send + Sync,
+    ) -> Result<Matcher, Error> {
+        if self.0.entries.is_empty() {
+            return Ok(Matcher::always());
+        }
+
+        let mut matchers: Vec<pathmatcher::TreeMatcher> = Vec::new();
+
+        // List of rule origins per-matcher.
+        let mut rule_origins: Vec<Vec<String>> = Vec::new();
+
+        let mut rules: VecDeque<(Pattern, String)> = VecDeque::new();
+
+        // Maintain the excludes-come-last ordering.
+        let mut push_rule = |(pat, src)| match pat {
+            Pattern::Exclude(_) => rules.push_back((pat, src)),
+            Pattern::Include(_) => rules.push_front((pat, src)),
+        };
+
+        let prepare_rules =
+            |rules: VecDeque<(Pattern, String)>| -> Result<(Vec<String>, Vec<String>), Error> {
+                let mut matcher_rules = Vec::new();
+                let mut origins = Vec::new();
+
+                for (pat, src) in rules {
+                    for expanded_rule in sparse_pat_to_matcher_rule(pat)? {
+                        matcher_rules.push(expanded_rule);
+                        origins.push(src.clone());
+                    }
+                }
+
+                Ok((matcher_rules, origins))
+            };
+
+        let mut only_v1 = true;
+        for entry in self.0.entries.iter() {
+            match entry {
+                ProfileEntry::Pattern(p, src) => push_rule((
+                    p.clone(),
+                    join_source(self.0.source.clone(), src.as_deref()),
+                )),
+                ProfileEntry::Profile(child_path) => {
+                    let child = match fetch(child_path.clone()).await? {
+                        Some(data) => Profile::from_bytes(data, child_path.clone())?,
+                        None => continue,
+                    };
+
+                    let child_rules: VecDeque<(Pattern, String)> = child
+                        .rules(&mut fetch)
+                        .await?
+                        .into_iter()
+                        .map(|(p, s)| (p, format!("{} -> {}", self.0.source, s)))
+                        .collect();
+
+                    if child.is_v2() {
+                        only_v1 = false;
+
+                        let (matcher_rules, origins) = prepare_rules(child_rules)?;
+                        matchers.push(pathmatcher::TreeMatcher::from_rules(matcher_rules.iter())?);
+                        rule_origins.push(origins);
+                    } else {
+                        for rule in child_rules {
+                            push_rule(rule);
+                        }
+                    }
+                }
+            }
+        }
+
+        // If all user specified rules are exclude rules, add an
+        // implicit "**" to provide the default include of everything.
+        if only_v1 && (rules.is_empty() || matches!(&rules[0].0, Pattern::Exclude(_))) {
+            rules.push_front((Pattern::Include("**".to_string()), "(builtin)".to_string()))
+        }
+
+        rules.push_front((
+            Pattern::Include("glob:.hg*".to_string()),
+            "(builtin)".to_string(),
+        ));
+
+        let (matcher_rules, origins) = prepare_rules(rules)?;
+        matchers.push(pathmatcher::TreeMatcher::from_rules(matcher_rules.iter())?);
+        rule_origins.push(origins);
+
+        Ok(Matcher::new(matchers, rule_origins))
+    }
+}
+
+impl Profile {
+    fn from_bytes(data: impl AsRef<[u8]>, source: String) -> Result<Self, io::Error> {
         let mut prof: Profile = Default::default();
         let mut current_metadata_val: Option<&mut String> = None;
         let mut section_type = SectionType::Include;
@@ -194,18 +293,18 @@ impl Profile {
     // %import statements are resolved by fetching the imported profile's
     // contents using the fetch callback. Returns a vec of each Pattern paired
     // with a String describing its provenance.
-    async fn rules<B: Future<Output = anyhow::Result<Option<Vec<u8>>>>>(
+    async fn rules<B: Future<Output = anyhow::Result<Option<Vec<u8>>>> + Send>(
         &self,
-        mut fetch: impl FnMut(String) -> B,
+        mut fetch: impl FnMut(String) -> B + Send + Sync,
     ) -> Result<Vec<(Pattern, String)>, Error> {
-        fn rules_inner<'a, B: Future<Output = anyhow::Result<Option<Vec<u8>>>>>(
+        fn rules_inner<'a, B: Future<Output = anyhow::Result<Option<Vec<u8>>>> + Send>(
             prof: &'a Profile,
-            fetch: &'a mut dyn FnMut(String) -> B,
+            fetch: &'a mut (dyn FnMut(String) -> B + Send + Sync),
             rules: &'a mut Vec<(Pattern, String)>,
             source: Option<&'a str>,
             // path => (contents, in_progress)
             seen: &'a mut HashMap<String, (Vec<u8>, bool)>,
-        ) -> LocalBoxFuture<'a, Result<(), Error>> {
+        ) -> BoxFuture<'a, Result<(), Error>> {
             async move {
                 let source = match source {
                     Some(history) => format!("{} -> {}", history, prof.source),
@@ -247,101 +346,12 @@ impl Profile {
 
                 Ok(())
             }
-            .boxed_local()
+            .boxed()
         }
 
         let mut rules = Vec::new();
         rules_inner(self, &mut fetch, &mut rules, None, &mut HashMap::new()).await?;
         Ok(rules)
-    }
-
-    pub async fn matcher<B: Future<Output = anyhow::Result<Option<Vec<u8>>>>>(
-        &self,
-        mut fetch: impl FnMut(String) -> B,
-    ) -> Result<Matcher, Error> {
-        if self.entries.is_empty() {
-            return Ok(Matcher::always());
-        }
-
-        let mut matchers: Vec<pathmatcher::TreeMatcher> = Vec::new();
-
-        // List of rule origins per-matcher.
-        let mut rule_origins: Vec<Vec<String>> = Vec::new();
-
-        let mut rules: VecDeque<(Pattern, String)> = VecDeque::new();
-
-        // Maintain the excludes-come-last ordering.
-        let mut push_rule = |(pat, src)| match pat {
-            Pattern::Exclude(_) => rules.push_back((pat, src)),
-            Pattern::Include(_) => rules.push_front((pat, src)),
-        };
-
-        let prepare_rules =
-            |rules: VecDeque<(Pattern, String)>| -> Result<(Vec<String>, Vec<String>), Error> {
-                let mut matcher_rules = Vec::new();
-                let mut origins = Vec::new();
-
-                for (pat, src) in rules {
-                    for expanded_rule in sparse_pat_to_matcher_rule(pat)? {
-                        matcher_rules.push(expanded_rule);
-                        origins.push(src.clone());
-                    }
-                }
-
-                Ok((matcher_rules, origins))
-            };
-
-        let mut only_v1 = true;
-        for entry in self.entries.iter() {
-            match entry {
-                ProfileEntry::Pattern(p, src) => {
-                    push_rule((p.clone(), join_source(self.source.clone(), src.as_deref())))
-                }
-                ProfileEntry::Profile(child_path) => {
-                    let child = match fetch(child_path.clone()).await? {
-                        Some(data) => Profile::from_bytes(data, child_path.clone())?,
-                        None => continue,
-                    };
-
-                    let child_rules: VecDeque<(Pattern, String)> = child
-                        .rules(&mut fetch)
-                        .await?
-                        .into_iter()
-                        .map(|(p, s)| (p, format!("{} -> {}", self.source, s)))
-                        .collect();
-
-                    // TODO(muirdm): make this only happen for root profile.
-                    if child.is_v2() {
-                        only_v1 = false;
-
-                        let (matcher_rules, origins) = prepare_rules(child_rules)?;
-                        matchers.push(pathmatcher::TreeMatcher::from_rules(matcher_rules.iter())?);
-                        rule_origins.push(origins);
-                    } else {
-                        for rule in child_rules {
-                            push_rule(rule);
-                        }
-                    }
-                }
-            }
-        }
-
-        // If all user specified rules are exclude rules, add an
-        // implicit "**" to provide the default include of everything.
-        if only_v1 && (rules.is_empty() || matches!(&rules[0].0, Pattern::Exclude(_))) {
-            rules.push_front((Pattern::Include("**".to_string()), "(builtin)".to_string()))
-        }
-
-        rules.push_front((
-            Pattern::Include("glob:.hg*".to_string()),
-            "(builtin)".to_string(),
-        ));
-
-        let (matcher_rules, origins) = prepare_rules(rules)?;
-        matchers.push(pathmatcher::TreeMatcher::from_rules(matcher_rules.iter())?);
-        rule_origins.push(origins);
-
-        Ok(Matcher::new(matchers, rule_origins))
     }
 }
 
@@ -686,7 +696,7 @@ title = grand_child
 path:exc
 ";
 
-        let prof = Profile::from_bytes(config, "test".to_string()).unwrap();
+        let prof = Root::from_bytes(config, "test".to_string()).unwrap();
 
         let matcher = prof.matcher(|_| async { Ok(Some(vec![])) }).await?;
 
@@ -719,7 +729,7 @@ path:b/exc
 path:b
 ";
 
-        let prof = Profile::from_bytes(base, "test".to_string())?;
+        let prof = Root::from_bytes(base, "test".to_string())?;
         let matcher = prof.matcher(|_| async { Ok(Some(child.to_vec())) }).await?;
 
         // Exclude rule "wins" for v1 despite order in confing.
@@ -765,7 +775,7 @@ path:b
 version = 2
 ";
 
-        let prof = Profile::from_bytes(base, "test".to_string())?;
+        let prof = Root::from_bytes(base, "test".to_string())?;
         let matcher = prof
             .matcher(|path| async move {
                 match path.as_ref() {
@@ -797,7 +807,7 @@ version = 2
 foo
 ";
 
-        let prof = Profile::from_bytes(config, "test".to_string()).unwrap();
+        let prof = Root::from_bytes(config, "test".to_string()).unwrap();
 
         let matcher = prof.matcher(|_| async { Ok(None) }).await?;
 
@@ -811,7 +821,7 @@ foo
 
     #[tokio::test]
     async fn test_explain_empty() {
-        let prof = Profile::from_bytes(b"", "test".to_string()).unwrap();
+        let prof = Root::from_bytes(b"", "test".to_string()).unwrap();
         let matcher = prof
             .matcher(|_| async move { Ok(Some(vec![])) })
             .await
@@ -825,7 +835,7 @@ foo
 
     #[tokio::test]
     async fn test_explain_no_match() {
-        let prof = Profile::from_bytes(b"a", "test".to_string()).unwrap();
+        let prof = Root::from_bytes(b"a", "test".to_string()).unwrap();
         let matcher = prof
             .matcher(|_| async move { Ok(Some(vec![])) })
             .await
@@ -849,7 +859,7 @@ glob:{a,b,c}
 path:d
 ";
 
-        let prof = Profile::from_bytes(base, "base".to_string()).unwrap();
+        let prof = Root::from_bytes(base, "base".to_string()).unwrap();
         let matcher = prof
             .matcher(|path| async move {
                 match path.as_ref() {
@@ -885,7 +895,7 @@ three
 four
 ";
 
-        let prof = Profile::from_bytes(config, "base".to_string()).unwrap();
+        let prof = Root::from_bytes(config, "base".to_string()).unwrap();
 
         let matcher = prof.matcher(|_| async { Ok(Some(vec![])) }).await.unwrap();
 

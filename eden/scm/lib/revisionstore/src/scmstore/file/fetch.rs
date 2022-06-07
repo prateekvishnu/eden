@@ -21,6 +21,7 @@ use futures::StreamExt;
 use progress_model::AggregatingProgressBar;
 use tracing::debug;
 use tracing::field;
+use types::errors::NetworkError;
 use types::Key;
 use types::Sha256;
 
@@ -569,10 +570,11 @@ impl FetchState {
             })
             .collect();
 
-        let response = match block_on(store.files_attrs(pending_attrs)) {
+        let response = match block_on(store.files_attrs(pending_attrs)).map_err(|e| e.tag_network())
+        {
             Ok(r) => r,
             Err(err) => {
-                let err = ClonableError::new(err.into());
+                let err = ClonableError::new(err);
                 for key in fetching_keys.into_iter() {
                     self.errors.keyed_error(key, err.clone().into());
                 }
@@ -615,13 +617,11 @@ impl FetchState {
         for res in stream_to_iter(entries) {
             // TODO(meyer): This outer EdenApi error with no key sucks
             let (key, res) = match res {
-                Ok(result) => match result {
-                    // (Key, Result<(StoreFile, Option<LfsPointersEntry), anyhow::Error)>
+                Ok(result) => match result.map_err(|e| e.tag_network()) {
                     Ok(result) => result,
-                    // EdenApiError
                     Err(err) => {
                         if unknown_error.is_none() {
-                            unknown_error.replace(ClonableError::new(err.into()));
+                            unknown_error.replace(ClonableError::new(err));
                         }
                         continue;
                     }
@@ -651,7 +651,7 @@ impl FetchState {
                     if error.is_none() {
                         error.replace(format!("{}: {}", key, err));
                     }
-                    self.errors.keyed_error(key, err)
+                    self.errors.keyed_error(key, NetworkError::wrap(err))
                 }
             }
         }
@@ -782,7 +782,7 @@ impl FetchState {
             },
             |sha256, error| {
                 if let Some(keys) = key_map.get(&sha256) {
-                    let error = ClonableError::new(error);
+                    let error = ClonableError::new(NetworkError::wrap(error));
                     for (key, _) in keys.iter() {
                         keyed_errors.push(((*key).clone(), error.clone().into()));
                     }

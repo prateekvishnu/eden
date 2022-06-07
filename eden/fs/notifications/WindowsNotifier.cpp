@@ -13,6 +13,7 @@
 #include <shellapi.h> // @manual
 #include <strsafe.h> // @manual
 #include <wchar.h>
+#include <windowsx.h> // @manual
 #include <thread>
 
 #include <fmt/chrono.h>
@@ -34,41 +35,21 @@ constexpr UINT EMenuUid = 123;
 constexpr UINT WMAPP_NOTIFYCALLBACK = WM_APP + 1;
 constexpr UINT WMAPP_NOTIFYDESTROY = WM_APP + 2;
 
-// Window Strings
+// UI strings used multiple times
 const wchar_t kWinClassNameStr[] = L"EdenFSMenu";
-const wchar_t kWinTitle[] = L"EdenFS Menu";
-
-// Tooltips
 const wchar_t kToolTipDefault[] = L"EdenFS Menu";
-const wchar_t kToolTipCheckout[] = L"EdenFS is performing a checkout...";
-
-// Top level menu strings
-const wchar_t kMenuWelcomeStr[] = L"Welcome to the E-Menu";
 const wchar_t kMenuAboutStr[] = L"About EdenFS";
-const wchar_t kMenuOptionsStr[] = L"Options";
-const wchar_t kMenuDebug[] = L"Debug Menu";
-const wchar_t kMenuReport[] = L"Report Issue";
-const wchar_t kMenuCloseStr[] = L"Hide Notification Icon";
-
-// Debug menu strings
-const wchar_t kDebugSendGeneric[] = L"Send Test Generic Notification";
-const wchar_t kDebugSendNetwork[] = L"Send Test Network Notification";
-const wchar_t kDebugStartCheckout[] = L"Simulate Starting Checkout";
-const wchar_t kDebugEndCheckout[] = L"Simulate Ending Checkout";
-
-// About EdenFS strings
-const wchar_t kAboutVersion[] = L"Running EdenFS ";
-const wchar_t kAboutUptime[] = L"Uptime: ";
-
-// Options strings
-const wchar_t kOptionDisable[] = L"Disable Notifications";
 const wchar_t kOptionEnable[] = L"Enable Notifications";
 
 enum MenuCommand : UINT {
-  IDM_DEBUG_GEN_NOTIFICATION = 124,
+  IDM_ACTION_CLEAN = 124,
+  IDM_ACTION_DOCTOR,
+  IDM_ACTION_LIST,
+  IDM_ACTION_RAGE,
+  IDM_DEBUG_GEN_NOTIFICATION,
   IDM_DEBUG_NET_NOTIFICATION,
-  IDM_DEBUG_SIGNAL_START,
   IDM_DEBUG_SIGNAL_END,
+  IDM_DEBUG_SIGNAL_START,
   IDM_EXIT,
   IDM_INFO,
   IDM_NOTIFICATION,
@@ -209,31 +190,51 @@ using MenuHandle =
 void appendDebugMenu(HMENU hMenu) {
   MenuHandle subMenu{
       checkNonZero(CreatePopupMenu(), "CreatePopupMenu failed"), &DestroyMenu};
+
+  // Notifications sub-menu
+  MenuHandle notificationsMenu{
+      checkNonZero(CreatePopupMenu(), "CreatePopupMenu failed"), &DestroyMenu};
   appendMenuEntry(
-      subMenu.get(),
+      notificationsMenu.get(),
       MF_BYPOSITION | MF_STRING,
       IDM_DEBUG_GEN_NOTIFICATION,
-      kDebugSendGeneric);
+      L"Generic Notification");
   appendMenuEntry(
-      subMenu.get(),
+      notificationsMenu.get(),
       MF_BYPOSITION | MF_STRING,
       IDM_DEBUG_NET_NOTIFICATION,
-      kDebugSendNetwork);
+      L"Network Notification");
   appendMenuEntry(
       subMenu.get(),
+      MF_BYPOSITION | MF_POPUP,
+      reinterpret_cast<UINT_PTR>(notificationsMenu.get()),
+      L"Send Test Notifications");
+
+  // Simulation sub-menu
+  MenuHandle simulationsMenu{
+      checkNonZero(CreatePopupMenu(), "CreatePopupMenu failed"), &DestroyMenu};
+  appendMenuEntry(
+      simulationsMenu.get(),
       MF_BYPOSITION | MF_STRING,
       IDM_DEBUG_SIGNAL_START,
-      kDebugStartCheckout);
+      L"Starting Checkout");
   appendMenuEntry(
-      subMenu.get(),
+      simulationsMenu.get(),
       MF_BYPOSITION | MF_STRING,
       IDM_DEBUG_SIGNAL_END,
-      kDebugEndCheckout);
+      L"Ending Checkout");
+  appendMenuEntry(
+      subMenu.get(),
+      MF_BYPOSITION | MF_POPUP,
+      reinterpret_cast<UINT_PTR>(simulationsMenu.get()),
+      L"Simulate EdenFS Events");
+
+  // Append to top-level menu
   appendMenuEntry(
       hMenu,
       MF_BYPOSITION | MF_POPUP,
       reinterpret_cast<UINT_PTR>(subMenu.get()),
-      kMenuDebug);
+      L"Debug Menu");
 }
 
 void showWinNotification(HWND hwnd, const WindowsNotification& notif) {
@@ -360,6 +361,26 @@ WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) noexcept {
             return 0;
           }
 
+          case IDM_ACTION_DOCTOR: {
+            executeShellCommand("edenfsctl", "--press-to-continue doctor");
+            return 0;
+          }
+
+          case IDM_ACTION_RAGE: {
+            executeShellCommand("edenfsctl", "--press-to-continue rage");
+            return 0;
+          }
+
+          case IDM_ACTION_LIST: {
+            executeShellCommand("edenfsctl", "--press-to-continue list");
+            return 0;
+          }
+
+          case IDM_ACTION_CLEAN: {
+            executeShellCommand("edenfsctl", "--press-to-continue du --clean");
+            return 0;
+          }
+
           case IDM_SIGNAL_CHECKOUT: {
             auto notifier = getWindowsNotifier(hwnd);
             auto numActive = static_cast<size_t>(lParam);
@@ -399,7 +420,9 @@ WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) noexcept {
             // is prerable to listening to mouse clicks and key presses
             // directly.
           case WM_CONTEXTMENU: {
-            POINT const pt = {LOWORD(wParam), HIWORD(wParam)};
+            POINT pt = {};
+            pt.x = GET_X_LPARAM(wParam);
+            pt.y = GET_Y_LPARAM(wParam);
             auto notifier = getWindowsNotifier(hwnd);
             notifier->showContextMenu(hwnd, pt);
           } break;
@@ -432,7 +455,7 @@ int windowsEventLoop(
     auto windowHandle = WindowHandle{checkNonZero(
         CreateWindowW(
             kWinClassNameStr,
-            kWinTitle,
+            kToolTipDefault,
             0,
             CW_USEDEFAULT,
             0,
@@ -559,7 +582,10 @@ void WindowsNotifier::changeIconColor(UINT iconType) {
   setGuidOrUid(iconData, hwnd_.get(), guid);
   if (iconType == IDI_ONOTIFICATIONICON) {
     StringCchPrintfW(
-        iconData.szTip, std::size(iconData.szTip), L"%s", kToolTipCheckout);
+        iconData.szTip,
+        std::size(iconData.szTip),
+        L"%s",
+        L"EdenFS is performing a checkout...");
   } else {
     StringCchPrintfW(
         iconData.szTip, std::size(iconData.szTip), L"%s", kToolTipDefault);
@@ -587,7 +613,7 @@ void WindowsNotifier::appendOptionsMenu(HMENU hMenu) {
         optionsMenu.get(),
         MF_BYPOSITION | MF_STRING,
         IDM_TOGGLE_NOTIFICATIONS,
-        areNotificationsEnabled() ? kOptionDisable : kOptionEnable);
+        areNotificationsEnabled() ? L"Disable Notifications" : kOptionEnable);
   } else {
     // Gray out the menu item so they can't choose to enable notifs
     appendMenuEntry(
@@ -600,7 +626,39 @@ void WindowsNotifier::appendOptionsMenu(HMENU hMenu) {
       hMenu,
       MF_BYPOSITION | MF_POPUP,
       reinterpret_cast<UINT_PTR>(optionsMenu.get()),
-      kMenuOptionsStr);
+      L"Options");
+}
+
+void WindowsNotifier::appendActionsMenu(HMENU hMenu) {
+  MenuHandle actionMenu{
+      checkNonZero(CreatePopupMenu(), "CreatePopupMenu failed"), &DestroyMenu};
+  appendMenuEntry(
+      actionMenu.get(),
+      MF_BYPOSITION | MF_STRING,
+      IDM_ACTION_DOCTOR,
+      L"Diagnose EdenFS Issues (doctor)");
+  appendMenuEntry(
+      actionMenu.get(),
+      MF_BYPOSITION | MF_STRING,
+      IDM_ACTION_RAGE,
+      L"Collect Diagnostics (rage)");
+  appendMenuEntry(
+      actionMenu.get(),
+      MF_BYPOSITION | MF_STRING,
+      IDM_ACTION_LIST,
+      L"List Checkouts (list)");
+  appendMenuEntry(
+      actionMenu.get(),
+      MF_BYPOSITION | MF_STRING,
+      IDM_ACTION_CLEAN,
+      L"Clean EdenFS Disk (du --clean)");
+
+  // append actions menu to top-level menu
+  appendMenuEntry(
+      hMenu,
+      MF_BYPOSITION | MF_POPUP,
+      reinterpret_cast<UINT_PTR>(actionMenu.get()),
+      L"Actions");
 }
 
 MenuHandle WindowsNotifier::createEdenMenu() {
@@ -610,17 +668,21 @@ MenuHandle WindowsNotifier::createEdenMenu() {
       hMenu.get(),
       MF_BYPOSITION | MF_STRING | MF_GRAYED,
       NULL,
-      kMenuWelcomeStr);
+      L"Welcome to the E-Menu");
   appendMenuEntry(
       hMenu.get(), MF_BYPOSITION | MF_STRING, IDM_INFO, kMenuAboutStr);
   appendOptionsMenu(hMenu.get());
+  appendActionsMenu(hMenu.get());
   if (debugIsEnabled()) {
     appendDebugMenu(hMenu.get());
   }
   appendMenuEntry(
-      hMenu.get(), MF_BYPOSITION | MF_STRING, IDM_REPORT_BUG, kMenuReport);
+      hMenu.get(), MF_BYPOSITION | MF_STRING, IDM_REPORT_BUG, L"Report Issue");
   appendMenuEntry(
-      hMenu.get(), MF_BYPOSITION | MF_STRING, IDM_EXIT, kMenuCloseStr);
+      hMenu.get(),
+      MF_BYPOSITION | MF_STRING,
+      IDM_EXIT,
+      L"Hide Notification Icon");
   return hMenu;
 }
 
@@ -711,11 +773,11 @@ std::wstring getDaemonUptime(
     dayStr = fmt::format("{} days ", days.count());
   }
   auto uptimeStr = fmt::format("{}{:%H:%M:%S}", dayStr, uptimeSec);
-  return std::wstring(kAboutUptime) + multibyteToWideString(uptimeStr);
+  return std::wstring(L"Uptime: ") + multibyteToWideString(uptimeStr);
 }
 
 std::wstring getDaemonVersion(std::string ver) {
-  return std::wstring(kAboutVersion) + multibyteToWideString(ver);
+  return std::wstring(L"Running EdenFS ") + multibyteToWideString(ver);
 }
 
 } // namespace

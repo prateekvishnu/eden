@@ -192,6 +192,19 @@ struct CommitInfo {
   7: map<string, binary> extra;
 }
 
+struct BookmarkInfo {
+  /// "Warm" bookmark value. That's the value of the bookmark that would be
+  /// provided on any other query (like repo_resolve_bookmark).  For the warm
+  /// value all the data like history or blame data is precomputed.
+  1: map<CommitIdentityScheme, CommitId> warm_ids;
+  /// "Real" bookmark value. This is the actual value of a bookmark. Maybe be
+  /// slightly stale (as the read is coming from local mysql replica).
+  2: map<CommitIdentityScheme, CommitId> fresh_ids;
+  /// The timestamp of the last update. This is the update time when the "fresh"
+  /// value provided was set.
+  3: i64 last_update_timestamp_ns;
+}
+
 enum EntryType {
   /// Unknown type
   UNKNOWN = 0,
@@ -519,6 +532,12 @@ struct PushrebaseOutcome {
   /// commits.  The identity schemes for the old ID is specified by the
   /// old_identity_schemes field in the request.
   2: list<PushrebaseRebasedCommit> rebased_commits;
+
+  /// How far away was the commit rebased.
+  3: i64 pushrebase_distance;
+
+  /// How many retries it took to do the rebase successfully, due to race conditions.
+  4: i64 retry_num;
 }
 
 typedef string SparseProfileName
@@ -570,6 +589,17 @@ struct RepoResolveCommitPrefixParams {
 
   /// Commit identity schemes to return.
   3: set<CommitIdentityScheme> identity_schemes;
+}
+
+struct RepoBookmarkInfoParams {
+  /// The bookmark name to look up.
+  1: string bookmark_name;
+
+  /// Commit identity schemes to return.
+  /// Note: ask for bonsai hash only for lowest latency.  The hg hash (and
+  /// possibly others) are generated after the bookmark is moved and you might
+  /// need to wait for them.
+  2: set<CommitIdentityScheme> identity_schemes;
 }
 
 const i64 REPO_LIST_BOOKMARKS_MAX_LIMIT = 10000;
@@ -629,6 +659,10 @@ union RepoCreateCommitParamsFileContent {
 
   /// Create the file using a pre-existing file specified by content SHA-256.
   4: binary content_sha256;
+
+  /// Create the file using a pre-existing file specified by content Git SHA-1
+  /// This is the hash you get from `git hash-object -t blob ${OBJECT}`
+  5: binary content_gitsha1;
 }
 
 struct RepoCreateCommitParamsFileCopyInfo {
@@ -684,6 +718,16 @@ struct RepoCreateCommitParams {
   2: list<CommitId> parents;
 
   /// A mapping from path to the change that is made at that path.
+  ///
+  /// Merge commits require changes to resolve all conflicts in the merge.
+  /// When building a merge commit, the following rules apply:
+  /// 1. All files that are present in at least one parent are in the pre-changes merge
+  /// 2. Paths which differ between the parents they are present in are conflicted
+  ///    and need a change to resolve the conflict
+  /// 3. Where a path is a file in some parents, and a tree in others, resolving
+  ///    the conflict with a "deleted" merely removes the file, leaving the trees
+  ///    as part of the pre-changes merge. Resolving it with a "changed" recursively
+  ///    deletes the trees.
   3: map<string, RepoCreateCommitParamsChange> changes;
 
   /// Commit identity schemes to return.
@@ -831,8 +875,8 @@ struct CommitCompareParams {
   /// If present, perform the compare in path order with these parameters.
   6: optional CommitCompareOrderedParams ordered_params;
   /// Whether to find parents via the commit ancestry, or via mutable copy
-  /// information.
-  7: bool follow_mutable_file_history;
+  /// information. If not supplied, a default will be chosen for you
+  7: optional bool follow_mutable_file_history;
 }
 
 struct CommitFileDiffsParamsPathPair {
@@ -959,6 +1003,13 @@ struct CommitListDescendantBookmarksParams {
   5: set<CommitIdentityScheme> identity_schemes;
 }
 
+struct CommitRunHooksParams {
+  /// Run the same hooks as when landing to bookmark
+  1: string bookmark;
+  /// Pushvars used on the push.
+  2: optional map<string, binary> pushvars;
+}
+
 struct CommitPathExistsParams {}
 
 struct CommitPathInfoParams {}
@@ -984,6 +1035,10 @@ struct CommitPathBlameParams {
   ///
   /// If not specified, defaults to {INCLUDE_CONTENT}.
   4: optional set<BlameFormatOption> format_options;
+
+  /// Use mutable copy information to identify ancestry, instead of
+  /// using commit parents to identify ancestry
+  5: optional bool follow_mutable_file_history;
 }
 
 /// Parameters for the `commit_path_history` method.
@@ -1161,6 +1216,12 @@ struct MegarepoAddConfigParams {
   1: megarepo_configs.SyncTargetConfig new_config;
 }
 
+/// Params for the megarepo_read_target_config method
+struct MegarepoReadConfigParams {
+  1: megarepo_configs.Target target;
+  2: CommitId commit;
+}
+
 /// Params for megarepo_add_sync_target method
 struct MegarepoAddTargetParams {
   /// Initial config to be used on the new target
@@ -1278,6 +1339,11 @@ struct RepoResolveCommitPrefixResponse {
   2: optional map<CommitIdentityScheme, CommitId> ids;
 }
 
+struct RepoBookmarkInfoResponse {
+  /// Bookmark info, null if doesn't exist.
+  1: optional BookmarkInfo info;
+}
+
 struct RepoListBookmarksResponse {
   /// A map from bookmark name to the bookmarked commit's IDs in the
   /// requested schemes (if available).
@@ -1376,6 +1442,24 @@ struct CommitListDescendantBookmarksResponse {
   /// bookmark name as the `after` parameter in a new request to
   /// continue finding them.
   2: optional string continue_after;
+}
+
+struct HookOutcomeAccepted {}
+
+struct HookOutcomeRejected {
+  /// A short description for summarizing this failure with similar failures
+  1: string description;
+  /// A full explanation of what went wrong, suitable for presenting to the user (should include guidance for fixing this failure, where possible)
+  2: string long_description;
+}
+
+union HookOutcome {
+  1: HookOutcomeAccepted accepted;
+  2: HookOutcomeRejected rejected;
+}
+
+struct CommitRunHooksResponse {
+  1: map<string, HookOutcome> outcomes;
 }
 
 struct CommitPathExistsResponse {
@@ -1507,6 +1591,10 @@ struct RepoListHgManifestResponse {
 
 struct MegarepoAddConfigResponse {}
 
+struct MegarepoReadConfigResponse {
+  1: megarepo_configs.SyncTargetConfig config;
+}
+
 struct MegarepoAddTargetResponse {
   /// A new position of the target bookmark
   /// after the "sync changeset" operaton finished
@@ -1600,6 +1688,7 @@ enum RequestErrorKind {
   PERMISSION_DENIED = 8,
   NOT_AVAILABLE = 9,
   NOT_IMPLEMENTED = 10,
+  MERGE_CONFLICTS = 11,
 }
 
 exception RequestError {
@@ -1644,7 +1733,9 @@ service SourceControlService extends fb303_core.BaseService {
   /// Repository methods
   /// ==================
 
-  /// Resolve a bookmark.
+  /// Resolve a bookmark
+  /// The return value may be slightly stale, the served value is only updated
+  /// once all the data for new commits is generated and cache warm.
   RepoResolveBookmarkResponse repo_resolve_bookmark(
     1: RepoSpecifier repo,
     2: RepoResolveBookmarkParams params,
@@ -1654,6 +1745,13 @@ service SourceControlService extends fb303_core.BaseService {
   RepoResolveCommitPrefixResponse repo_resolve_commit_prefix(
     1: RepoSpecifier repo,
     2: RepoResolveCommitPrefixParams params,
+  ) throws (1: RequestError request_error, 2: InternalError internal_error);
+
+  /// Comprehensive information about bookmark (use repo_resolve_bookmark for
+  /// simply resolving bookmark value).
+  RepoBookmarkInfoResponse repo_bookmark_info(
+    1: RepoSpecifier repo,
+    2: RepoBookmarkInfoParams params,
   ) throws (1: RequestError request_error, 2: InternalError internal_error);
 
   /// List all bookmarks in the repo.
@@ -1785,6 +1883,14 @@ service SourceControlService extends fb303_core.BaseService {
     2: CommitListDescendantBookmarksParams params,
   ) throws (1: RequestError request_error, 2: InternalError internal_error);
 
+  /// Run hooks for a commit without landing it. Useful for getting early signal.
+  /// It is NOT guaranteed that a push will succeed if all hooks pass,
+  /// as things other than hooks can fail - e.g. rebase failures.
+  CommitRunHooksResponse commit_run_hooks(
+    1: CommitSpecifier commit,
+    2: CommitRunHooksParams params,
+  ) throws (1: RequestError request_error, 2: InternalError interal_error);
+
   /// CommitPath methods
   /// ==============
 
@@ -1895,6 +2001,11 @@ service SourceControlService extends fb303_core.BaseService {
   /// Add a new unused config version to the library of versions
   MegarepoAddConfigResponse megarepo_add_sync_target_config(
     1: MegarepoAddConfigParams params,
+  ) throws (1: RequestError request_error, 2: InternalError internal_error);
+
+  /// Add a new unused config version to the library of versions
+  MegarepoReadConfigResponse megarepo_read_target_config(
+    1: MegarepoReadConfigParams params,
   ) throws (1: RequestError request_error, 2: InternalError internal_error);
 
   /// Add a new target to the list of known targets and set its

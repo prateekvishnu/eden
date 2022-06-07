@@ -47,7 +47,7 @@ std::unique_ptr<Tree> deserializeGitTree(
   }
 
   // Scan the data and populate entries, as appropriate.
-  vector<TreeEntry> entries;
+  Tree::container entries{kPathMapDefaultCaseSensitive};
   while (!cursor.isAtEnd()) {
     // Extract the mode.
     // This should only be 6 or 7 characters.
@@ -88,8 +88,8 @@ std::unique_ptr<Tree> deserializeGitTree(
           fmt::format("Unrecognized mode: {:o} in object {}", mode, hash));
     }
 
-    entries.emplace_back(
-        ObjectId(hashBytes), PathComponent{std::move(name)}, fileType);
+    auto pathName = PathComponentPiece{name};
+    entries.emplace(pathName, ObjectId(hashBytes), fileType);
   }
 
   return std::make_unique<Tree>(std::move(entries), hash);

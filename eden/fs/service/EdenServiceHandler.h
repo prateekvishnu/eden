@@ -18,8 +18,7 @@ template <typename T>
 class Future;
 }
 
-namespace facebook {
-namespace eden {
+namespace facebook::eden {
 
 class Hash20;
 class BlobMetadata;
@@ -27,6 +26,7 @@ class EdenMount;
 class EdenServer;
 class TreeInode;
 class ObjectFetchContext;
+class EntryAttributes;
 #ifdef EDEN_HAVE_USAGE_SERVICE
 class EdenFSSmartPlatformServiceEndpoint;
 #endif
@@ -90,7 +90,7 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
       std::unique_ptr<std::vector<std::string>> paths,
       std::unique_ptr<SyncBehavior> sync) override;
 
-  ImmediateFuture<BlobMetadata> getBlobMetadataForPath(
+  ImmediateFuture<EntryAttributes> getEntryAttributesForPath(
       AbsolutePathPiece mountPoint,
       folly::StringPiece path,
       ObjectFetchContext& fetchContext);
@@ -265,7 +265,8 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
   bool removeFault(std::unique_ptr<RemoveFaultArg> fault) override;
   int64_t unblockFault(std::unique_ptr<UnblockFaultArg> info) override;
 
-  folly::Future<std::unique_ptr<SetPathObjectIdResult>> future_setPathObjectId(
+  folly::SemiFuture<std::unique_ptr<SetPathObjectIdResult>>
+  semifuture_setPathObjectId(
       std::unique_ptr<SetPathObjectIdParams> params) override;
 
   folly::SemiFuture<folly::Unit> semifuture_removeRecursively(
@@ -324,26 +325,6 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
       folly::StringPiece path,
       ObjectFetchContext& fetchContext) noexcept;
 
-  struct GlobOptions {
-    explicit GlobOptions(const GlobParams& params);
-
-    bool includeDotfiles;
-    bool prefetchFiles;
-    bool suppressFileList;
-    bool wantDtype;
-    bool background;
-    bool listOnlyFiles;
-  };
-
-  folly::Future<std::unique_ptr<Glob>> globFilesImpl(
-      folly::StringPiece mountPoint,
-      std::vector<std::string> globs,
-      std::vector<std::string> revisions,
-      folly::StringPiece searchRootUser,
-      GlobOptions options,
-      folly::StringPiece caller,
-      std::optional<pid_t> pid);
-
 #ifdef EDEN_HAVE_USAGE_SERVICE
   // an endpoint for the edenfs/edenfs_service smartservice used for predictive
   // prefetch profiles
@@ -352,5 +333,4 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
   const std::vector<std::string> originalCommandLine_;
   EdenServer* const server_;
 };
-} // namespace eden
-} // namespace facebook
+} // namespace facebook::eden

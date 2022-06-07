@@ -7,9 +7,8 @@
 
 #![feature(backtrace)]
 #![feature(bool_to_option)]
-#![deny(warnings)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -57,7 +56,7 @@ pub use crate::file::{
     headerless_unified_diff, FileContext, FileId, FileMetadata, FileType, HeaderlessUnifiedDiff,
 };
 pub use crate::path::MononokePath;
-pub use crate::repo::{BookmarkFreshness, Repo, RepoContext};
+pub use crate::repo::{BookmarkFreshness, BookmarkInfo, Repo, RepoContext};
 pub use crate::repo_draft::create_changeset::{CreateChange, CreateChangeFile, CreateCopyInfo};
 pub use crate::repo_draft::RepoDraftContext;
 pub use crate::repo_write::land_stack::PushrebaseOutcome;
@@ -249,7 +248,6 @@ impl Mononoke {
 
 pub struct MononokeApiEnvironment {
     pub repo_factory: RepoFactory,
-    pub disabled_hooks: HashMap<String, HashSet<String>>,
     pub warm_bookmarks_cache_derived_data: WarmBookmarksCacheDerivedData,
     pub warm_bookmarks_cache_enabled: bool,
     pub warm_bookmarks_cache_scuba_sample_builder: MononokeScubaSampleBuilder,

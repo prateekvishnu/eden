@@ -7,6 +7,7 @@
 
 use std::borrow::Cow;
 
+use configparser::config::ConfigSet;
 use thiserror::Error;
 use thrift_types::edenfs as eden;
 
@@ -24,8 +25,12 @@ pub struct UnknownCommand(pub String);
 ///
 /// Ideally this does not exist.
 #[derive(Debug, Error)]
+#[error("{0}")]
+pub struct FallbackToPython(pub &'static str);
+
+#[derive(Debug, Error)]
 #[error("")]
-pub struct FallbackToPython;
+pub struct FailedFallbackToPython;
 
 #[derive(Debug, Error)]
 #[error(
@@ -67,6 +72,39 @@ pub fn print_error(err: &anyhow::Error, io: &crate::io::IO, _args: &[String]) {
         let _ = io.flush();
     } else {
         let _ = io.write_err(format!("abort: {}\n", err));
+    }
+}
+
+/// Optionally transform an error into something more friendly to the user.
+pub fn triage_error(config: &ConfigSet, cmd_err: anyhow::Error) -> anyhow::Error {
+    if types::errors::is_network_error(&cmd_err)
+        && config
+            .get_or_default("experimental", "network-doctor")
+            .unwrap_or(false)
+    {
+        match network_doctor::Doctor::new().diagnose(config) {
+            Ok(()) => cmd_err,
+            Err(diagnosis) =>
+            // TODO: colorize diagnosis, vary output by verbose/quiet
+            {
+                anyhow::anyhow!(
+                    "command failed due to network error\n\n{}\n\nDetails:\n\n{:?}\n\nOriginal error:\n\n{:?}\n",
+                    diagnosis.treatment(config),
+                    diagnosis,
+                    cmd_err
+                )
+            }
+        }
+    } else {
+        if let Some(FallbackToPython(command_name)) = cmd_err.downcast_ref::<FallbackToPython>() {
+            if config
+                .get_or_default::<Vec<String>>("commands", "force-rust")
+                .map_or(false, |config| config.contains(&command_name.to_string()))
+            {
+                return anyhow::Error::new(FailedFallbackToPython);
+            }
+        }
+        cmd_err
     }
 }
 

@@ -10,7 +10,7 @@ use super::DebugArgsOpts;
 use super::Result;
 use super::IO;
 
-pub fn run(opts: DebugArgsOpts, io: &IO, _config: ConfigSet) -> Result<u8> {
+pub fn run(opts: DebugArgsOpts, io: &IO, _config: &mut ConfigSet) -> Result<u8> {
     match io.write(format!("{:?}\n", opts.args)) {
         Ok(_) => Ok(0),
         Err(_) => Ok(255),
@@ -23,4 +23,8 @@ pub fn name() -> &'static str {
 
 pub fn doc() -> &'static str {
     "print arguments received"
+}
+
+pub fn synopsis() -> Option<&'static str> {
+    None
 }

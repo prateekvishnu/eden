@@ -5,21 +5,21 @@
 
 # changelog.py - changelog class for mercurial
 #
-# Copyright 2005-2007 Matt Mackall <mpm@selenic.com>
+# Copyright 2005-2007 Olivia Mackall <olivia@selenic.com>
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
 
 from __future__ import absolute_import
 
-from typing import IO, Any, Dict, List, Optional, Union
+from typing import Any, Dict, IO, List, Optional, Union
 
 import bindings
 
 from . import encoding, error, mdiff, revlog, util, visibility
 from .i18n import _
 from .node import bbin, bin, hex, nullid, nullrev, wdirid, wdirrev
-from .pycompat import decodeutf8, encodeutf8, iteritems, range, isint
+from .pycompat import decodeutf8, encodeutf8, isint, iteritems, range
 from .thirdparty import attr
 
 

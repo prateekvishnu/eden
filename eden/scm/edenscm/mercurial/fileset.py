@@ -5,7 +5,7 @@
 
 # fileset.py - file set queries for mercurial
 #
-# Copyright 2010 Matt Mackall <mpm@selenic.com>
+# Copyright 2010 Olivia Mackall <olivia@selenic.com>
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -13,7 +13,7 @@
 from __future__ import absolute_import
 
 import re
-from typing import Optional, List, Tuple
+from typing import List, Optional, Tuple
 
 from . import error, merge, parser, pycompat, registrar, scmutil, util, winutil
 from .i18n import _

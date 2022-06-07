@@ -10,52 +10,34 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_runtime::block_unless_interrupted as block_on;
-use configparser::config::ConfigSet;
 use dag::CloneData;
 use dag::VertexName;
 use edenapi::EdenApi;
 use hgcommits::DagCommits;
 use metalog::CommitOptions;
 use metalog::MetaLog;
-use thiserror::Error;
 use types::HgId;
 
-#[derive(Error, Debug)]
-pub enum ExchangeError {
-    #[error("could not find config option: {0}")]
-    ConfigError(String),
-    #[error("Unable to fetch bookmark: {0}")]
-    BookmarkFetchError(String),
-}
-
 // TODO: move to a bookmarks crate
-fn convert_to_remote(bookmark: String) -> String {
+fn convert_to_remote(bookmark: &str) -> String {
     return format!("remote/{}", bookmark);
 }
 
-/// Download commit data via lazy pull endpoint
+/// Download commit data via lazy pull endpoint. Returns hash of bookmarks, if any.
 pub fn clone(
-    config: &ConfigSet,
     edenapi: Arc<dyn EdenApi>,
     metalog: &mut MetaLog,
     commits: &mut Box<dyn DagCommits + Send + 'static>,
-) -> Result<()> {
-    let fetch_bookmarks = config
-        .get_opt::<Vec<String>>("remotenames", "selectivepulldefault")?
-        .ok_or_else(|| ExchangeError::ConfigError("remotenames.selectivepulldefault".into()))?;
-
-    let bookmarks = block_on(edenapi.bookmarks(fetch_bookmarks))??;
+    bookmarks: Vec<String>,
+) -> Result<BTreeMap<String, HgId>> {
+    let bookmarks = block_on(edenapi.bookmarks(bookmarks))?.map_err(|e| e.tag_network())?;
     let bookmarks = bookmarks
         .into_iter()
-        .map(|bm| (convert_to_remote(bm.bookmark), bm.hgid))
-        .map(|(name, hgid)| match hgid {
-            Some(hgid) => Ok((name, hgid)),
-            None => Err(ExchangeError::BookmarkFetchError(name)),
-        })
-        .collect::<Result<BTreeMap<String, HgId>, ExchangeError>>()?;
+        .filter_map(|bm| bm.hgid.map(|id| (bm.bookmark, id)))
+        .collect::<BTreeMap<String, HgId>>();
 
     let heads = bookmarks.values().cloned().collect();
-    let clone_data = block_on(edenapi.pull_lazy(vec![], heads))??;
+    let clone_data = block_on(edenapi.pull_lazy(vec![], heads))?.map_err(|e| e.tag_network())?;
     let idmap: BTreeMap<_, _> = clone_data
         .idmap
         .into_iter()
@@ -72,8 +54,16 @@ pub fn clone(
     if let Some(tip) = tip {
         metalog.set("tip", tip.as_ref())?;
     }
-    metalog.set("remotenames", &refencode::encode_remotenames(&bookmarks))?;
+    metalog.set(
+        "remotenames",
+        &refencode::encode_remotenames(
+            &bookmarks
+                .iter()
+                .map(|(bm, id)| (convert_to_remote(bm), id.clone()))
+                .collect(),
+        ),
+    )?;
     metalog.commit(CommitOptions::default())?;
 
-    Ok(())
+    Ok(bookmarks)
 }

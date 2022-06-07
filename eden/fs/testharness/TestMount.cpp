@@ -72,8 +72,7 @@ constexpr size_t kBlobCacheMaximumSize = 1000; // bytes
 constexpr size_t kBlobCacheMinimumEntries = 0;
 } // namespace
 
-namespace facebook {
-namespace eden {
+namespace facebook::eden {
 
 bool TestMountFile::operator==(const TestMountFile& other) const {
   return path == other.path && contents == other.contents && rwx == other.rwx &&
@@ -135,11 +134,8 @@ TestMount::TestMount(FakeTreeBuilder& rootBuilder, bool startReady)
 
 TestMount::TestMount(FakeTreeBuilder&& rootBuilder)
     : TestMount(rootBuilder, /*startReady=*/true) {
-  edenConfig_ = EdenConfig::createTestEdenConfig();
-  // Create treeCache
-  auto edenConfig = std::make_shared<ReloadableConfig>(
-      edenConfig_, ConfigReloadBehavior::NoReload);
-  treeCache_ = TreeCache::create(edenConfig);
+  XCHECK_NE(edenConfig_, nullptr);
+  XCHECK_NE(treeCache_, nullptr);
 }
 
 TestMount::TestMount(
@@ -228,10 +224,10 @@ void TestMount::createMount() {
       backingStore_,
       treeCache_,
       stats_,
-      &folly::QueuedImmediateExecutor::instance(),
       std::make_shared<ProcessNameCache>(),
       std::make_shared<NullStructuredLogger>(),
-      edenConfig_);
+      edenConfig_,
+      config_->getCaseSensitive());
   auto journal = std::make_unique<Journal>(stats_);
   edenMount_ = EdenMount::create(
       std::move(config_),
@@ -314,10 +310,10 @@ void TestMount::remount() {
       backingStore_,
       treeCache_,
       stats_,
-      &folly::QueuedImmediateExecutor::instance(),
       std::make_shared<ProcessNameCache>(),
       std::make_shared<NullStructuredLogger>(),
-      edenConfig_);
+      edenConfig_,
+      config->getCaseSensitive());
 
   auto journal = std::make_unique<Journal>(stats_);
 
@@ -352,10 +348,10 @@ void TestMount::remountGracefully() {
       backingStore_,
       treeCache_,
       stats_,
-      &folly::QueuedImmediateExecutor::instance(),
       std::make_shared<ProcessNameCache>(),
       std::make_shared<NullStructuredLogger>(),
-      edenConfig_);
+      edenConfig_,
+      config->getCaseSensitive());
 
   auto journal = std::make_unique<Journal>(stats_);
 
@@ -649,6 +645,19 @@ FileInodePtr TestMount::getFileInode(folly::StringPiece path) const {
   return getFileInode(RelativePathPiece{path});
 }
 
+InodeOrTreeOrEntry TestMount::getInodeOrTreeOrEntry(
+    RelativePathPiece path) const {
+  return edenMount_
+      ->getInodeOrTreeOrEntry(
+          RelativePathPiece{path}, ObjectFetchContext::getNullContext())
+      .get();
+}
+
+InodeOrTreeOrEntry TestMount::getInodeOrTreeOrEntry(
+    folly::StringPiece path) const {
+  return getInodeOrTreeOrEntry(RelativePathPiece{path});
+}
+
 void TestMount::loadAllInodes() {
   loadAllInodesFuture().get();
 }
@@ -705,5 +714,4 @@ std::string TestMount::loadFileContentsFromPath(std::string path) {
       .get(std::chrono::milliseconds(1));
 };
 
-} // namespace eden
-} // namespace facebook
+} // namespace facebook::eden

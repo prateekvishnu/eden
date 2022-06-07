@@ -5,7 +5,7 @@
 
 # debugcommands.py - command processing for debug* commands
 #
-# Copyright 2005-2016 Matt Mackall <mpm@selenic.com>
+# Copyright 2005-2016 Olivia Mackall <olivia@selenic.com>
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -81,7 +81,7 @@ from .. import (
     vfs as vfsmod,
     visibility,
 )
-from ..i18n import _, _x, _n
+from ..i18n import _, _n, _x
 from ..node import bin, hex, nullhex, nullid, nullrev, short
 from ..pycompat import decodeutf8, range
 from .cmdtable import command
@@ -4014,10 +4014,8 @@ def debugthrowexception(ui, _repo):
         ),
         ("", "python", False, _("signal rust command dispatch to fall back to python")),
     ],
-    _("[OPTION]..."),
 )
 def debugscmstore(ui, repo, mode=None, path=None, python=False):
-    """test file and tree fetching using scmstore"""
     if mode not in ["file", "tree"]:
         raise error.Abort("mode must be one of 'file' and 'tree'")
     if path is None:

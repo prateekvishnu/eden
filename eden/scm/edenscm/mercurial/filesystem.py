@@ -3,7 +3,7 @@
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2.
 
-# Copyright Matt Mackall <mpm@selenic.com> and others
+# Copyright Olivia Mackall <olivia@selenic.com> and others
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -16,8 +16,7 @@ import stat
 from typing import Callable, Iterable, Optional, Tuple
 
 from bindings import workingcopy
-from edenscm.mercurial import match as matchmod
-from edenscm.mercurial import progress
+from edenscm.mercurial import match as matchmod, progress
 
 from . import encoding, error, pathutil, util, vfs as vfsmod
 from .i18n import _

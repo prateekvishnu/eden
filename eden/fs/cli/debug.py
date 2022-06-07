@@ -17,11 +17,12 @@ import sys
 import time
 from pathlib import Path
 from typing import (
-    IO,
     Any,
     Callable,
+    cast,
     DefaultDict,
     Dict,
+    IO,
     Iterator,
     List,
     Optional,
@@ -29,7 +30,6 @@ from typing import (
     Tuple,
     Type,
     Union,
-    cast,
 )
 
 import eden.dirstate
@@ -42,9 +42,9 @@ from facebook.eden.ttypes import (
     DebugJournalDelta,
     EdenError,
     NoValueForKeyError,
+    SyncBehavior,
     TimeSpec,
     TreeInodeDebugInfo,
-    SyncBehavior,
 )
 from fb303_core import BaseService
 from thrift.protocol.TSimpleJSONProtocol import TSimpleJSONProtocolFactory
@@ -61,10 +61,10 @@ from . import (
 )
 from .config import EdenCheckout, EdenInstance
 from .subcmd import Subcmd
-from .util import format_cmd, format_mount, split_inodes_by_operation_type, print_stderr
+from .util import format_cmd, format_mount, print_stderr, split_inodes_by_operation_type
 
 
-MB: int = 1024 ** 2
+MB: int = 1024**2
 debug_cmd = subcmd_mod.Decorator()
 
 
@@ -850,7 +850,7 @@ class UnloadInodesCmd(Subcmd):
             # set the age in nanoSeconds
             age = TimeSpec()
             age.seconds = int(args.age)
-            age.nanoSeconds = int((args.age - age.seconds) * 10 ** 9)
+            age.nanoSeconds = int((args.age - age.seconds) * 10**9)
             count = client.unloadInodeForPath(
                 bytes(checkout.path), bytes(rel_path), age
             )

@@ -12,7 +12,7 @@ use super::Repo;
 use super::Result;
 use super::IO;
 
-pub fn run(_opts: NoOpts, _io: &IO, repo: Repo) -> Result<u8> {
+pub fn run(_opts: NoOpts, _io: &IO, repo: &mut Repo) -> Result<u8> {
     let store_path = repo.store_path();
     let patterns = [
         "indexedlogdatastore/*",
@@ -49,4 +49,8 @@ pub fn name() -> &'static str {
 
 pub fn doc() -> &'static str {
     "call fsync on newly modified key storage files"
+}
+
+pub fn synopsis() -> Option<&'static str> {
+    None
 }

@@ -12,13 +12,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{format_err, Error};
+use acl_regions::build_disabled_acl_regions;
+use anyhow::{anyhow, format_err, Error};
 use blobrepo::{AsBlobRepo, BlobRepo};
 use blobrepo_hg::BlobRepoHg;
 use blobstore::Loadable;
 use blobstore_factory::{make_metadata_sql_factory, ReadOnlyStorage};
 pub use bookmarks::Freshness as BookmarkFreshness;
-use bookmarks::{BookmarkKind, BookmarkName, BookmarkPagination, BookmarkPrefix};
+use bookmarks::{BookmarkKind, BookmarkName, BookmarkPagination, BookmarkPrefix, Freshness};
 use cacheblob::{InProcessLease, LeaseOps};
 use changeset_info::ChangesetInfo;
 use changesets::{Changesets, ChangesetsArc, ChangesetsRef};
@@ -42,13 +43,13 @@ use live_commit_sync_config::{LiveCommitSyncConfig, TestLiveCommitSyncConfig};
 use mercurial_derived_data::MappedHgChangesetId;
 use mercurial_types::Globalrev;
 use metaconfig_types::{
-    HookManagerParams, InfinitepushNamespace, InfinitepushParams, RepoConfig,
+    HookManagerParams, InfinitepushNamespace, InfinitepushParams, LfsParams, RepoConfig,
     SourceControlServiceParams,
 };
 use mononoke_api_types::InnerRepo;
 use mononoke_types::{
     hash::{GitSha1, Sha1, Sha256},
-    Generation, RepositoryId, Svnrev,
+    Generation, RepositoryId, Svnrev, Timestamp,
 };
 use mutable_renames::{MutableRenames, SqlMutableRenamesStore};
 use permission_checker::{ArcPermissionChecker, PermissionCheckerBuilder};
@@ -104,7 +105,6 @@ pub struct Repo {
     pub(crate) inner: InnerRepo,
     pub(crate) name: String,
     pub(crate) warm_bookmarks_cache: Arc<dyn BookmarksCache>,
-    pub(crate) config: RepoConfig,
     pub(crate) repo_permission_checker: ArcPermissionChecker,
     pub(crate) service_permission_checker: ArcPermissionChecker,
     pub(crate) hook_manager: Arc<HookManager>,
@@ -158,7 +158,13 @@ impl Repo {
             config.skiplist_index_blobstore_key = None;
         }
         let logger = env.repo_factory.env.logger.new(o!("repo" => name.clone()));
-        let disabled_hooks = env.disabled_hooks.get(&name).cloned().unwrap_or_default();
+        let disabled_hooks = env
+            .repo_factory
+            .env
+            .disabled_hooks
+            .get(&name)
+            .cloned()
+            .unwrap_or_default();
 
         let inner: InnerRepo = env
             .repo_factory
@@ -185,13 +191,12 @@ impl Repo {
         };
 
         let hook_manager = {
-            let ctx = &ctx;
             let blob_repo = &inner.blob_repo;
             let config = config.clone();
             let name = name.as_str();
             async move {
                 let hook_manager =
-                    make_hook_manager(ctx, blob_repo, config, name, &disabled_hooks).await?;
+                    make_hook_manager(fb, blob_repo, &config, name, &disabled_hooks).await?;
                 Ok::<_, Error>(Arc::new(hook_manager))
             }
         };
@@ -261,7 +266,6 @@ impl Repo {
             name,
             inner,
             warm_bookmarks_cache,
-            config,
             repo_permission_checker,
             service_permission_checker,
             hook_manager,
@@ -280,7 +284,6 @@ impl Repo {
             name: self.name.clone(),
             inner,
             warm_bookmarks_cache: self.warm_bookmarks_cache.clone(),
-            config: self.config.clone(),
             repo_permission_checker: self.repo_permission_checker.clone(),
             service_permission_checker: self.service_permission_checker.clone(),
             hook_manager: self.hook_manager.clone(),
@@ -295,6 +298,23 @@ impl Repo {
             blob_repo,
             None,
             Arc::new(SqlSyncedCommitMapping::with_sqlite_in_memory()?),
+            Default::default(),
+        )
+        .await
+    }
+
+    /// Construct a Repo from a test BlobRepo and LFS config
+    pub async fn new_test_lfs(
+        ctx: CoreContext,
+        blob_repo: BlobRepo,
+        lfs: LfsParams,
+    ) -> Result<Self, Error> {
+        Self::new_test_common(
+            ctx,
+            blob_repo,
+            None,
+            Arc::new(SqlSyncedCommitMapping::with_sqlite_in_memory()?),
+            lfs,
         )
         .await
     }
@@ -311,6 +331,7 @@ impl Repo {
             blob_repo,
             Some(live_commit_sync_config),
             synced_commit_mapping,
+            Default::default(),
         )
         .await
     }
@@ -321,26 +342,12 @@ impl Repo {
         blob_repo: BlobRepo,
         live_commit_sync_config: Option<Arc<dyn LiveCommitSyncConfig>>,
         synced_commit_mapping: Arc<dyn SyncedCommitMapping>,
+        lfs: LfsParams,
     ) -> Result<Self, Error> {
         let repo_id = blob_repo.get_repoid();
-        let inner = InnerRepo {
-            blob_repo,
-            skiplist_index: Arc::new(SkiplistIndex::new()),
-            segmented_changelog: Arc::new(DisabledSegmentedChangelog::new()),
-            ephemeral_store: Arc::new(RepoEphemeralStore::disabled(repo_id)),
-            mutable_renames: Arc::new(MutableRenames::new_test(
-                repo_id,
-                SqlMutableRenamesStore::with_sqlite_in_memory()?,
-            )),
-            repo_cross_repo: Arc::new(RepoCrossRepo::new(
-                synced_commit_mapping,
-                live_commit_sync_config
-                    .unwrap_or_else(|| Arc::new(TestLiveCommitSyncConfig::new_empty())),
-                Arc::new(InProcessLease::new()),
-            )),
-        };
 
         let config = RepoConfig {
+            lfs,
             infinitepush: InfinitepushParams {
                 namespace: Some(InfinitepushNamespace::new(
                     Regex::new("scratch/.+").unwrap(),
@@ -358,6 +365,25 @@ impl Repo {
             ..Default::default()
         };
 
+        let inner = InnerRepo {
+            blob_repo,
+            repo_config: Arc::new(config.clone()),
+            skiplist_index: Arc::new(SkiplistIndex::new()),
+            segmented_changelog: Arc::new(DisabledSegmentedChangelog::new()),
+            ephemeral_store: Arc::new(RepoEphemeralStore::disabled(repo_id)),
+            mutable_renames: Arc::new(MutableRenames::new_test(
+                repo_id,
+                SqlMutableRenamesStore::with_sqlite_in_memory()?,
+            )),
+            repo_cross_repo: Arc::new(RepoCrossRepo::new(
+                synced_commit_mapping,
+                live_commit_sync_config
+                    .unwrap_or_else(|| Arc::new(TestLiveCommitSyncConfig::new_empty())),
+                Arc::new(InProcessLease::new()),
+            )),
+            acl_regions: build_disabled_acl_regions(),
+        };
+
         let mut warm_bookmarks_cache_builder = WarmBookmarksCacheBuilder::new(ctx.clone(), &inner);
         warm_bookmarks_cache_builder.add_all_warmers()?;
         // We are constructing a test repo, so ensure the warm bookmark cache
@@ -366,14 +392,7 @@ impl Repo {
         let warm_bookmarks_cache = warm_bookmarks_cache_builder.build().await?;
 
         let hook_manager = Arc::new(
-            make_hook_manager(
-                &ctx,
-                &inner.blob_repo,
-                config.clone(),
-                "test",
-                &HashSet::new(),
-            )
-            .await?,
+            make_hook_manager(ctx.fb, &inner.blob_repo, &config, "test", &HashSet::new()).await?,
         );
 
         let readonly_fetcher =
@@ -383,7 +402,6 @@ impl Repo {
             name: String::from("test"),
             inner,
             warm_bookmarks_cache: Arc::new(warm_bookmarks_cache),
-            config,
             repo_permission_checker: ArcPermissionChecker::from(
                 PermissionCheckerBuilder::always_allow(),
             ),
@@ -461,12 +479,7 @@ impl Repo {
 
     /// The configuration for the referenced repository.
     pub fn config(&self) -> &RepoConfig {
-        &self.config
-    }
-
-    /// A mutable reference to this repository's config. This is typically only useful for tests.
-    pub fn config_mut(&mut self) -> &mut RepoConfig {
-        &mut self.config
+        &self.inner.repo_config
     }
 
     pub fn mutable_renames(&self) -> &Arc<MutableRenames> {
@@ -474,7 +487,7 @@ impl Repo {
     }
 
     pub async fn report_monitoring_stats(&self, ctx: &CoreContext) -> Result<(), MononokeError> {
-        match self.config.source_control_service_monitoring.as_ref() {
+        match self.config().source_control_service_monitoring.as_ref() {
             None => {}
             Some(monitoring_config) => {
                 for bookmark in monitoring_config.bookmarks_to_report_age.iter() {
@@ -739,6 +752,12 @@ pub struct Stack {
     pub leftover_heads: Vec<ChangesetId>,
 }
 
+pub struct BookmarkInfo {
+    pub warm_changeset: ChangesetContext,
+    pub fresh_changeset: ChangesetContext,
+    pub last_update_timestamp: Timestamp,
+}
+
 /// A context object representing a query to a particular repo.
 impl RepoContext {
     pub async fn new(ctx: CoreContext, repo: Arc<Repo>) -> Result<Self, MononokeError> {
@@ -868,7 +887,8 @@ impl RepoContext {
         Ok(self.repo.ephemeral_store().open_bubble(bubble_id).await?)
     }
 
-    async fn changesets(
+    // pub(crate) for testing
+    pub(crate) async fn changesets(
         &self,
         bubble_id: Option<BubbleId>,
     ) -> Result<Arc<dyn Changesets>, MononokeError> {
@@ -1113,6 +1133,61 @@ impl RepoContext {
         Ok(parents)
     }
 
+    /// Return comprehensive bookmark info including last update time
+    /// Currently works only for public bookmarks.
+    pub async fn bookmark_info(
+        &self,
+        bookmark: impl AsRef<str>,
+    ) -> Result<Option<BookmarkInfo>, MononokeError> {
+        // a non ascii bookmark name is an invalid request
+        let bookmark = BookmarkName::new(bookmark.as_ref())
+            .map_err(|e| MononokeError::InvalidRequest(e.to_string()))?;
+
+        let (maybe_warm_cs_id, maybe_log_entry) = try_join!(
+            self.warm_bookmarks_cache().get(&self.ctx, &bookmark),
+            async {
+                let mut entries_stream = self
+                    .repo
+                    .blob_repo()
+                    .bookmark_update_log()
+                    .list_bookmark_log_entries(
+                        self.ctx.clone(),
+                        bookmark.clone(),
+                        1,
+                        None,
+                        Freshness::MaybeStale,
+                    );
+                entries_stream.next().await.transpose()
+            }
+        )?;
+
+        let maybe_warm_changeset =
+            maybe_warm_cs_id.map(|cs_id| ChangesetContext::new(self.clone(), cs_id));
+
+        let (_id, maybe_fresh_cs_id, _reason, timestamp) = maybe_log_entry
+            .ok_or_else(|| anyhow!("Bookmark update log has no entries for queried bookmark!"))?;
+
+        let fresh_cs_id = match maybe_fresh_cs_id {
+            Some(cs_id) => cs_id,
+            None => {
+                return Ok(None);
+            }
+        };
+        let fresh_changeset = ChangesetContext::new(self.clone(), fresh_cs_id);
+
+        let last_update_timestamp = timestamp;
+
+        // If the bookmark wasn't found in the warm bookmarks cache return
+        // the fresh value for simplicity.
+        let warm_changeset = maybe_warm_changeset.unwrap_or_else(|| fresh_changeset.clone());
+
+        Ok(Some(BookmarkInfo {
+            warm_changeset,
+            fresh_changeset,
+            last_update_timestamp,
+        }))
+    }
+
     /// Get a list of bookmarks.
     pub async fn list_bookmarks(
         &self,
@@ -1306,6 +1381,14 @@ impl RepoContext {
         hash: Sha256,
     ) -> Result<Option<FileContext>, MononokeError> {
         FileContext::new_check_exists(self.clone(), FetchKey::Aliased(Alias::Sha256(hash))).await
+    }
+
+    /// Get a File by content git-sha-1.  Returns `None` if the file doesn't exist.
+    pub async fn file_by_content_gitsha1(
+        &self,
+        hash: GitSha1,
+    ) -> Result<Option<FileContext>, MononokeError> {
+        FileContext::new_check_exists(self.clone(), FetchKey::Aliased(Alias::GitSha1(hash))).await
     }
 
     fn get_target_repo_and_lca_hint(

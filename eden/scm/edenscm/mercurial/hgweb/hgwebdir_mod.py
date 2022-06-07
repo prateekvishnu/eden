@@ -6,7 +6,7 @@
 # hgweb/hgwebdir_mod.py - Web interface for a directory of repositories.
 #
 # Copyright 21 May 2005 - (c) 2005 Jake Edge <jake@edge2.net>
-# Copyright 2005, 2006 Matt Mackall <mpm@selenic.com>
+# Copyright 2005, 2006 Olivia Mackall <olivia@selenic.com>
 #
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
@@ -32,13 +32,13 @@ from .. import (
 from ..i18n import _
 from . import hgweb_mod, webutil, wsgicgi
 from .common import (
+    cspvalues,
+    ErrorResponse,
+    get_contact,
+    get_mtime,
     HTTP_NOT_FOUND,
     HTTP_OK,
     HTTP_SERVER_ERROR,
-    ErrorResponse,
-    cspvalues,
-    get_contact,
-    get_mtime,
     ismember,
     paritygen,
     staticfile,

@@ -292,11 +292,12 @@ def _hassparse(repo):
     return "eden" not in repo.requirements and util.safehasattr(repo, "sparsematch")
 
 
-def _setupupdates(ui):
+def _setupupdates(_ui):
     def _calculateupdates(
         orig, repo, wctx, mctx, ancestors, branchmerge, *arg, **kwargs
     ):
         """Filter updates to only lay out files that match the sparse rules."""
+        ui = repo.ui
         actions, diverge, renamedelete = orig(
             repo, wctx, mctx, ancestors, branchmerge, *arg, **kwargs
         )
@@ -1250,6 +1251,11 @@ def getsparsepatterns(repo, rev, rawconfig=None, debugversion=None):
                         else:
                             includes.add((value, origin))
                 elif version == "2":
+                    for i, origin in enumerate(profile.ruleorigins):
+                        profile.ruleorigins[i] = "{} -> {}".format(
+                            rawconfig.path, origin
+                        )
+
                     # Do nothing. A higher layer will turn profile.rules
                     # into a matcher and compose it with the other
                     # profiles.
@@ -1280,7 +1286,7 @@ def getsparsepatterns(repo, rev, rawconfig=None, debugversion=None):
         ruleorigins.append("sparse.py")
 
     return SparseConfig(
-        "<aggregated from %s>".format(rawconfig.path),
+        "<aggregated from {}>".format(rawconfig.path),
         rules,
         profiles,
         rawconfig.metadata,
@@ -1510,7 +1516,7 @@ def _warnfullcheckout(repo):
             _(
                 "warning: full checkouts will soon be disabled in "
                 "this repository. Use EdenFS or hg sparse to get a "
-                "smaller repository."
+                "smaller repository.\n"
             )
         )
 
@@ -2172,8 +2178,11 @@ def debugsparseexplainmatch(ui, repo, *args, **opts):
         if not explanation:
             ui.write(_("{}: excluded by default".format(f)))
         else:
-            verb = "excluded" if explanation[0] == "!" else "included"
-            ui.write(_("{}: {} by rule {}\n".format(f, verb, explanation)))
+            if "\n" in explanation:
+                ui.write(_("%s:\n  %s\n") % (f, explanation.replace("\n", "\n  ")))
+            else:
+                verb = "excluded" if explanation[0] == "!" else "included"
+                ui.write(_("%s: %s by rule %s\n") % (f, verb, explanation))
 
 
 def _contains_files(load_matcher, profile, files):

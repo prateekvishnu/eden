@@ -617,6 +617,15 @@ class EdenConfig : private ConfigSettingManager {
       std::vector<std::string>{},
       this};
 
+  /**
+   * Controls whether EdenFS makes use of ActivityBuffers to store past
+   * events in memory.
+   */
+  ConfigSetting<bool> enableActivityBuffer{
+      "telemetry:enable-activitybuffer",
+      false,
+      this};
+
   // [experimental]
 
   /**
@@ -638,17 +647,6 @@ class EdenConfig : private ConfigSettingManager {
   ConfigSetting<bool> enableNfsServer{
       "experimental:enable-nfs-server",
       folly::kIsApple,
-      this};
-
-  /**
-   * Controls whether EdenFS initializes the Windows InodeMap by querying the
-   * filesystem, or the Overlay.
-   *
-   * By setting this to true, EdenFS will query the Overlay.
-   */
-  ConfigSetting<bool> enableFastInodeMapInitialization{
-      "experimental:enable-fast-inodemap-initialization",
-      false,
       this};
 
   // [treecache]
@@ -794,6 +792,15 @@ class EdenConfig : private ConfigSettingManager {
   ConfigSetting<std::string> overlaySynchronousMode{
       "overlay:synchronous-mode",
       "normal",
+      this};
+
+  /**
+   * This option controls how often we run SQLite WAL checkpoint in tree
+   * overlay. This option is ignored in other overlay types.
+   */
+  ConfigSetting<std::chrono::nanoseconds> overlayMaintenanceInterval{
+      "overlay:maintenance-interval",
+      std::chrono::minutes(1),
       this};
 
   // [clone]
