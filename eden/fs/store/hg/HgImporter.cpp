@@ -21,9 +21,9 @@
 #include <folly/json.h>
 #include <folly/lang/Bits.h>
 #include <folly/logging/xlog.h>
-#include <gflags/gflags.h>
+#include <folly/portability/GFlags.h>
 #ifndef _WIN32
-#include <unistd.h>
+#include <folly/portability/Unistd.h>
 #endif
 
 #include <mutex>

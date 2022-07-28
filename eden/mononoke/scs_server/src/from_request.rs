@@ -5,22 +5,40 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::{BTreeMap, HashMap};
-use std::fmt::{Debug, Display};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::fmt::Display;
 use std::ops::RangeBounds;
 use std::str::FromStr;
 
+use bookmarks_movement::BookmarkKindRestrictions;
 use bytes::Bytes;
-use chrono::{DateTime, FixedOffset, TimeZone};
+use chrono::DateTime;
+use chrono::FixedOffset;
+use chrono::TimeZone;
 use ephemeral_blobstore::BubbleId;
 use faster_hex::hex_string;
-use mononoke_api::specifiers::{GitSha1, Globalrev, Svnrev};
-use mononoke_api::{
-    BookmarkName, CandidateSelectionHintArgs, ChangesetId, ChangesetIdPrefix,
-    ChangesetPrefixSpecifier, ChangesetSpecifier, CopyInfo, CreateCopyInfo, FileId, FileType,
-    HgChangesetId, HgChangesetIdPrefix, MononokePath, TreeId,
-};
-use mononoke_types::hash::{Sha1, Sha256};
+use hooks::CrossRepoPushSource;
+use mononoke_api::specifiers::GitSha1;
+use mononoke_api::specifiers::Globalrev;
+use mononoke_api::specifiers::Svnrev;
+use mononoke_api::BookmarkName;
+use mononoke_api::CandidateSelectionHintArgs;
+use mononoke_api::ChangesetId;
+use mononoke_api::ChangesetIdPrefix;
+use mononoke_api::ChangesetPrefixSpecifier;
+use mononoke_api::ChangesetSpecifier;
+use mononoke_api::CopyInfo;
+use mononoke_api::CreateCopyInfo;
+use mononoke_api::FileId;
+use mononoke_api::FileType;
+use mononoke_api::HgChangesetId;
+use mononoke_api::HgChangesetIdPrefix;
+use mononoke_api::MononokePath;
+use mononoke_api::TreeId;
+use mononoke_types::hash::Sha1;
+use mononoke_types::hash::Sha256;
 use source_control as thrift;
 
 use crate::commit_id::CommitIdExt;
@@ -40,6 +58,37 @@ impl FromRequest<str> for BookmarkName {
                 bookmark, e
             ))
         })
+    }
+}
+
+impl FromRequest<thrift::CrossRepoPushSource> for CrossRepoPushSource {
+    fn from_request(
+        push_source: &thrift::CrossRepoPushSource,
+    ) -> Result<Self, thrift::RequestError> {
+        match push_source {
+            &thrift::CrossRepoPushSource::NATIVE_TO_THIS_REPO => Ok(Self::NativeToThisRepo),
+            &thrift::CrossRepoPushSource::PUSH_REDIRECTED => Ok(Self::PushRedirected),
+            other => Err(errors::invalid_request(format!(
+                "Unknown CrossRepoPushSource: {}",
+                other
+            ))),
+        }
+    }
+}
+
+impl FromRequest<thrift::BookmarkKindRestrictions> for BookmarkKindRestrictions {
+    fn from_request(
+        push_source: &thrift::BookmarkKindRestrictions,
+    ) -> Result<Self, thrift::RequestError> {
+        match push_source {
+            &thrift::BookmarkKindRestrictions::ANY_KIND => Ok(Self::AnyKind),
+            &thrift::BookmarkKindRestrictions::ONLY_SCRATCH => Ok(Self::OnlyScratch),
+            &thrift::BookmarkKindRestrictions::ONLY_PUBLISHING => Ok(Self::OnlyPublishing),
+            other => Err(errors::invalid_request(format!(
+                "Unknown BookmarkKindRestrictions: {}",
+                other
+            ))),
+        }
     }
 }
 
@@ -96,7 +145,7 @@ impl FromRequest<thrift::CommitId> for ChangesetSpecifier {
                 Ok(ChangesetSpecifier::Bonsai(cs_id))
             }
             thrift::CommitId::hg(id) => {
-                let hg_cs_id = HgChangesetId::from_bytes(&id).map_err(|e| {
+                let hg_cs_id = HgChangesetId::from_bytes(id).map_err(|e| {
                     errors::invalid_request(format!(
                         "invalid commit id (scheme={} {}): {}",
                         commit.scheme(),
@@ -160,11 +209,11 @@ impl FromRequest<thrift::CommitId> for ChangesetSpecifier {
 
 impl FromRequest<thrift::CopyInfo> for CopyInfo {
     fn from_request(copy_info: &thrift::CopyInfo) -> Result<Self, thrift::RequestError> {
-        match copy_info {
-            &thrift::CopyInfo::NONE => Ok(CopyInfo::None),
-            &thrift::CopyInfo::COPY => Ok(CopyInfo::Copy),
-            &thrift::CopyInfo::MOVE => Ok(CopyInfo::Move),
-            &val => Err(errors::invalid_request(format!(
+        match *copy_info {
+            thrift::CopyInfo::NONE => Ok(CopyInfo::None),
+            thrift::CopyInfo::COPY => Ok(CopyInfo::Copy),
+            thrift::CopyInfo::MOVE => Ok(CopyInfo::Move),
+            val => Err(errors::invalid_request(format!(
                 "unsupported copy info ({})",
                 val
             ))),
@@ -238,11 +287,11 @@ impl FromRequest<thrift::RepoCreateCommitParamsFileType> for FileType {
     fn from_request(
         file_type: &thrift::RepoCreateCommitParamsFileType,
     ) -> Result<Self, thrift::RequestError> {
-        match file_type {
-            &thrift::RepoCreateCommitParamsFileType::FILE => Ok(FileType::Regular),
-            &thrift::RepoCreateCommitParamsFileType::EXEC => Ok(FileType::Executable),
-            &thrift::RepoCreateCommitParamsFileType::LINK => Ok(FileType::Symlink),
-            &val => Err(errors::invalid_request(format!(
+        match *file_type {
+            thrift::RepoCreateCommitParamsFileType::FILE => Ok(FileType::Regular),
+            thrift::RepoCreateCommitParamsFileType::EXEC => Ok(FileType::Executable),
+            thrift::RepoCreateCommitParamsFileType::LINK => Ok(FileType::Symlink),
+            val => Err(errors::invalid_request(format!(
                 "unsupported file type ({})",
                 val
             ))),

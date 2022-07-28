@@ -8,17 +8,24 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{format_err, Error};
+use anyhow::format_err;
+use anyhow::Error;
 use ascii::AsciiString;
 use cloned::cloned;
-use futures::{FutureExt, TryFutureExt};
-use futures_01_ext::{try_boxfuture, BoxFuture, FutureExt as _};
-use futures_old::{prelude::*, stream};
-use slog::{info, Logger};
+use futures::FutureExt;
+use futures::TryFutureExt;
+use futures_01_ext::try_boxfuture;
+use futures_01_ext::BoxFuture;
+use futures_01_ext::FutureExt as _;
+use futures_old::prelude::*;
+use futures_old::stream;
+use slog::info;
+use slog::Logger;
 
 use blobrepo::BlobRepo;
 use blobrepo_hg::BlobRepoHg;
-use bookmarks::{BookmarkName, BookmarkUpdateReason};
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
 use context::CoreContext;
 use mercurial_revlog::RevlogRepo;
 use mercurial_types::HgChangesetId;
@@ -133,7 +140,7 @@ pub fn upload_bookmarks(
         .filter_map(|key_cs_id| key_cs_id)
         .chunks(100) // send 100 bookmarks in a single transaction
         .and_then({
-            let blobrepo = blobrepo.clone();
+            let blobrepo = blobrepo;
             let mononoke_bookmarks: HashMap<_, _> = mononoke_bookmarks.into_iter().collect();
             move |vec| {
                 let mut transaction = blobrepo.update_bookmark_transaction(ctx.clone());
@@ -144,7 +151,7 @@ pub fn upload_bookmarks(
                     let bookmark_name = bookmark_name_transformer(bookmark_name);
                     if mononoke_bookmarks.get(&bookmark_name) != Some(&value) {
                         count += 1;
-                        try_boxfuture!(transaction.force_set(&bookmark_name, value, BookmarkUpdateReason::Blobimport, None))
+                        try_boxfuture!(transaction.force_set(&bookmark_name, value, BookmarkUpdateReason::Blobimport))
                     }
                 }
 

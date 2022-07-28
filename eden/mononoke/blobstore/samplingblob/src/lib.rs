@@ -7,9 +7,12 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use blobstore::{
-    Blobstore, BlobstoreGetData, BlobstoreIsPresent, BlobstorePutOps, OverwriteStatus, PutBehaviour,
-};
+use blobstore::Blobstore;
+use blobstore::BlobstoreGetData;
+use blobstore::BlobstoreIsPresent;
+use blobstore::BlobstorePutOps;
+use blobstore::OverwriteStatus;
+use blobstore::PutBehaviour;
 use context::CoreContext;
 use metaconfig_types::BlobstoreId;
 use mononoke_types::BlobstoreBytes;
@@ -77,7 +80,7 @@ impl<T: Blobstore> Blobstore for SamplingBlobstore<T> {
         key: String,
         value: BlobstoreBytes,
     ) -> Result<()> {
-        let sample_res = self.handler.sample_put(&ctx, &key, &value);
+        let sample_res = self.handler.sample_put(ctx, &key, &value);
         self.inner.put(ctx, key, value).await?;
         sample_res
     }
@@ -179,7 +182,7 @@ impl<T: Blobstore + BlobstorePutOps> Blobstore for SamplingBlobstorePutOps<T> {
         key: String,
         value: BlobstoreBytes,
     ) -> Result<()> {
-        let sample_res = self.handler.sample_put(&ctx, &key, &value, self.inner_id);
+        let sample_res = self.handler.sample_put(ctx, &key, &value, self.inner_id);
         self.inner.put(ctx, key, value).await?;
         sample_res
     }
@@ -207,7 +210,7 @@ impl<T: BlobstorePutOps> BlobstorePutOps for SamplingBlobstorePutOps<T> {
         value: BlobstoreBytes,
         put_behaviour: PutBehaviour,
     ) -> Result<OverwriteStatus> {
-        self.handler.sample_put(&ctx, &key, &value, self.inner_id)?;
+        self.handler.sample_put(ctx, &key, &value, self.inner_id)?;
         self.inner
             .put_explicit(ctx, key, value, put_behaviour)
             .await
@@ -219,7 +222,7 @@ impl<T: BlobstorePutOps> BlobstorePutOps for SamplingBlobstorePutOps<T> {
         key: String,
         value: BlobstoreBytes,
     ) -> Result<OverwriteStatus> {
-        self.handler.sample_put(&ctx, &key, &value, self.inner_id)?;
+        self.handler.sample_put(ctx, &key, &value, self.inner_id)?;
         self.inner.put_with_status(ctx, key, value).await
     }
 }
@@ -230,7 +233,8 @@ mod test {
 
     use borrowed::borrowed;
     use fbinit::FacebookInit;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
 
     use context::SamplingKey;
     use memblob::Memblob;
@@ -242,11 +246,11 @@ mod test {
     }
     impl TestSamplingHandler {
         fn check_sample(&self, ctx: &CoreContext) -> Result<()> {
-            ctx.sampling_key().map(|sampling_key| {
+            if let Some(sampling_key) = ctx.sampling_key() {
                 if sampling_key == &self.looking_for {
                     self.sampled.store(true, Ordering::Relaxed);
                 }
-            });
+            }
             Ok(())
         }
     }

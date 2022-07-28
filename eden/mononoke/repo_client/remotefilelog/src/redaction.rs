@@ -7,7 +7,9 @@
 
 use anyhow::Error;
 use bytes::Bytes;
-use futures_old::{Async, Future, Poll};
+use futures_old::Async;
+use futures_old::Future;
+use futures_old::Poll;
 use mercurial_types::FileBytes;
 
 use redactedblobstore::has_redaction_root_cause;
@@ -38,7 +40,7 @@ where
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         match self.future.poll() {
-            Ok(Async::NotReady) => return Ok(Async::NotReady),
+            Ok(Async::NotReady) => Ok(Async::NotReady),
             Ok(Async::Ready(r)) => Ok(Async::Ready(r)),
             Err(e) => {
                 if has_redaction_root_cause(&e) {

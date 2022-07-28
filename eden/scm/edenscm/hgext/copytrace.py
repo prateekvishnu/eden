@@ -43,7 +43,6 @@ import time
 
 from edenscm.mercurial import (
     cmdutil,
-    commands,
     copies as copiesmod,
     dispatch,
     extensions,
@@ -136,7 +135,7 @@ def _filemerge(
     fca,
     labels=None,
     *args,
-    **kwargs
+    **kwargs,
 ):
 
     if premerge:

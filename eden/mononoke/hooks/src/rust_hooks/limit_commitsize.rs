@@ -5,12 +5,17 @@
  * GNU General Public License version 2.
  */
 
-use crate::{
-    ChangesetHook, CrossRepoPushSource, FileContentManager, HookConfig, HookExecution,
-    HookRejectionInfo, PushAuthoredBy,
-};
+use crate::ChangesetHook;
+use crate::CrossRepoPushSource;
+use crate::FileContentManager;
+use crate::HookConfig;
+use crate::HookExecution;
+use crate::HookRejectionInfo;
+use crate::PushAuthoredBy;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Result;
 use async_trait::async_trait;
 use bookmarks::BookmarkName;
 use context::CoreContext;
@@ -48,10 +53,10 @@ impl LimitCommitsizeBuilder {
             self = self.override_limit_path_regexes(v);
         }
         if let Some(v) = config.int_lists.get("override_limits") {
-            self = self.override_limits(v.into_iter().map(|i| *i as u64));
+            self = self.override_limits(v.iter().map(|i| *i as u64));
         }
         if let Some(v) = config.int_64_lists.get("override_limits") {
-            self = self.override_limits(v.into_iter().map(|i| *i as u64));
+            self = self.override_limits(v.iter().map(|i| *i as u64));
         }
         self
     }
@@ -89,7 +94,7 @@ impl LimitCommitsizeBuilder {
     pub fn build(self) -> Result<LimitCommitsize> {
         let regexes = self
             .override_limit_path_regexes
-            .unwrap_or_else(Vec::new)
+            .unwrap_or_default()
             .into_iter()
             .map(|s| Regex::new(&s))
             .collect::<Result<Vec<_>, _>>()
@@ -97,7 +102,7 @@ impl LimitCommitsizeBuilder {
 
         let limits = self
             .override_limits
-            .unwrap_or_else(Vec::new)
+            .unwrap_or_default()
             .into_iter()
             .collect::<Vec<_>>();
 
@@ -117,7 +122,7 @@ impl LimitCommitsizeBuilder {
             override_limit_path_regexes_with_limits: regexes_with_limits,
             ignore_path_regexes: self
                 .ignore_path_regexes
-                .unwrap_or_else(Vec::new)
+                .unwrap_or_default()
                 .into_iter()
                 .map(|s| Regex::new(&s))
                 .collect::<Result<Vec<_>, _>>()
@@ -222,19 +227,19 @@ impl ChangesetHook for LimitCommitsize {
 mod test {
     use super::*;
     use anyhow::Error;
-    use blobrepo::BlobRepo;
     use blobstore::Loadable;
     use borrowed::borrowed;
     use fbinit::FacebookInit;
     use hooks_content_stores::RepoFileContentManager;
     use maplit::hashmap;
     use std::collections::HashMap;
+    use tests_utils::BasicTestRepo;
     use tests_utils::CreateCommitContext;
 
     #[fbinit::test]
     async fn test_limitcommitsize(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let repo: BlobRepo = test_repo_factory::build_empty(fb)?;
+        let repo: BasicTestRepo = test_repo_factory::build_empty(fb)?;
         borrowed!(ctx, repo);
 
         let cs_id = CreateCommitContext::new_root(ctx, repo)
@@ -244,9 +249,9 @@ mod test {
             .commit()
             .await?;
 
-        let bcs = cs_id.load(ctx, repo.blobstore()).await?;
+        let bcs = cs_id.load(ctx, &repo.repo_blobstore).await?;
 
-        let content_manager = RepoFileContentManager::new(repo.clone());
+        let content_manager = RepoFileContentManager::new(&repo);
         let hook = build_hook(hashmap! {
             "commitsizelimit".to_string() => 3,
             "changed_files_limit".to_string() => 3,
@@ -314,7 +319,7 @@ mod test {
     #[fbinit::test]
     async fn test_limitcommitsize_removed_files(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let repo: BlobRepo = test_repo_factory::build_empty(fb)?;
+        let repo: BasicTestRepo = test_repo_factory::build_empty(fb)?;
         borrowed!(ctx, repo);
 
         let parent_cs_id = CreateCommitContext::new_root(ctx, repo)
@@ -329,9 +334,9 @@ mod test {
             .commit()
             .await?;
 
-        let bcs = cs_id.load(ctx, repo.blobstore()).await?;
+        let bcs = cs_id.load(ctx, &repo.repo_blobstore).await?;
 
-        let content_manager = RepoFileContentManager::new(repo.clone());
+        let content_manager = RepoFileContentManager::new(&repo);
         let hook = build_hook(hashmap! {
             "commitsizelimit".to_string() => 100,
             "changed_files_limit".to_string() => 2,
@@ -374,7 +379,7 @@ mod test {
     #[fbinit::test]
     async fn test_limitcommitsize_override(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let repo: BlobRepo = test_repo_factory::build_empty(fb)?;
+        let repo: BasicTestRepo = test_repo_factory::build_empty(fb)?;
         borrowed!(ctx, repo);
 
         let cs_id = CreateCommitContext::new_root(ctx, repo)
@@ -384,9 +389,9 @@ mod test {
             .commit()
             .await?;
 
-        let bcs = cs_id.load(ctx, repo.blobstore()).await?;
+        let bcs = cs_id.load(ctx, &repo.repo_blobstore).await?;
 
-        let content_manager = RepoFileContentManager::new(repo.clone());
+        let content_manager = RepoFileContentManager::new(&repo);
         let hook = build_hook_with_limits(
             hashmap! {
                 "commitsizelimit".to_string() => 1,
@@ -418,7 +423,7 @@ mod test {
     #[fbinit::test]
     async fn test_limitcommitsize_override_hits_limit(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let repo: BlobRepo = test_repo_factory::build_empty(fb)?;
+        let repo: BasicTestRepo = test_repo_factory::build_empty(fb)?;
         borrowed!(ctx, repo);
 
         let cs_id = CreateCommitContext::new_root(ctx, repo)
@@ -428,9 +433,9 @@ mod test {
             .commit()
             .await?;
 
-        let bcs = cs_id.load(ctx, repo.blobstore()).await?;
+        let bcs = cs_id.load(ctx, &repo.repo_blobstore).await?;
 
-        let content_manager = RepoFileContentManager::new(repo.clone());
+        let content_manager = RepoFileContentManager::new(&repo);
 
         let hook = build_hook_with_limits(
             hashmap! {

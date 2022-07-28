@@ -9,7 +9,7 @@
 
 setup configuration
 
-  $ ENABLE_PRESERVE_BUNDLE2=1 setup_common_config blob_files
+  $ setup_common_config blob_files
   $ cd $TESTTMP
 
 setup repo
@@ -76,18 +76,17 @@ Make a copy of it that will be used later
 
 Try to sync blobimport bookmark move, which should fail
   $ cd "$TESTTMP"
-  $ create_repo_lock_sqlite3_db
-  $ init_repo_lock_sqlite3_db
-  $ sqlite3 "$TESTTMP/hgrepos/repo_lock" "select count(*) from repo_lock"
-  1
+
+State 0 means Mononoke is unlocked
+  $ sqlite3 "$TESTTMP/monsql/sqlite_dbs" "insert into repo_lock (repo_id, state, reason) values(0, 0, null)";
   $ mononoke_hg_sync_with_failure_handler repo-hg 0 2>&1 | grep 'unexpected bookmark move'
-  * unexpected bookmark move: blobimport (glob)
-  $ sqlite3 "$TESTTMP/hgrepos/repo_lock" "select count(*) from repo_lock"
+  * unexpected bookmark move: blobimport* (glob)
+  $ sqlite3 "$TESTTMP/monsql/sqlite_dbs" "select count(*) from repo_lock"
   1
 
 Sync a pushrebase bookmark move
   $ mononoke_hg_sync repo-hg 1 2>&1 | grep 'successful sync'
-  * successful sync of entries [2] (glob)
+  * successful sync of entries [2]* (glob)
   $ cd repo-hg
   $ hg log -r master_bookmark
   commit:      1e43292ffbb3
@@ -98,7 +97,7 @@ Sync a pushrebase bookmark move
   
   $ cd $TESTTMP
   $ mononoke_hg_sync repo-hg 2 2>&1 | grep 'successful sync'
-  * successful sync of entries [3] (glob)
+  * successful sync of entries [3]* (glob)
   $ cd repo-hg
   $ hg log -r master_bookmark
   commit:      6cc06ef82eeb
@@ -115,7 +114,7 @@ Sync a pushrebase bookmark move
   
   $ cd $TESTTMP
   $ mononoke_hg_sync repo-hg 3 2>&1 | grep 'successful sync'
-  * successful sync of entries [4] (glob)
+  * successful sync of entries [4]* (glob)
   $ cd repo-hg
   $ hg log -r master_bookmark
   commit:      1e43292ffbb3
@@ -146,13 +145,17 @@ Enable replay verification hooks
 Replay in a loop
   $ cd $TESTTMP
   $ mononoke_hg_sync_loop repo-hg-3 0 2>&1 | grep 'unexpected bookmark'
-  * unexpected bookmark move: blobimport (glob)
+  * unexpected bookmark move: blobimport* (glob)
+  *] Execution error: unexpected bookmark move: blobimport (glob)
   $ mononoke_hg_sync_loop repo-hg-3 1 --bundle-prefetch 0 2>&1 | grep 'successful sync'
-  * successful sync of entries [2] (glob)
-  * successful sync of entries [3] (glob)
-  * successful sync of entries [4] (glob)
+  * successful sync of entries [2]* (glob)
+  * successful sync of entries [3]* (glob)
+  * successful sync of entries [4]* (glob)
   $ sqlite3 "$TESTTMP/monsql/sqlite_dbs" "select * from mutable_counters where name = 'latest-replayed-request'";
   0|latest-replayed-request|4
+
+Unlock the repo so that we can push again
+  $ sqlite3 "$TESTTMP/monsql/sqlite_dbs" "UPDATE repo_lock SET state = 0 WHERE repo_id = 0";
 
 Make one more push from the client
   $ cd $TESTTMP/client-push
@@ -163,7 +166,7 @@ Make one more push from the client
 Continue replay
   $ cd $TESTTMP
   $ mononoke_hg_sync_loop repo-hg-3 1 2>&1 | grep 'successful sync'
-  * successful sync of entries [5] (glob)
+  * successful sync of entries [5]* (glob)
   $ cd $TESTTMP/repo-hg-3
   $ hg log -r tip
   commit:      67d5c96d65a7
@@ -206,8 +209,8 @@ Continue replay
 
   $ cd $TESTTMP
   $ mononoke_hg_sync_loop repo-hg-3 5 2>&1 | grep 'successful sync'
-  * successful sync of entries [6] (glob)
-  * successful sync of entries [7] (glob)
+  * successful sync of entries [6]* (glob)
+  * successful sync of entries [7]* (glob)
   $ cd repo-hg-3
   $ hg log -r master_bookmark^
   commit:      a7acac33c050
@@ -257,11 +260,11 @@ Test hook bypass using REPLAY_BYPASS file
 
 Test failing to sync, but already having the correct bookmark location
   $ mononoke_hg_sync_with_retry repo-hg-2 1 2>&1 | grep 'successful sync'
-  * successful sync of entries [2] (glob)
+  * successful sync of entries [2]* (glob)
 
 Test further sync
   $ mononoke_hg_sync_with_retry repo-hg-2 1 2>&1 | grep -E '(sync failed|successful sync)'
-  * successful sync of entries [2] (glob)
+  * successful sync of entries [2]* (glob)
 
 Test bookmark deletion sync
   $ cat >>$TESTTMP/repo-hg-3/.hg/hgrc <<CONFIG
@@ -283,7 +286,7 @@ Test bookmark deletion sync
   
   $ cd $TESTTMP
   $ mononoke_hg_sync_loop repo-hg-3 7 2>&1 | grep 'successful sync'
-  * successful sync of entries [8] (glob)
+  * successful sync of entries [8]* (glob)
   $ cd $TESTTMP/client-push
   $ hgmn push --delete book_to_delete
   pushing to * (glob)
@@ -301,7 +304,7 @@ Test bookmark deletion sync
   
   $ cd $TESTTMP
   $ mononoke_hg_sync_loop repo-hg-3 8 2>&1 | grep 'successful sync'
-  * successful sync of entries [9] (glob)
+  * successful sync of entries [9]* (glob)
   $ cd $TESTTMP/repo-hg-3
   $ hg log -r master_bookmark
   commit:      6f24f1b38581
@@ -336,7 +339,7 @@ Test force pushrebase sync
 -- let us now see if we can replay it
   $ cd $TESTTMP
   $ mononoke_hg_sync_loop repo-hg-3 8 2>&1 | grep 'successful sync'
-  * successful sync of entries [10] (glob)
+  * successful sync of entries [10]* (glob)
 -- and if the replay result is good (e.g. master_bookmark points to the same commit as in client-push)
   $ cd $TESTTMP/repo-hg-3
   $ hg log -r master_bookmark
@@ -355,4 +358,4 @@ Test the job exits when the exit file is set
   $ touch $TESTTMP/exit-file
   $ cd $TESTTMP
   $ mononoke_hg_sync_loop repo-hg-3 8 --exit-file $TESTTMP/exit-file 2>&1 | grep 'exists'
-  * path "$TESTTMP/exit-file" exists: exiting ... (glob)
+  * path "$TESTTMP/exit-file" exists: exiting ...* (glob)

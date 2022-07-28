@@ -7,10 +7,13 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use blobstore::{Blobstore, BlobstoreGetData, BlobstoreIsPresent};
+use blobstore::Blobstore;
+use blobstore::BlobstoreGetData;
+use blobstore::BlobstoreIsPresent;
 use context::CoreContext;
 use mononoke_types::BlobstoreBytes;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 
 #[derive(Debug)]
 pub struct TracingBlobstore<T> {
@@ -34,7 +37,7 @@ impl<T> TracingBlobstore<T> {
 impl<T> TracingBlobstore<T> {
     pub fn tracing_gets(&self) -> Vec<String> {
         let mut gets = self.gets.lock().expect("poisoned lock");
-        std::mem::replace(&mut *gets, vec![])
+        std::mem::take(&mut *gets)
     }
 }
 

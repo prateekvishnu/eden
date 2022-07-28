@@ -12,50 +12,111 @@ use std::process::ExitCode;
 
 use ansi_term::Colour;
 use atty::Stream;
-use clap::{App, AppSettings};
+use base_app::BaseApp;
+use clap::ArgMatches;
+use clap::CommandFactory;
+use clap::FromArgMatches;
+use clap::Parser;
 use fbinit::FacebookInit;
+
+use crate::connection::Connection;
+use crate::connection::ConnectionArgs;
+use crate::render::OutputTarget;
 
 mod args;
 mod commands;
 mod connection;
-mod lib;
+pub(crate) mod lib;
 mod render;
-mod util;
+pub(crate) mod util;
 
-#[cfg(not(target_os = "windows"))]
-fn versions() -> (String, String) {
-    use build_info::BuildInfo;
-
-    let short_version = format!(
-        "{}-{}",
-        BuildInfo::get_package_version(),
-        BuildInfo::get_package_release(),
-    );
-    let long_version = format!("{:#?}", BuildInfo);
-    (short_version, long_version)
+lazy_static::lazy_static! {
+    static ref SHORT_VERSION: String = {
+        #[cfg(target_os = "windows")]
+        {
+            String::from("for Windows")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            use build_info::BuildInfo;
+            format!(
+                "{}-{}",
+                BuildInfo::get_package_version(),
+                BuildInfo::get_package_release(),
+            )
+        }
+    };
+    static ref LONG_VERSION: String = {
+        #[cfg(target_os = "windows")]
+        {
+            String::from("(BuildInfo not available on Windows)")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            use build_info::BuildInfo;
+            format!("{:#?}", BuildInfo)
+        }
+    };
 }
 
-#[cfg(target_os = "windows")]
-fn versions() -> (String, String) {
-    let short_version = String::from("for Windows");
-    let long_version = String::from("(BuildInfo not available on Windows)");
-    (short_version, long_version)
+pub(crate) struct ScscApp {
+    matches: ArgMatches,
+    connection: Connection,
+    target: OutputTarget,
+}
+
+impl BaseApp for ScscApp {
+    fn subcommand(&self) -> Option<(&str, &ArgMatches)> {
+        self.matches.subcommand()
+    }
+}
+
+#[derive(Parser)]
+#[clap(
+    name = "Source Control Service client",
+    version(&**SHORT_VERSION),
+    long_version(&**LONG_VERSION),
+    term_width(textwrap::termwidth()),
+)]
+/// Send requests to the Source Control Service
+struct SCSCArgs {
+    /// Should the output of the command be JSON?
+    #[clap(long)]
+    json: bool,
+
+    #[clap(flatten)]
+    connection_args: ConnectionArgs,
+}
+
+async fn main_impl(fb: FacebookInit) -> anyhow::Result<()> {
+    let subcommands = commands::subcommands();
+    assert!(!subcommands.is_empty());
+    let app = SCSCArgs::command()
+        .subcommands(subcommands)
+        .subcommand_required(true)
+        .arg_required_else_help(true);
+    let matches = app.get_matches();
+    let common_args = SCSCArgs::from_arg_matches(&matches)?;
+    let connection = common_args.connection_args.get_connection(fb)?;
+    let target = if common_args.json {
+        OutputTarget::Json
+    } else if atty::is(atty::Stream::Stdout) {
+        OutputTarget::Tty
+    } else {
+        OutputTarget::Pipe
+    };
+    let app = ScscApp {
+        matches,
+        connection,
+        target,
+    };
+    commands::dispatch(app).await
 }
 
 #[fbinit::main]
 async fn main(fb: FacebookInit) -> ExitCode {
-    let (short_version, long_version) = versions();
-    let mut app = App::new("Source Control Service client")
-        .version(short_version.as_ref())
-        .long_version(long_version.as_ref())
-        .about("Send requests to the Source Control Service")
-        .set_term_width(textwrap::termwidth())
-        .setting(AppSettings::ColoredHelp)
-        .setting(AppSettings::SubcommandRequired);
-    app = connection::add_args(app);
-    app = commands::add_args(app);
-    if let Err(e) = commands::dispatch(fb, app.get_matches()).await {
-        let prog_name = env::args().next().unwrap_or("scsc".to_string());
+    if let Err(e) = main_impl(fb).await {
+        let prog_name = env::args().next().unwrap_or_else(|| "scsc".to_string());
         if atty::is(Stream::Stderr) {
             eprintln!(
                 "{}: {} {}",

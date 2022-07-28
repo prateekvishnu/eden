@@ -13,12 +13,15 @@ use anyhow::Error;
 use context::CoreContext;
 use metaconfig_types::CommitSyncConfigVersion;
 use mononoke_types_mocks::changesetid as bonsai;
-use mononoke_types_mocks::repo::{REPO_ONE, REPO_ZERO};
+use mononoke_types_mocks::repo::REPO_ONE;
+use mononoke_types_mocks::repo::REPO_ZERO;
 use sql_construct::SqlConstruct;
-use synced_commit_mapping::{
-    EquivalentWorkingCopyEntry, SqlSyncedCommitMapping, SyncedCommitMapping,
-    SyncedCommitMappingEntry, SyncedCommitSourceRepo, WorkingCopyEquivalence,
-};
+use synced_commit_mapping::EquivalentWorkingCopyEntry;
+use synced_commit_mapping::SqlSyncedCommitMapping;
+use synced_commit_mapping::SyncedCommitMapping;
+use synced_commit_mapping::SyncedCommitMappingEntry;
+use synced_commit_mapping::SyncedCommitSourceRepo;
+use synced_commit_mapping::WorkingCopyEquivalence;
 
 async fn add_and_get<M: SyncedCommitMapping>(fb: FacebookInit, mapping: M) {
     let version_name = CommitSyncConfigVersion("TEST_VERSION_NAME".to_string());
@@ -150,7 +153,7 @@ async fn equivalent_working_copy<M: SyncedCommitMapping>(fb: FacebookInit, mappi
         .insert_equivalent_working_copy(&ctx, entry.clone())
         .await
         .expect("Failed to insert working copy");
-    assert_eq!(result, true);
+    assert!(result);
 
     let result = mapping
         .insert_equivalent_working_copy(&ctx, entry)
@@ -183,7 +186,7 @@ async fn equivalent_working_copy<M: SyncedCommitMapping>(fb: FacebookInit, mappi
         .insert_equivalent_working_copy(&ctx, null_entry)
         .await
         .expect("Failed to insert working copy");
-    assert_eq!(result, true);
+    assert!(result);
 
     let should_fail = EquivalentWorkingCopyEntry {
         large_repo_id: REPO_ZERO,

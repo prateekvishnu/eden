@@ -21,12 +21,11 @@ from __future__ import absolute_import
 import os
 import shutil
 import tempfile
-from typing import Any, IO, Optional, Union
+from typing import IO, Optional, Union
 
 from . import (
     bundle2,
     changegroup,
-    changelog,
     changelog2,
     cmdutil,
     discovery,
@@ -37,7 +36,6 @@ from . import (
     manifest,
     mdiff,
     mutation,
-    node as nodemod,
     pathutil,
     phases,
     pycompat,
@@ -47,7 +45,7 @@ from . import (
     visibility,
 )
 from .i18n import _
-from .node import nullid, nullrev
+from .node import nullid
 from .pycompat import isint
 
 
@@ -540,9 +538,8 @@ class bundlerepository(localrepo.localrepository):
 
     # Check if parents exist in localrepo before setting
     def setparents(self, p1: bytes, p2: bytes = nullid) -> None:
-        p1rev = self.changelog.rev(p1)
-        p2rev = self.changelog.rev(p2)
-        msg = _("setting parent to node %s that only exists in the bundle\n")
+        self.changelog.rev(p1)
+        self.changelog.rev(p2)
         return super(bundlerepository, self).setparents(p1, p2)
 
 

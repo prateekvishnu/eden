@@ -7,29 +7,46 @@
 
 use std::collections::HashSet;
 use std::future::Future;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use ephemeral_blobstore::{BubbleId, RepoEphemeralStore};
+use connection_security_checker::ConnectionSecurityChecker;
+use ephemeral_blobstore::BubbleId;
+use ephemeral_blobstore::RepoEphemeralStore;
 use fbinit::FacebookInit;
 use futures::future::BoxFuture;
 use futures::try_join;
 use futures::FutureExt;
 use futures_ext::FbFutureExt;
-use futures_stats::{FutureStats, TimedFutureExt};
+use futures_stats::FutureStats;
+use futures_stats::TimedFutureExt;
 use identity::Identity;
+use login_objects_thrift::EnvironmentType;
 use maplit::hashset;
 use megarepo_api::MegarepoApi;
+use metaconfig_types::CommonConfig;
 use metadata::Metadata;
-use mononoke_api::{
-    ChangesetContext, ChangesetId, ChangesetSpecifier, CoreContext, FileContext, FileId, Mononoke,
-    RepoContext, SessionContainer, TreeContext, TreeId,
-};
-use mononoke_types::hash::{Sha1, Sha256};
+use mononoke_api::ChangesetContext;
+use mononoke_api::ChangesetId;
+use mononoke_api::ChangesetSpecifier;
+use mononoke_api::CoreContext;
+use mononoke_api::FileContext;
+use mononoke_api::FileId;
+use mononoke_api::Mononoke;
+use mononoke_api::RepoContext;
+use mononoke_api::SessionContainer;
+use mononoke_api::TreeContext;
+use mononoke_api::TreeId;
+use mononoke_types::hash::Sha1;
+use mononoke_types::hash::Sha256;
 use once_cell::sync::Lazy;
-use permission_checker::{MononokeIdentity, MononokeIdentitySet};
+use permission_checker::MononokeIdentity;
+use permission_checker::MononokeIdentitySet;
+use repo_authorization::AuthorizationContext;
 use scribe_ext::Scribe;
-use scuba_ext::{MononokeScubaSampleBuilder, ScubaValue};
+use scuba_ext::MononokeScubaSampleBuilder;
+use scuba_ext::ScubaValue;
 use slog::Logger;
 use source_control as thrift;
 use source_control::server::SourceControlService;
@@ -40,13 +57,17 @@ use time_ext::DurationExt;
 use tunables::tunables;
 
 use crate::commit_id::CommitIdExt;
-use crate::errors::{self, ServiceErrorResultExt};
+use crate::errors;
+use crate::errors::ServiceErrorResultExt;
+use crate::errors::Status;
 use crate::from_request::FromRequest;
 use crate::scuba_params::AddScubaParams;
 use crate::scuba_response::AddScubaResponse;
 use crate::specifiers::SpecifierExt;
 
-const SCS_IDENTITY: &str = "scm_service_identity";
+const FORWARDED_IDENTITIES_HEADER: &str = "scm_forwarded_identities";
+const FORWARDED_CLIENT_IP_HEADER: &str = "scm_forwarded_client_ip";
+const FORWARDED_CLIENT_DEBUG_HEADER: &str = "scm_forwarded_client_debug";
 
 define_stats! {
     prefix = "mononoke.scs_server";
@@ -74,8 +95,9 @@ pub(crate) struct SourceControlServiceImpl {
     pub(crate) megarepo_api: Arc<MegarepoApi>,
     pub(crate) logger: Logger,
     pub(crate) scuba_builder: MononokeScubaSampleBuilder,
-    pub(crate) service_identity: Identity,
+    pub(crate) identity: Identity,
     pub(crate) scribe: Scribe,
+    identity_proxy_checker: Arc<ConnectionSecurityChecker>,
 }
 
 pub(crate) struct SourceControlServiceThriftImpl(SourceControlServiceImpl);
@@ -88,6 +110,8 @@ impl SourceControlServiceImpl {
         logger: Logger,
         mut scuba_builder: MononokeScubaSampleBuilder,
         scribe: Scribe,
+        identity_proxy_checker: ConnectionSecurityChecker,
+        common_config: &CommonConfig,
     ) -> Self {
         scuba_builder.add_common_server_data();
 
@@ -97,8 +121,12 @@ impl SourceControlServiceImpl {
             megarepo_api,
             logger,
             scuba_builder,
-            service_identity: Identity::with_service(SCS_IDENTITY),
+            identity: Identity::new(
+                common_config.internal_identity.id_type.as_str(),
+                common_config.internal_identity.id_data.as_str(),
+            ),
             scribe,
+            identity_proxy_checker: Arc::new(identity_proxy_checker),
         }
     }
 
@@ -113,16 +141,9 @@ impl SourceControlServiceImpl {
         specifier: Option<&dyn SpecifierExt>,
         params: &dyn AddScubaParams,
     ) -> Result<CoreContext, errors::ServiceError> {
-        let identities: MononokeIdentitySet = req_ctxt
-            .identities_for_service(&self.service_identity)
-            .map_err(errors::internal_error)?
-            .entries()
-            .into_iter()
-            .filter_map(|id| MononokeIdentity::try_from_identity_ref(id).ok())
-            .collect();
-
+        let session = self.create_session(req_ctxt).await?;
+        let identities = session.metadata().identities();
         let mut scuba = self.create_scuba(name, req_ctxt, specifier, params, &identities)?;
-        let session = self.create_session(identities).await?;
         scuba.add("session_uuid", session.metadata().session_id().to_string());
 
         let ctx = session.new_context_with_scribe(self.logger.clone(), scuba, self.scribe.clone());
@@ -190,15 +211,80 @@ impl SourceControlServiceImpl {
         Ok(scuba)
     }
 
+    async fn create_metadata(
+        &self,
+        req_ctxt: &RequestContext,
+    ) -> Result<Metadata, errors::ServiceError> {
+        let header = |h: &str| req_ctxt.header(h).map_err(errors::invalid_request);
+
+        let tls_identities: MononokeIdentitySet = req_ctxt
+            .identities()
+            .map_err(errors::internal_error)?
+            .entries()
+            .into_iter()
+            .map(MononokeIdentity::from_identity_ref)
+            .collect();
+
+        // Get any valid CAT identieies.
+        let cats_identities: MononokeIdentitySet = req_ctxt
+            .identities_cats(
+                &self.identity,
+                &[EnvironmentType::PROD, EnvironmentType::CORP],
+            )
+            .map_err(errors::internal_error)?
+            .entries()
+            .into_iter()
+            .map(MononokeIdentity::from_identity_ref)
+            .collect();
+
+        let is_trusted = self
+            .identity_proxy_checker
+            .check_if_trusted(&tls_identities)
+            .await
+            .map_err(errors::invalid_request)?;
+
+        if is_trusted {
+            if let (Some(forwarded_identities), Some(forwarded_ip)) = (
+                header(FORWARDED_IDENTITIES_HEADER)?,
+                header(FORWARDED_CLIENT_IP_HEADER)?,
+            ) {
+                let mut header_identities: MononokeIdentitySet =
+                    serde_json::from_str(forwarded_identities.as_str())
+                        .map_err(errors::invalid_request)?;
+                let client_ip = Some(
+                    forwarded_ip
+                        .parse::<IpAddr>()
+                        .map_err(errors::invalid_request)?,
+                );
+                let client_debug = header(FORWARDED_CLIENT_DEBUG_HEADER)?.is_some();
+
+                header_identities.extend(cats_identities.into_iter());
+                let mut metadata =
+                    Metadata::new(None, header_identities, client_debug, client_ip).await;
+
+                metadata.add_original_identities(tls_identities);
+
+                return Ok(metadata);
+            }
+        }
+
+        Ok(Metadata::new(
+            None,
+            tls_identities.union(&cats_identities).cloned().collect(),
+            false,
+            None,
+        )
+        .await)
+    }
+
     /// Create and configure the session container for a request.
     async fn create_session(
         &self,
-        identities: MononokeIdentitySet,
+        req_ctxt: &RequestContext,
     ) -> Result<SessionContainer, errors::ServiceError> {
-        let metadata = Metadata::default().set_identities(identities);
-        let metadata = Arc::new(metadata);
+        let metadata = self.create_metadata(req_ctxt).await?;
         let session = SessionContainer::builder(self.fb)
-            .metadata(metadata)
+            .metadata(Arc::new(metadata))
             .blobstore_maybe_read_qps_limiter(tunables().get_scs_request_read_qps())
             .await
             .blobstore_maybe_write_qps_limiter(tunables().get_scs_request_write_qps())
@@ -213,14 +299,32 @@ impl SourceControlServiceImpl {
         ctx: CoreContext,
         repo: &thrift::RepoSpecifier,
     ) -> Result<RepoContext, errors::ServiceError> {
-        self.repo_with_bubble(ctx, repo, |_| async { Ok(None) })
+        let authz = AuthorizationContext::new();
+        self.repo_impl(ctx, repo, authz, |_| async { Ok(None) })
             .await
     }
 
-    async fn repo_with_bubble<F, R>(
+    /// Get the repo specified by a `thrift::RepoSpecifier` for access by a
+    /// named service.
+    pub(crate) async fn repo_for_service(
         &self,
         ctx: CoreContext,
         repo: &thrift::RepoSpecifier,
+        service_name: Option<String>,
+    ) -> Result<RepoContext, errors::ServiceError> {
+        let authz = match service_name {
+            Some(service_name) => AuthorizationContext::new_for_service_writes(service_name),
+            None => AuthorizationContext::new(),
+        };
+        self.repo_impl(ctx, repo, authz, |_| async { Ok(None) })
+            .await
+    }
+
+    async fn repo_impl<F, R>(
+        &self,
+        ctx: CoreContext,
+        repo: &thrift::RepoSpecifier,
+        authz: AuthorizationContext,
         bubble_fetcher: F,
     ) -> Result<RepoContext, errors::ServiceError>
     where
@@ -229,9 +333,14 @@ impl SourceControlServiceImpl {
     {
         let repo = self
             .mononoke
-            .repo_with_bubble(ctx, &repo.name, bubble_fetcher)
+            .repo(ctx, &repo.name)
             .await?
-            .ok_or_else(|| errors::repo_not_found(repo.description()))?;
+            .ok_or_else(|| errors::repo_not_found(repo.description()))?
+            .with_bubble(bubble_fetcher)
+            .await?
+            .with_authorization_context(authz)
+            .build()
+            .await?;
         Ok(repo)
     }
 
@@ -251,9 +360,10 @@ impl SourceControlServiceImpl {
     ) -> Result<(RepoContext, ChangesetContext), errors::ServiceError> {
         let changeset_specifier = ChangesetSpecifier::from_request(&commit.id)?;
         let repo = self
-            .repo_with_bubble(
+            .repo_impl(
                 ctx,
                 &commit.repo,
+                AuthorizationContext::new(),
                 self.bubble_fetcher_for_changeset(changeset_specifier.clone()),
             )
             .await?;
@@ -283,9 +393,10 @@ impl SourceControlServiceImpl {
             )))?
         }
         let repo = self
-            .repo_with_bubble(
+            .repo_impl(
                 ctx,
                 &commit.repo,
+                AuthorizationContext::new(),
                 self.bubble_fetcher_for_changeset(changeset_specifier.clone()),
             )
             .await?;
@@ -322,7 +433,7 @@ impl SourceControlServiceImpl {
         repo: &RepoContext,
         id: &thrift::CommitId,
     ) -> Result<ChangesetId, errors::ServiceError> {
-        let changeset_specifier = ChangesetSpecifier::from_request(&id)?;
+        let changeset_specifier = ChangesetSpecifier::from_request(id)?;
         Ok(repo
             .resolve_specifier(changeset_specifier)
             .await?
@@ -423,28 +534,24 @@ impl SourceControlServiceImpl {
 fn log_result<T: AddScubaResponse>(
     ctx: CoreContext,
     stats: &FutureStats,
-    result: &Result<T, errors::ServiceError>,
+    result: &Result<T, impl errors::LoggableError>,
 ) {
-    let mut success = 0;
-    let mut internal_failure = 0;
-    let mut invalid_request = 0;
     let mut scuba = ctx.scuba().clone();
 
-    let (status, error) = match result {
+    let (status, error, invalid_request, internal_failure) = match result {
         Ok(response) => {
             response.add_scuba_response(&mut scuba);
-            success = 1;
-            ("SUCCESS", None)
+            ("SUCCESS", None, 0, 0)
         }
-        Err(errors::ServiceError::Request(e)) => {
-            invalid_request = 1;
-            ("REQUEST_ERROR", Some(format!("{:?}", e)))
-        }
-        Err(errors::ServiceError::Internal(e)) => {
-            internal_failure = 1;
-            ("INTERNAL_ERROR", Some(format!("{:?}", e)))
+        Err(err) => {
+            let (status, desc) = err.status_and_description();
+            match status {
+                Status::RequestError => ("REQUEST_ERROR", Some(desc), 1, 0),
+                Status::InternalError => ("INTERNAL_ERROR", Some(desc), 0, 1),
+            }
         }
     };
+    let success = if error.is_none() { 1 } else { 0 };
 
     STATS::total_request_success.add_value(success);
     STATS::total_request_internal_failure.add_value(internal_failure);
@@ -524,7 +631,7 @@ macro_rules! impl_thrift_methods {
                     log_result(ctx, &stats, &res);
                     let method = stringify!($method_name).to_string();
                     STATS::method_completion_time_ms.add_value(stats.completion_time.as_millis_unchecked() as i64, (method,));
-                    Ok(res?)
+                    res.map_err(Into::into)
                 };
                 Box::pin(handler)
             }

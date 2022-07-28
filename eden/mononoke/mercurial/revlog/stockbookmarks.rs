@@ -7,14 +7,23 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io;
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::Read;
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Error, Result};
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use ascii::AsciiStr;
 use futures::future;
-use futures::stream::{self, Stream};
-use futures_ext::{BoxFuture, BoxStream, StreamExt};
+use futures::stream;
+use futures::stream::Stream;
+use futures_ext::BoxFuture;
+use futures_ext::BoxStream;
+use futures_ext::StreamExt;
 use thiserror::Error;
 
 use mercurial_types::HgChangesetId;
@@ -99,10 +108,7 @@ impl StockBookmarks {
     }
 
     pub fn get(&self, name: &dyn AsRef<[u8]>) -> BoxFuture<Option<HgChangesetId>, Error> {
-        let value = match self.bookmarks.get(name.as_ref()) {
-            Some(hash) => Some(*hash),
-            None => None,
-        };
+        let value = self.bookmarks.get(name.as_ref()).copied();
         Box::new(future::result(Ok(value)))
     }
 
@@ -124,7 +130,8 @@ mod tests {
     use std::io::Cursor;
 
     use assert_matches::assert_matches;
-    use failure_ext::{err_downcast, err_downcast_ref};
+    use failure_ext::err_downcast;
+    use failure_ext::err_downcast_ref;
     use futures::Future;
 
     use mercurial_types_mocks::nodehash::*;
@@ -136,10 +143,6 @@ mod tests {
         key: &dyn AsRef<[u8]>,
         expected: Option<HgChangesetId>,
     ) {
-        let expected = match expected {
-            Some(hash) => Some(hash),
-            None => None,
-        };
         assert_eq!(bookmarks.get(key).wait().unwrap(), expected);
     }
 

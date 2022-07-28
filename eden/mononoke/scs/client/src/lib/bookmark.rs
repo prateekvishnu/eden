@@ -7,12 +7,15 @@
 
 //! Helper library for rendering bookmark info
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::io::Write;
 
 use anyhow::Error;
-use chrono::{FixedOffset, Local, TimeZone};
-use serde_derive::Serialize;
+use chrono::FixedOffset;
+use chrono::Local;
+use chrono::TimeZone;
+use serde::Serialize;
 use source_control::types as thrift;
 
 use crate::args::commit_id::map_commit_ids;

@@ -5,51 +5,66 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Context, Error};
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use blobrepo_override::DangerousOverride;
-use blobstore::{Blobstore, StoreLoadable};
-use bonsai_hg_mapping::{ArcBonsaiHgMapping, MemWritesBonsaiHgMapping};
+use blobstore::Blobstore;
+use blobstore::StoreLoadable;
+use bonsai_hg_mapping::ArcBonsaiHgMapping;
+use bonsai_hg_mapping::MemWritesBonsaiHgMapping;
 use borrowed::borrowed;
 use cacheblob::MemWritesBlobstore;
 use clap_old::ArgMatches;
-use cmdlib::args::{self, MononokeMatches};
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
 use context::CoreContext;
 use derived_data::BonsaiDerived;
 use derived_data_manager::BonsaiDerivable;
-use derived_data_utils::{derived_data_utils, DerivedUtils, DERIVED_DATA_DEPS};
+use derived_data_utils::derived_data_utils;
+use derived_data_utils::DerivedUtils;
+use derived_data_utils::DERIVED_DATA_DEPS;
 use fsnodes::RootFsnodeId;
-use futures::{
-    future::{try_join, try_join_all},
-    stream, StreamExt, TryStreamExt,
-};
-use manifest::{
-    find_intersection_of_diffs, find_intersection_of_diffs_and_parents, Entry, Manifest,
-};
+use futures::future::try_join;
+use futures::future::try_join_all;
+use futures::stream;
+use futures::StreamExt;
+use futures::TryStreamExt;
+use manifest::find_intersection_of_diffs;
+use manifest::find_intersection_of_diffs_and_parents;
+use manifest::Entry;
+use manifest::Manifest;
 use mercurial_derived_data::MappedHgChangesetId;
-use mononoke_types::{BlobstoreKey, ChangesetId};
+use mononoke_types::BlobstoreKey;
+use mononoke_types::ChangesetId;
 use readonlyblob::ReadOnlyBlobstore;
 use skeleton_manifest::RootSkeletonManifestId;
-use slog::{info, warn};
-use std::sync::{Arc, Once};
+use slog::info;
+use slog::warn;
+use std::sync::Arc;
+use std::sync::Once;
 use unodes::RootUnodeManifestId;
 
 use crate::commit_discovery::CommitDiscoveryOptions;
 use crate::regenerate;
-use crate::{ARG_DERIVED_DATA_TYPE, ARG_VALIDATE_CHUNK_SIZE};
+use crate::ARG_DERIVED_DATA_TYPE;
+use crate::ARG_VALIDATE_CHUNK_SIZE;
 
 pub async fn validate(
     ctx: &CoreContext,
     matches: &MononokeMatches<'_>,
     sub_m: &ArgMatches<'_>,
+    repo_name: String,
 ) -> Result<(), Error> {
     if !matches.environment().readonly_storage.0 {
         return Err(anyhow!(
             "validate subcommand should be run only on readonly storage!"
         ));
     }
-    let repo: BlobRepo = args::open_repo_unredacted(ctx.fb, ctx.logger(), matches).await?;
-    let csids = CommitDiscoveryOptions::from_matches(&ctx, &repo, sub_m)
+    let repo: BlobRepo =
+        args::open_repo_by_name_unredacted(ctx.fb, ctx.logger(), matches, repo_name).await?;
+    let csids = CommitDiscoveryOptions::from_matches(ctx, &repo, sub_m)
         .await?
         .get_commits();
 
@@ -126,7 +141,7 @@ pub async fn validate(
         stream::iter(chunk)
             .map(Ok)
             .try_for_each_concurrent(100, |csid| async move {
-                if !rederived_utils.is_derived(&ctx, csid).await? {
+                if !rederived_utils.is_derived(ctx, csid).await? {
                     return Err(anyhow!("{} unexpectedly not derived", csid));
                 }
 
@@ -198,7 +213,7 @@ async fn validate_fsnodes<'a>(
         real_blobstore,
         fsnode,
         parents,
-        &mem_blob,
+        mem_blob,
         |tree_id| Some(tree_id.blobstore_key()),
         |_| None,
     )
@@ -228,7 +243,7 @@ async fn validate_skeleton_manifests<'a>(
         real_blobstore,
         skeleton_manifest,
         parents,
-        &mem_blob,
+        mem_blob,
         |tree_id| Some(tree_id.blobstore_key()),
         |_| None,
     )
@@ -256,7 +271,7 @@ async fn validate_unodes<'a>(
         real_blobstore,
         unode,
         parents,
-        &mem_blob,
+        mem_blob,
         |tree_id| Some(tree_id.blobstore_key()),
         |leaf_id| Some(leaf_id.blobstore_key()),
     )
@@ -283,7 +298,7 @@ async fn validate_hgchangesets<'a>(
             .await?;
         check_exists(
             ctx,
-            &mem_blob,
+            mem_blob,
             hgchangeset.get_changeset_id().blobstore_key(),
         )
         .await?;
@@ -339,7 +354,7 @@ async fn find_cs_and_parents_derived_data<D: BonsaiDerived>(
         .get_parents(ctx.clone(), cs_id)
         .await?;
 
-    let derived = D::derive(&ctx, repo, cs_id).await?;
+    let derived = D::derive(ctx, repo, cs_id).await?;
     let parents = try_join_all(parents.into_iter().map(|p| async move {
         let derived = D::derive(ctx, repo, p).await?;
         Result::<_, Error>::Ok(derived)

@@ -10,7 +10,9 @@ use caching_ext::MemcacheHandler;
 use fbinit::FacebookInit;
 use fbthrift::compact_protocol;
 use futures::future::try_join_all;
-use memcache::{KeyGen, MemcacheClient, MEMCACHE_VALUE_MAX_SIZE};
+use memcache::KeyGen;
+use memcache::MemcacheClient;
+use memcache::MEMCACHE_VALUE_MAX_SIZE;
 use rand::random;
 use stats::prelude::*;
 use std::collections::HashSet;
@@ -19,12 +21,13 @@ use std::time::Instant;
 use time_ext::DurationExt;
 
 use crate::local_cache::CacheKey;
-use crate::structs::{CachedFilenode, CachedHistory};
+use crate::structs::CachedFilenode;
+use crate::structs::CachedHistory;
 
-use filenodes::{
-    thrift::{self, MC_CODEVER, MC_SITEVER},
-    FilenodeInfo,
-};
+use filenodes::thrift;
+use filenodes::thrift::MC_CODEVER;
+use filenodes::thrift::MC_SITEVER;
+use filenodes::FilenodeInfo;
 
 define_stats! {
     prefix = "mononoke.filenodes";
@@ -67,7 +70,7 @@ impl RemoteCache {
                 let now = Instant::now();
 
                 let ret =
-                    get_single_filenode_from_memcache(&memcache.memcache, &memcache.keygen, &key)
+                    get_single_filenode_from_memcache(&memcache.memcache, &memcache.keygen, key)
                         .await;
 
                 let elapsed = now.elapsed().as_micros_unchecked() as i64;
@@ -83,7 +86,7 @@ impl RemoteCache {
     pub fn fill_filenode(&self, key: &CacheKey<CachedFilenode>, filenode: FilenodeInfo) {
         match self {
             Self::Memcache(memcache) => {
-                schedule_fill_filenode(&memcache.memcache, &memcache.keygen, &key, filenode)
+                schedule_fill_filenode(&memcache.memcache, &memcache.keygen, key, filenode)
             }
             Self::Noop => {}
         }
@@ -98,7 +101,7 @@ impl RemoteCache {
                 let now = Instant::now();
 
                 let ret =
-                    get_history_from_memcache(&memcache.memcache, &memcache.keygen, &key).await;
+                    get_history_from_memcache(&memcache.memcache, &memcache.keygen, key).await;
 
                 let elapsed = now.elapsed().as_micros_unchecked() as i64;
                 STATS::get_history.add_value(elapsed);
@@ -439,14 +442,16 @@ impl Iterator for PointersIter {
 pub mod test {
     use super::*;
     use anyhow::Error;
-    use mercurial_types_mocks::nodehash::{ONES_CSID, ONES_FNID};
+    use mercurial_types_mocks::nodehash::ONES_CSID;
+    use mercurial_types_mocks::nodehash::ONES_FNID;
     use mononoke_types::RepoPath;
     use mononoke_types_mocks::repo::REPO_ZERO;
     use path_hash::PathWithHash;
     use std::time::Duration;
     use tokio::time;
 
-    use crate::reader::{filenode_cache_key, history_cache_key};
+    use crate::reader::filenode_cache_key;
+    use crate::reader::history_cache_key;
 
     const TIMEOUT_MS: u64 = 100;
     const SLEEP_MS: u64 = 5;

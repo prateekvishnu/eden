@@ -13,10 +13,12 @@ use slog::Logger;
 use slog_glog_fmt::logger_that_can_work_in_tests;
 use std::sync::Arc;
 
-use crate::logging::{LoggingContainer, SamplingKey};
+use crate::logging::LoggingContainer;
+use crate::logging::SamplingKey;
 use crate::perf_counters::PerfCounters;
 use crate::perf_counters_stack::PerfCountersStack;
-use crate::session::{SessionClass, SessionContainer};
+use crate::session::SessionClass;
+use crate::session::SessionContainer;
 
 #[derive(Clone)]
 pub struct CoreContext {
@@ -81,6 +83,14 @@ impl CoreContext {
         }
     }
 
+    pub fn clone_with_repo_name(&self, repo_name: &str) -> Self {
+        Self {
+            fb: self.fb,
+            session: self.session.clone(),
+            logging: self.logging.clone_with_repo_name(repo_name),
+        }
+    }
+
     pub fn with_mutated_scuba(
         &self,
         mutator: impl FnOnce(MononokeScubaSampleBuilder) -> MononokeScubaSampleBuilder,
@@ -93,7 +103,7 @@ impl CoreContext {
     }
 
     pub fn logger(&self) -> &Logger {
-        &self.logging.logger()
+        self.logging.logger()
     }
 
     pub fn sampling_key(&self) -> Option<&SamplingKey> {
@@ -101,15 +111,15 @@ impl CoreContext {
     }
 
     pub fn scuba(&self) -> &MononokeScubaSampleBuilder {
-        &self.logging.scuba()
+        self.logging.scuba()
     }
 
     pub fn perf_counters(&self) -> &PerfCountersStack {
-        &self.logging.perf_counters()
+        self.logging.perf_counters()
     }
 
     pub fn metadata(&self) -> &Metadata {
-        &self.session.metadata()
+        self.session.metadata()
     }
 
     pub fn session(&self) -> &SessionContainer {

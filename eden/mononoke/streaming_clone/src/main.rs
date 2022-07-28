@@ -5,25 +5,43 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Context, Error};
-use blake2::{Blake2b, Digest};
-use blobrepo::BlobRepo;
-use blobstore::{Blobstore, BlobstoreBytes};
+use anyhow::anyhow;
+use anyhow::Error;
+use blake2::Blake2b;
+use blake2::Digest;
+use blobstore::Blobstore;
+use blobstore::BlobstoreBytes;
 use borrowed::borrowed;
-use clap::{App, Arg, ArgMatches, SubCommand};
-use cmdlib::args::{self, MononokeMatches};
+use clap::App;
+use clap::Arg;
+use clap::ArgMatches;
+use clap::SubCommand;
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
 use context::CoreContext;
 use fbinit::FacebookInit;
-use futures::{future, stream, StreamExt, TryStreamExt};
-use mercurial_revlog::revlog::{Entry, RevIdx, Revlog};
-use mononoke_types::RepositoryId;
-use slog::{info, o, Logger};
-use sql_construct::SqlConstructFromMetadataDatabaseConfig;
+use futures::future;
+use futures::stream;
+use futures::StreamExt;
+use futures::TryStreamExt;
+use mercurial_revlog::revlog::Entry;
+use mercurial_revlog::revlog::RevIdx;
+use mercurial_revlog::revlog::Revlog;
+use repo_blobstore::RepoBlobstore;
+use repo_blobstore::RepoBlobstoreRef;
+use repo_identity::RepoIdentity;
+use repo_identity::RepoIdentityRef;
+use slog::info;
+use slog::o;
+use slog::Logger;
 use std::borrow::Borrow;
 use std::io::SeekFrom;
-use std::path::{Path, PathBuf};
-use streaming_clone::SqlStreamingChunksFetcher;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use std::path::Path;
+use std::path::PathBuf;
+use streaming_clone::StreamingClone;
+use streaming_clone::StreamingCloneRef;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncSeekExt;
 
 pub const CREATE_SUB_CMD: &str = "create";
 pub const DEFAULT_MAX_DATA_CHUNK_SIZE: u32 = 950 * 1024;
@@ -35,16 +53,27 @@ pub const TAG_ARG: &str = "tag";
 pub const NO_UPLOAD_IF_LESS_THAN_CHUNKS_ARG: &str = "no-upload-if-less-than-chunks";
 pub const UPDATE_SUB_CMD: &str = "update";
 
+#[facet::container]
+struct Repo {
+    #[facet]
+    repo_identity: RepoIdentity,
+
+    #[facet]
+    repo_blobstore: RepoBlobstore,
+
+    #[facet]
+    streaming_clone: StreamingClone,
+}
+
 pub async fn streaming_clone<'a>(
     fb: FacebookInit,
     logger: Logger,
     matches: &'a MononokeMatches<'a>,
 ) -> Result<(), Error> {
     let mut scuba = matches.scuba_sample_builder();
-    let repo: BlobRepo = args::open_repo(fb, &logger, &matches).await?;
-    scuba.add("reponame", repo.name().clone());
+    let repo: Repo = args::open_repo(fb, &logger, matches).await?;
+    scuba.add("reponame", repo.repo_identity().name());
 
-    let streaming_chunks_fetcher = create_streaming_chunks_fetcher(fb, matches)?;
     let res = match matches.subcommand() {
         (CREATE_SUB_CMD, Some(sub_m)) => {
             let tag: Option<&str> = sub_m.value_of(TAG_ARG);
@@ -52,22 +81,20 @@ pub async fn streaming_clone<'a>(
             let ctx = build_context(fb, &logger, &repo, &tag);
             // This command works only if there are no streaming chunks at all for a give repo.
             // So exit quickly if database is not empty
-            let count = streaming_chunks_fetcher
-                .count_chunks(&ctx, repo.get_repoid(), tag)
-                .await?;
+            let count = repo.streaming_clone().count_chunks(&ctx, tag).await?;
             if count > 0 {
                 return Err(anyhow!(
                     "cannot create new streaming clone chunks because they already exists"
                 ));
             }
 
-            update_streaming_changelog(&ctx, &repo, sub_m, &streaming_chunks_fetcher, tag).await
+            update_streaming_changelog(&ctx, &repo, sub_m, tag).await
         }
         (UPDATE_SUB_CMD, Some(sub_m)) => {
             let tag: Option<&str> = sub_m.value_of(TAG_ARG);
             scuba.add_opt("tag", tag);
             let ctx = build_context(fb, &logger, &repo, &tag);
-            update_streaming_changelog(&ctx, &repo, sub_m, &streaming_chunks_fetcher, tag).await
+            update_streaming_changelog(&ctx, &repo, sub_m, tag).await
         }
         _ => Err(anyhow!("unknown subcommand")),
     };
@@ -91,13 +118,13 @@ pub async fn streaming_clone<'a>(
 fn build_context(
     fb: FacebookInit,
     logger: &Logger,
-    repo: &BlobRepo,
+    repo: &Repo,
     tag: &Option<&str>,
 ) -> CoreContext {
     let logger = if let Some(tag) = tag {
-        logger.new(o!("repo" => repo.name().to_string(), "tag" => tag.to_string()))
+        logger.new(o!("repo" => repo.repo_identity().name().to_string(), "tag" => tag.to_string()))
     } else {
-        logger.new(o!("repo" => repo.name().to_string()))
+        logger.new(o!("repo" => repo.repo_identity().name().to_string()))
     };
 
     CoreContext::new_with_logger(fb, logger)
@@ -106,24 +133,17 @@ fn build_context(
 // Returns how many chunks were inserted
 async fn update_streaming_changelog(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &Repo,
     sub_m: &ArgMatches<'_>,
-    streaming_chunks_fetcher: &SqlStreamingChunksFetcher,
     tag: Option<&str>,
 ) -> Result<usize, Error> {
     let max_data_chunk_size: u32 =
         args::get_and_parse(sub_m, MAX_DATA_CHUNK_SIZE, DEFAULT_MAX_DATA_CHUNK_SIZE);
-    let (idx, data) = get_revlog_paths(&sub_m)?;
+    let (idx, data) = get_revlog_paths(sub_m)?;
 
     let revlog = Revlog::from_idx_with_data(idx.clone(), None as Option<String>)?;
-    let rev_idx_to_skip = find_latest_rev_id_in_streaming_changelog(
-        &ctx,
-        &revlog,
-        repo.get_repoid(),
-        &streaming_chunks_fetcher,
-        tag,
-    )
-    .await?;
+    let rev_idx_to_skip =
+        find_latest_rev_id_in_streaming_changelog(ctx, repo, &revlog, tag).await?;
 
     let skip_last_chunk = sub_m.is_present(SKIP_LAST_CHUNK_ARG);
     let chunks = split_into_chunks(
@@ -148,12 +168,10 @@ async fn update_streaming_changelog(
     }
 
     info!(ctx.logger(), "about to upload {} entries", chunks.len());
-    let chunks = upload_chunks_blobstore(&ctx, &repo, &chunks, &idx, &data).await?;
+    let chunks = upload_chunks_blobstore(ctx, repo, &chunks, &idx, &data).await?;
 
     info!(ctx.logger(), "inserting into streaming clone database");
-    let start = streaming_chunks_fetcher
-        .select_max_chunk_num(&ctx, repo.get_repoid())
-        .await?;
+    let start = repo.streaming_clone().select_max_chunk_num(ctx).await?;
     info!(ctx.logger(), "current max chunk num is {:?}", start);
     let start = start.map_or(0, |start| start + 1);
     let chunks: Vec<_> = chunks
@@ -166,7 +184,7 @@ async fn update_streaming_changelog(
         .map(|(chunk_id, (chunk, keys))| (start + chunk_id, chunk, keys))
         .collect();
     let chunks_num = chunks.len();
-    insert_entries_into_db(&ctx, &repo, &streaming_chunks_fetcher, chunks, tag).await?;
+    insert_entries_into_db(ctx, repo, chunks, tag).await?;
 
     Ok(chunks_num)
 }
@@ -185,14 +203,14 @@ fn get_revlog_paths(sub_m: &ArgMatches<'_>) -> Result<(PathBuf, PathBuf), Error>
 
 async fn find_latest_rev_id_in_streaming_changelog(
     ctx: &CoreContext,
+    repo: &Repo,
     revlog: &Revlog,
-    repo_id: RepositoryId,
-    streaming_chunks_fetcher: &SqlStreamingChunksFetcher,
     tag: Option<&str>,
 ) -> Result<usize, Error> {
     let index_entry_size = revlog.index_entry_size();
-    let (cur_idx_size, cur_data_size) = streaming_chunks_fetcher
-        .select_index_and_data_sizes(&ctx, repo_id, tag)
+    let (cur_idx_size, cur_data_size) = repo
+        .streaming_clone()
+        .select_index_and_data_sizes(ctx, tag)
         .await?
         .unwrap_or((0, 0));
     info!(
@@ -214,7 +232,7 @@ fn split_into_chunks(
     let index_entry_size: u32 = revlog.index_entry_size().try_into().unwrap();
 
     let mut chunks = vec![];
-    let mut iter: Box<dyn Iterator<Item = (RevIdx, Entry)>> = Box::new((&revlog).into_iter());
+    let mut iter: Box<dyn Iterator<Item = (RevIdx, Entry)>> = Box::new(revlog.into_iter());
     if let Some(skip) = skip {
         iter = Box::new(iter.skip(skip));
     }
@@ -255,7 +273,7 @@ fn split_into_chunks(
 
 async fn upload_chunks_blobstore<'a>(
     ctx: &'a CoreContext,
-    repo: &'a BlobRepo,
+    repo: &'a Repo,
     chunks: &'a [Chunk],
     idx: &'a Path,
     data: &'a Path,
@@ -263,15 +281,8 @@ async fn upload_chunks_blobstore<'a>(
     let chunks = stream::iter(chunks.iter().enumerate().map(|(chunk_id, chunk)| {
         borrowed!(ctx, repo, idx, data);
         async move {
-            let keys = upload_chunk(
-                &ctx,
-                &repo,
-                chunk,
-                chunk_id.try_into().unwrap(),
-                &idx,
-                &data,
-            )
-            .await?;
+            let keys =
+                upload_chunk(ctx, repo, chunk, chunk_id.try_into().unwrap(), idx, data).await?;
             Result::<_, Error>::Ok((chunk, keys))
         }
     }))
@@ -293,8 +304,7 @@ async fn upload_chunks_blobstore<'a>(
 
 async fn insert_entries_into_db(
     ctx: &CoreContext,
-    repo: &BlobRepo,
-    streaming_chunks_fetcher: &SqlStreamingChunksFetcher,
+    repo: &Repo,
     entries: Vec<(u32, &'_ Chunk, BlobstoreKeys)>,
     tag: Option<&str>,
 ) -> Result<(), Error> {
@@ -310,31 +320,10 @@ async fn insert_entries_into_db(
             ))
         }
 
-        streaming_chunks_fetcher
-            .insert_chunks(&ctx, repo.get_repoid(), tag, rows)
-            .await?;
+        repo.streaming_clone().insert_chunks(ctx, tag, rows).await?;
     }
 
     Ok(())
-}
-
-fn create_streaming_chunks_fetcher<'a>(
-    fb: FacebookInit,
-    matches: &'a MononokeMatches<'a>,
-) -> Result<SqlStreamingChunksFetcher, Error> {
-    let config_store = matches.config_store();
-    let (_, config) = args::get_config(config_store, &matches)?;
-    let storage_config = config.storage_config;
-    let mysql_options = matches.mysql_options();
-    let readonly_storage = matches.readonly_storage();
-
-    SqlStreamingChunksFetcher::with_metadata_database_config(
-        fb,
-        &storage_config.metadata,
-        mysql_options,
-        readonly_storage.0,
-    )
-    .context("Failed to open SqlStreamingChunksFetcher")
 }
 
 struct BlobstoreKeys {
@@ -344,7 +333,7 @@ struct BlobstoreKeys {
 
 async fn upload_chunk(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &Repo,
     chunk: &Chunk,
     chunk_id: u32,
     idx_path: &Path,
@@ -376,7 +365,7 @@ async fn upload_chunk(
 
 async fn upload_data(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &Repo,
     chunk_id: u32,
     path: impl Borrow<Path>,
     start: u64,
@@ -393,7 +382,7 @@ async fn upload_data(
 
     let key = generate_key(chunk_id, &data, suffix);
 
-    repo.blobstore()
+    repo.repo_blobstore()
         .put(ctx, key.clone(), BlobstoreBytes::from_bytes(data))
         .await?;
 

@@ -9,9 +9,8 @@ edition = "2021"
 anyhow = "1.0.56"
 configmodel = { version = "0.1.0", path = "../configmodel" }
 fs2 = "0.4"
-hostname = "0.3"
 thiserror = "1.0.30"
-tracing = "0.1.32"
+tracing = "0.1.35"
 util = { version = "0.1.0", path = "../util" }
 
 [dev-dependencies]

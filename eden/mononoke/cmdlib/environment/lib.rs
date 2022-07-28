@@ -5,14 +5,17 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
-use blobstore_factory::{BlobstoreOptions, ReadOnlyStorage};
+use blobstore_factory::BlobstoreOptions;
+use blobstore_factory::ReadOnlyStorage;
 use cached_config::ConfigStore;
 use derived_data_remote::RemoteDerivationOptions;
 use fbinit::FacebookInit;
 use megarepo_config::MononokeMegarepoConfigsOptions;
 use observability::ObservabilityContext;
+use permission_checker::AclProvider;
 use rendezvous::RendezVousOptions;
 use scuba_ext::MononokeScubaSampleBuilder;
 use slog::Logger;
@@ -49,4 +52,5 @@ pub struct MononokeEnvironment {
     pub megarepo_configs_options: MononokeMegarepoConfigsOptions,
     pub remote_derivation_options: RemoteDerivationOptions,
     pub disabled_hooks: HashMap<String, HashSet<String>>,
+    pub acl_provider: Box<dyn AclProvider>,
 }

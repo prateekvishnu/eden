@@ -1,14 +1,15 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This software may be used and distributed according to the terms of the
- * GNU General Public License version 2.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 use std::str;
 
 use byteorder::NetworkEndian;
 use byteorder::ReadBytesExt;
+use serde::de;
 use serde::de::Deserialize;
 use serde::de::DeserializeSeed;
 use serde::de::EnumAccess;
@@ -16,7 +17,6 @@ use serde::de::IntoDeserializer;
 use serde::de::SeqAccess;
 use serde::de::VariantAccess;
 use serde::de::Visitor;
-use serde::de::{self};
 use vlqencoding::VLQDecode;
 
 use crate::Error;

@@ -9,7 +9,9 @@
 
 use add_branching_sync_target::AddBranchingSyncTarget;
 use add_sync_target::AddSyncTarget;
-use anyhow::{anyhow, bail, Error};
+use anyhow::anyhow;
+use anyhow::bail;
+use anyhow::Error;
 use async_once_cell::AsyncOnceCell;
 use async_requests::AsyncMethodRequestQueue;
 use blobstore::Blobstore;
@@ -17,24 +19,33 @@ use change_target_config::ChangeTargetConfig;
 use context::CoreContext;
 use environment::MononokeEnvironment;
 use futures::future::try_join_all;
-use megarepo_config::{
-    CfgrMononokeMegarepoConfigs, MononokeMegarepoConfigs, MononokeMegarepoConfigsOptions,
-    SyncConfigVersion, SyncTargetConfig, Target, TestMononokeMegarepoConfigs,
-};
+use megarepo_config::CfgrMononokeMegarepoConfigs;
+use megarepo_config::MononokeMegarepoConfigs;
+use megarepo_config::MononokeMegarepoConfigsOptions;
+use megarepo_config::SyncConfigVersion;
+use megarepo_config::SyncTargetConfig;
+use megarepo_config::Target;
+use megarepo_config::TestMononokeMegarepoConfigs;
 use megarepo_error::MegarepoError;
 use megarepo_mapping::CommitRemappingState;
-use megarepo_mapping::{MegarepoMapping, SourceName};
+use megarepo_mapping::MegarepoMapping;
+use megarepo_mapping::SourceName;
 use metaconfig_parser::RepoConfigs;
 use metaconfig_types::ArcRepoConfig;
-use mononoke_api::{Mononoke, RepoContext};
-use mononoke_types::{ChangesetId, RepositoryId};
+use mononoke_api::Mononoke;
+use mononoke_api::RepoContext;
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
 use mutable_renames::MutableRenames;
 use parking_lot::Mutex;
 use remerge_source::RemergeSource;
 use repo_factory::RepoFactory;
-use repo_identity::{ArcRepoIdentity, RepoIdentity};
+use repo_identity::ArcRepoIdentity;
+use repo_identity::RepoIdentity;
 use requests_table::LongRunningRequestsQueue;
-use slog::{info, o, warn};
+use slog::info;
+use slog::o;
+use slog::warn;
 use std::collections::HashMap;
 use std::future::Future;
 use std::hash::Hash;
@@ -214,11 +225,9 @@ impl MegarepoApi {
         let queue = self
             .queue_cache
             .get_or_try_init(&repo_identity.clone(), || async move {
-                let table = self
-                    .requests_table(ctx, &repo_identity, &repo_config)
-                    .await?;
+                let table = self.requests_table(ctx, repo_identity, repo_config).await?;
                 let blobstore = self
-                    .blobstore(ctx, repo_identity.clone(), &repo_config)
+                    .blobstore(ctx, repo_identity.clone(), repo_config)
                     .await?;
                 Ok(AsyncMethodRequestQueue::new(table, blobstore))
             })
@@ -268,7 +277,7 @@ impl MegarepoApi {
         );
         let table = self
             .repo_factory
-            .long_running_requests_queue(&repo_config)
+            .long_running_requests_queue(repo_config)
             .await?;
         info!(
             ctx.logger(),
@@ -315,7 +324,9 @@ impl MegarepoApi {
             .mononoke
             .repo_by_id(ctx.clone(), repo_id)
             .await?
-            .ok_or_else(|| MegarepoError::request(anyhow!("repo not found {}", repo_id)))?;
+            .ok_or_else(|| MegarepoError::request(anyhow!("repo not found {}", repo_id)))?
+            .build()
+            .await?;
         Ok(repo)
     }
 
@@ -333,7 +344,7 @@ impl MegarepoApi {
         );
         let repo_blobstore = self
             .repo_factory
-            .repo_blobstore(&repo_identity, &repo_config)
+            .repo_blobstore(&repo_identity, repo_config)
             .await?;
         let blobstore = repo_blobstore.boxed();
         info!(
@@ -434,7 +445,7 @@ impl MegarepoApi {
 
         let target = sync_target_config.target.clone();
         let version = sync_target_config.version.clone();
-        let fut = add_sync_target.run(&ctx, sync_target_config, changesets_to_merge, message);
+        let fut = add_sync_target.run(ctx, sync_target_config, changesets_to_merge, message);
 
         self.call_and_log(ctx, &target, Some(&version), fut, "add_sync_target")
             .await
@@ -450,11 +461,11 @@ impl MegarepoApi {
         let add_branching_sync_target =
             AddBranchingSyncTarget::new(&self.megarepo_configs, &self.mononoke);
         let sync_target_config = add_branching_sync_target
-            .fork_new_sync_target_config(&ctx, target.clone(), branching_point, source_target)
+            .fork_new_sync_target_config(ctx, target.clone(), branching_point, source_target)
             .await?;
 
         let version = sync_target_config.version.clone();
-        let fut = add_branching_sync_target.run(&ctx, sync_target_config, branching_point);
+        let fut = add_branching_sync_target.run(ctx, sync_target_config, branching_point);
         self.call_and_log(
             ctx,
             &target,
@@ -530,7 +541,7 @@ impl MegarepoApi {
         target: &Target,
         target_location: ChangesetId,
     ) -> Result<ChangesetId, MegarepoError> {
-        let mutable_renames = self.mutable_renames(ctx, &target).await?;
+        let mutable_renames = self.mutable_renames(ctx, target).await?;
         let remerge_source =
             RemergeSource::new(&self.megarepo_configs, &self.mononoke, &mutable_renames);
 
@@ -545,7 +556,7 @@ impl MegarepoApi {
             target_location,
         );
 
-        self.call_and_log(ctx, &target, None, fut, "remerge_source")
+        self.call_and_log(ctx, target, None, fut, "remerge_source")
             .await
     }
 }

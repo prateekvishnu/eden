@@ -1,8 +1,8 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This software may be used and distributed according to the terms of the
- * GNU General Public License version 2.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 //! # drawdag
@@ -114,8 +114,7 @@ pub fn parse(text: &str) -> BTreeMap<String, BTreeSet<String>> {
         let mut parents = Vec::new();
         let mut visited = HashSet::new();
         let mut visit = |state: State, to_visit: &mut Vec<State>| {
-            if !visited.contains(&state) {
-                visited.insert(state);
+            if visited.insert(state) {
                 let y = state.y;
                 let x = state.x;
                 let expected = state.expected;

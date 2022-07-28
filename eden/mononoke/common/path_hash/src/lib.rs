@@ -6,15 +6,17 @@
  */
 
 use abomonation_derive::Abomonation;
-use mononoke_types::{hash, path_bytes_from_mpath, MPath, RepoPath};
+use mononoke_types::hash;
+use mononoke_types::path_bytes_from_mpath;
+use mononoke_types::MPath;
+use mononoke_types::RepoPath;
 use sql::mysql;
-use sql::mysql_async::{
-    prelude::{ConvIr, FromValue},
-    FromValueError, Value,
-};
+use sql::mysql_async::prelude::ConvIr;
+use sql::mysql_async::prelude::FromValue;
+use sql::mysql_async::FromValueError;
+use sql::mysql_async::Value;
 use std::borrow::Borrow;
 use std::borrow::Cow;
-use std::cmp::{Eq, Ord, PartialEq, PartialOrd};
 use std::hash::Hash;
 #[derive(Abomonation, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[derive(mysql::OptTryFromRowField)]
@@ -34,7 +36,7 @@ impl PathHashBytes {
 
 impl ConvIr<PathHashBytes> for Vec<u8> {
     fn new(v: Value) -> Result<Self, FromValueError> {
-        Ok(Self::from_value_opt(v)?)
+        Self::from_value_opt(v)
     }
 
     fn commit(self) -> PathHashBytes {
@@ -71,7 +73,7 @@ pub struct PathBytes(pub Vec<u8>);
 
 impl ConvIr<PathBytes> for Vec<u8> {
     fn new(v: Value) -> Result<Self, FromValueError> {
-        Ok(Self::from_value_opt(v)?)
+        Self::from_value_opt(v)
     }
 
     fn commit(self) -> PathBytes {

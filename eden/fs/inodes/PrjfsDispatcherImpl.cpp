@@ -21,6 +21,7 @@
 #include "eden/fs/inodes/TreeInode.h"
 #include "eden/fs/store/ObjectFetchContext.h"
 #include "eden/fs/store/ObjectStore.h"
+#include "eden/fs/utils/FaultInjector.h"
 #include "eden/fs/utils/FileUtils.h"
 #include "eden/fs/utils/PathFuncs.h"
 #include "eden/fs/utils/SystemError.h"
@@ -293,19 +294,17 @@ ImmediateFuture<TreeInodePtr> createDirInode(
       });
 }
 
-enum class InodeType : bool {
-  Tree,
-  File,
-};
-
 enum class OnDiskState {
   MaterializedFile,
   MaterializedDirectory,
   NotPresent,
 };
 
-ImmediateFuture<OnDiskState>
-getOnDiskState(const EdenMount& mount, RelativePathPiece path, int retry = 0) {
+ImmediateFuture<OnDiskState> getOnDiskState(
+    const EdenMount& mount,
+    RelativePathPiece path,
+    std::chrono::steady_clock::time_point receivedAt,
+    int retry = 0) {
   auto absPath = mount.getPath() + path;
   auto boostPath = boost::filesystem::path(absPath.stringPiece());
 
@@ -317,6 +316,19 @@ getOnDiskState(const EdenMount& mount, RelativePathPiece path, int retry = 0) {
   } else if (fileType == boost::filesystem::symlink_file) {
     return OnDiskState::MaterializedFile;
   } else if (fileType == boost::filesystem::directory_file) {
+    const auto elapsed = std::chrono::steady_clock::now() - receivedAt;
+    const auto delay =
+        mount.getEdenConfig()->prjfsDirectoryCreationDelay.getValue();
+    if (elapsed < delay) {
+      // See comment on EdenConfig::prjfsDirectoryCreationDelay for what's going
+      // on here.
+      auto timeToSleep =
+          std::chrono::duration_cast<folly::HighResDuration>(delay - elapsed);
+      return ImmediateFuture{folly::futures::sleep(timeToSleep)}.thenValue(
+          [&mount, path = path.copy(), retry, receivedAt](folly::Unit&&) {
+            return getOnDiskState(mount, path, receivedAt, retry);
+          });
+    }
     return OnDiskState::MaterializedDirectory;
   } else if (fileType == boost::filesystem::file_not_found) {
     return OnDiskState::NotPresent;
@@ -327,8 +339,8 @@ getOnDiskState(const EdenMount& mount, RelativePathPiece path, int retry = 0) {
     }
     XLOG(WARN) << "Error: " << ec.message() << " for path: " << path;
     return ImmediateFuture{folly::futures::sleep(retry * 5ms)}.thenValue(
-        [&mount, path, retry](folly::Unit&&) {
-          return getOnDiskState(mount, path, retry + 1);
+        [&mount, path = path.copy(), receivedAt, retry](folly::Unit&&) {
+          return getOnDiskState(mount, path, receivedAt, retry + 1);
         });
   } else {
     return makeImmediateFuture<OnDiskState>(std::logic_error(
@@ -340,36 +352,56 @@ ImmediateFuture<folly::Unit> handleMaterializedFileNotification(
     EdenMount& mount,
     RelativePath path,
     InodeType inodeType,
+    std::chrono::steady_clock::time_point receivedAt,
     ObjectFetchContext& context);
 
 ImmediateFuture<folly::Unit> handleNotPresentFileNotification(
-    EdenMount& mount,
+    const EdenMount& mount,
     RelativePath path,
+    std::chrono::steady_clock::time_point receivedAt,
     ObjectFetchContext& context) {
-  struct GetFirstPresent {
-    GetFirstPresent() = default;
+  /**
+   * Allows finding the first directory that is present on disk. This must be
+   * heap allocated and kept alive until compute returns.
+   */
+  class GetFirstPresent {
+   public:
+    explicit GetFirstPresent(RelativePath path)
+        : fullPath_{std::move(path)}, currentPrefix_{fullPath_} {}
 
-    ImmediateFuture<RelativePathPiece> compute(
-        EdenMount& mount,
-        RelativePathPiece path) {
-      auto dirname = path.dirname();
-      return getOnDiskState(mount, dirname)
+    GetFirstPresent(GetFirstPresent&&) = delete;
+    GetFirstPresent(const GetFirstPresent&) = delete;
+
+    ImmediateFuture<RelativePath> compute(
+        const EdenMount& mount,
+        std::chrono::steady_clock::time_point receivedAt) {
+      auto dirname = currentPrefix_.dirname();
+      return getOnDiskState(mount, dirname, receivedAt)
           .thenValue(
-              [this, &mount, path](
-                  OnDiskState state) -> ImmediateFuture<RelativePathPiece> {
+              [this, &mount, receivedAt](
+                  OnDiskState state) mutable -> ImmediateFuture<RelativePath> {
                 if (state != OnDiskState::NotPresent) {
-                  return path;
+                  return currentPrefix_.copy();
                 }
 
-                return compute(mount, path.dirname());
+                currentPrefix_ = currentPrefix_.dirname();
+                return compute(mount, receivedAt);
               });
     }
+
+   private:
+    // The currentPrefix_ is a piece of the fullPath_ which is kept around for
+    // lifetime reasons.
+    RelativePath fullPath_;
+    RelativePathPiece currentPrefix_;
   };
 
   // First, we need to figure out how far down this path has been removed.
-  return GetFirstPresent{}
-      .compute(mount, path)
-      .thenValue([&mount, &context](RelativePathPiece path) {
+  auto getFirstPresent = std::make_unique<GetFirstPresent>(std::move(path));
+  auto fut = getFirstPresent->compute(mount, receivedAt);
+  return std::move(fut)
+      .ensure([getFirstPresent = std::move(getFirstPresent)] {})
+      .thenValue([&mount, &context](RelativePath path) {
         auto basename = path.basename();
         auto dirname = path.dirname();
 
@@ -392,27 +424,27 @@ ImmediateFuture<folly::Unit> handleNotPresentFileNotification(
               }
               return try_;
             });
-      })
-      .ensure([path = std::move(path)] {});
+      });
 }
 
 ImmediateFuture<folly::Unit> fileNotificationImpl(
     EdenMount& mount,
     RelativePath path,
+    std::chrono::steady_clock::time_point receivedAt,
     ObjectFetchContext& context) {
-  return getOnDiskState(mount, path)
-      .thenValue([&mount, path = std::move(path), &context](
+  return getOnDiskState(mount, path, receivedAt)
+      .thenValue([&mount, path = std::move(path), receivedAt, &context](
                      OnDiskState state) mutable {
         switch (state) {
           case OnDiskState::MaterializedFile:
             return handleMaterializedFileNotification(
-                mount, std::move(path), InodeType::File, context);
+                mount, std::move(path), InodeType::FILE, receivedAt, context);
           case OnDiskState::MaterializedDirectory:
             return handleMaterializedFileNotification(
-                mount, std::move(path), InodeType::Tree, context);
+                mount, std::move(path), InodeType::TREE, receivedAt, context);
           case OnDiskState::NotPresent:
             return handleNotPresentFileNotification(
-                mount, std::move(path), context);
+                mount, std::move(path), receivedAt, context);
         }
       });
 }
@@ -420,10 +452,19 @@ ImmediateFuture<folly::Unit> fileNotificationImpl(
 ImmediateFuture<folly::Unit> recursivelyAddAllChildrens(
     EdenMount& mount,
     RelativePath path,
+    std::chrono::steady_clock::time_point receivedAt,
     ObjectFetchContext& context) {
   auto absPath = mount.getPath() + path;
   auto direntNamesTry = getAllDirectoryEntryNames(absPath);
   if (direntNamesTry.hasException()) {
+    if (auto* exc = direntNamesTry.tryGetExceptionObject<std::system_error>()) {
+      // In the case where the directory has been removed from the disk, we
+      // should silently continue. A notification would have been sent to
+      // EdenFS and will notice the directory missing then.
+      if (isEnoent(*exc)) {
+        return folly::unit;
+      }
+    }
     return makeImmediateFuture<folly::Unit>(direntNamesTry.exception());
   }
   const auto& direntNames = direntNamesTry.value();
@@ -434,7 +475,7 @@ ImmediateFuture<folly::Unit> recursivelyAddAllChildrens(
   for (const auto& entryName : direntNames) {
     auto entryPath = path + entryName;
     futures.emplace_back(
-        fileNotificationImpl(mount, std::move(entryPath), context));
+        fileNotificationImpl(mount, std::move(entryPath), receivedAt, context));
   }
 
   return collectAllSafe(std::move(futures))
@@ -445,10 +486,14 @@ ImmediateFuture<folly::Unit> handleMaterializedFileNotification(
     EdenMount& mount,
     RelativePath path,
     InodeType inodeType,
+    std::chrono::steady_clock::time_point receivedAt,
     ObjectFetchContext& context) {
   return createDirInode(mount, path.dirname().copy(), context)
-      .thenValue([&mount, path = std::move(path), inodeType, &context](
-                     const TreeInodePtr treeInode) mutable {
+      .thenValue([&mount,
+                  path = std::move(path),
+                  inodeType,
+                  receivedAt,
+                  &context](const TreeInodePtr treeInode) mutable {
         auto basename = path.basename();
         return treeInode->getOrLoadChild(basename, context)
             .thenTry(
@@ -456,6 +501,7 @@ ImmediateFuture<folly::Unit> handleMaterializedFileNotification(
                  path = std::move(path),
                  treeInode,
                  inodeType,
+                 receivedAt,
                  &context](folly::Try<InodePtr> try_) mutable
                 -> ImmediateFuture<folly::Unit> {
                   auto basename = path.basename();
@@ -463,12 +509,12 @@ ImmediateFuture<folly::Unit> handleMaterializedFileNotification(
                     if (auto* exc =
                             try_.tryGetExceptionObject<std::system_error>()) {
                       if (isEnoent(*exc)) {
-                        if (inodeType == InodeType::Tree) {
+                        if (inodeType == InodeType::TREE) {
                           auto child = treeInode->mkdir(
                               basename, _S_IFDIR, InvalidationRequired::No);
                           child->incFsRefcount();
                           return recursivelyAddAllChildrens(
-                              mount, std::move(path), context);
+                              mount, std::move(path), receivedAt, context);
                         } else {
                           auto child = treeInode->mknod(
                               basename, _S_IFREG, 0, InvalidationRequired::No);
@@ -482,7 +528,7 @@ ImmediateFuture<folly::Unit> handleMaterializedFileNotification(
 
                   auto inode = std::move(try_).value();
                   switch (inodeType) {
-                    case InodeType::Tree: {
+                    case InodeType::TREE: {
                       if (inode.asTreePtrOrNull()) {
                         // In the case where this is already a directory, we
                         // still need to recursively add all the childrens.
@@ -494,7 +540,7 @@ ImmediateFuture<folly::Unit> handleMaterializedFileNotification(
                         // directory are added too, hence the call to
                         // recursivelyAddAllChildrens.
                         return recursivelyAddAllChildrens(
-                            mount, std::move(path), context);
+                            mount, std::move(path), receivedAt, context);
                       }
                       // Somehow this is a file, but there is a directory on
                       // disk, let's remove it and create the directory.
@@ -503,6 +549,7 @@ ImmediateFuture<folly::Unit> handleMaterializedFileNotification(
                           .thenTry([&mount,
                                     &context,
                                     path = std::move(path),
+                                    receivedAt,
                                     treeInode](
                                        folly::Try<folly::Unit> try_) mutable {
                             if (auto* exc = try_.tryGetExceptionObject<
@@ -518,10 +565,10 @@ ImmediateFuture<folly::Unit> handleMaterializedFileNotification(
                                 InvalidationRequired::No);
                             child->incFsRefcount();
                             return recursivelyAddAllChildrens(
-                                mount, std::move(path), context);
+                                mount, std::move(path), receivedAt, context);
                           });
                     }
-                    case InodeType::File: {
+                    case InodeType::FILE: {
                       if (auto fileInode = inode.asFilePtrOrNull()) {
                         fileInode->materialize();
                         return folly::unit;
@@ -561,16 +608,33 @@ ImmediateFuture<folly::Unit> fileNotification(
     RelativePath path,
     folly::Executor::KeepAlive<folly::SequencedExecutor> executor,
     std::shared_ptr<ObjectFetchContext> context) {
-  folly::via(executor, [&mount, path, context = std::move(context)]() mutable {
-    return fileNotificationImpl(mount, std::move(path), *context).get();
-  }).thenError([path](const folly::exception_wrapper& ew) {
-    // These should in theory never happen, but they sometimes happen
-    // due to filesystem errors, antivirus scanning, etc. During
-    // test, these should be treated as fatal errors, so we don't let
-    // errors silently pass tests. In release builds, let's be less
-    // aggressive and just log.
-    XLOG(DFATAL) << "While handling notification on: " << path << ": " << ew;
-  });
+  auto receivedAt = std::chrono::steady_clock::now();
+  folly::via(
+      executor,
+      [&mount, path, receivedAt, context = std::move(context)]() mutable {
+        auto fault = ImmediateFuture{
+            mount.getServerState()->getFaultInjector().checkAsync(
+                "PrjfsDispatcherImpl::fileNotification", path)};
+
+        return std::move(fault)
+            .thenValue([&mount,
+                        path = std::move(path),
+                        receivedAt,
+                        context = std::move(context)](auto&&) {
+              return fileNotificationImpl(
+                  mount, std::move(path), receivedAt, *context);
+            })
+            .get();
+      })
+      .thenError([path](const folly::exception_wrapper& ew) {
+        // These should in theory never happen, but they sometimes happen
+        // due to filesystem errors, antivirus scanning, etc. During
+        // test, these should be treated as fatal errors, so we don't let
+        // errors silently pass tests. In release builds, let's be less
+        // aggressive and just log.
+        XLOG(DFATAL) << "While handling notification on: " << path << ": "
+                     << ew;
+      });
   return folly::unit;
 }
 

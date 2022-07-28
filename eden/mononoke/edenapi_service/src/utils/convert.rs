@@ -19,21 +19,30 @@
 //! in implentation, it is possible that conversion failures may occur
 //! in practice.
 
-use anyhow::{bail, Context, Result};
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Result;
 use std::collections::BTreeMap;
 
-use edenapi_types::{
-    commit::BonsaiFileChange,
-    token::{UploadToken, UploadTokenData, UploadTokenMetadata},
-    AnyFileContentId, AnyId, HgChangesetContent,
-};
+use edenapi_types::commit::BonsaiFileChange;
+use edenapi_types::token::UploadToken;
+use edenapi_types::token::UploadTokenData;
+use edenapi_types::token::UploadTokenMetadata;
+use edenapi_types::AnyFileContentId;
+use edenapi_types::AnyId;
+use edenapi_types::HgChangesetContent;
 use ephemeral_blobstore::BubbleId;
-use mercurial_types::{blobs::Extra, blobs::RevlogChangeset, HgManifestId, HgNodeHash};
+use mercurial_types::blobs::Extra;
+use mercurial_types::blobs::RevlogChangeset;
+use mercurial_types::HgManifestId;
+use mercurial_types::HgNodeHash;
 use mononoke_api::path::MononokePath;
-use mononoke_api::{CreateChange, CreateChangeFile};
+use mononoke_api::CreateChange;
+use mononoke_api::CreateChangeFile;
 use mononoke_types::DateTime;
 use mononoke_types::MPath;
-use types::{RepoPath, RepoPathBuf};
+use types::RepoPath;
+use types::RepoPathBuf;
 
 use crate::errors::ErrorKind;
 
@@ -84,12 +93,8 @@ pub fn to_revlog_changeset(cs: HgChangesetContent) -> Result<RevlogChangeset> {
 
 pub fn to_create_change(fc: BonsaiFileChange, bubble_id: Option<BubbleId>) -> Result<CreateChange> {
     fn extract_size(metadata: Option<UploadTokenMetadata>) -> Option<u64> {
-        match metadata {
-            Some(UploadTokenMetadata::FileContentTokenMetadata(metadata)) => {
-                Some(metadata.content_size)
-            }
-            None => None,
-        }
+        metadata
+            .map(|UploadTokenMetadata::FileContentTokenMetadata(metadata)| metadata.content_size)
     }
     let verify = move |token: &UploadToken| -> Result<()> {
         // TODO: Verify signature on upload token

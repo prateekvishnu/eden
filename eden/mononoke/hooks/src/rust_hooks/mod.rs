@@ -27,10 +27,12 @@ use anyhow::Result;
 use fbinit::FacebookInit;
 use futures::future::Future;
 use metaconfig_types::HookConfig;
+use permission_checker::AclProvider;
 use permission_checker::ArcMembershipChecker;
 
 pub(crate) use self::lua_pattern::LuaPattern;
-use crate::{ChangesetHook, FileHook};
+use crate::ChangesetHook;
+use crate::FileHook;
 
 fn b(t: impl ChangesetHook + 'static) -> Box<dyn ChangesetHook> {
     Box::new(t)
@@ -43,6 +45,7 @@ pub fn hook_name_to_changeset_hook<'a>(
     _fb: FacebookInit,
     name: &'a str,
     config: &'a HookConfig,
+    _acl_provider: &'a dyn AclProvider,
     _reviewers_membership: ArcMembershipChecker,
     _repo_name: &str,
 ) -> impl Future<Output = Result<Option<Box<dyn ChangesetHook + 'static>>>> + 'a {

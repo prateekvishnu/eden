@@ -6,25 +6,40 @@
  */
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 
-use anyhow::{Error, Result};
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
-use bookmarks_types::{
-    Bookmark, BookmarkKind, BookmarkName, BookmarkPagination, BookmarkPrefix, Freshness,
-};
+use bookmarks_types::Bookmark;
+use bookmarks_types::BookmarkKind;
+use bookmarks_types::BookmarkName;
+use bookmarks_types::BookmarkPagination;
+use bookmarks_types::BookmarkPrefix;
+use bookmarks_types::Freshness;
 use context::CoreContext;
-use futures::future::{self, BoxFuture, FutureExt, TryFutureExt};
-use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
-use mononoke_types::{ChangesetId, RepositoryId};
-use shared_error::anyhow::{IntoSharedError, SharedError};
+use futures::future;
+use futures::future::BoxFuture;
+use futures::future::FutureExt;
+use futures::future::TryFutureExt;
+use futures::stream;
+use futures::stream::BoxStream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
+use shared_error::anyhow::IntoSharedError;
+use shared_error::anyhow::SharedError;
 use stats::prelude::*;
 use tunables::tunables;
 
-use crate::log::{BookmarkUpdateReason, BundleReplay};
+use crate::log::BookmarkUpdateReason;
 use crate::subscription::BookmarksSubscription;
-use crate::transaction::{BookmarkTransaction, BookmarkTransactionHook};
+use crate::transaction::BookmarkTransaction;
+use crate::transaction::BookmarkTransactionHook;
 use crate::Bookmarks;
 
 define_stats! {
@@ -130,7 +145,7 @@ impl CachedBookmarks {
                 if cache.expires <= now || cache_failed {
                     cache_hit = false;
                     *cache = Cache::new(
-                        ctx.clone(),
+                        ctx,
                         self.bookmarks.clone(),
                         now + ttl,
                         // NOTE: We want freshness to behave as follows:
@@ -221,8 +236,7 @@ impl CachedBookmarks {
                         .filter_map(move |(name, (kind, changeset_id))| {
                             if filter_kinds
                                 .as_ref()
-                                .map(|kinds| kinds.iter().any(|k| k == kind))
-                                .unwrap_or(true)
+                                .map_or(true, |kinds| kinds.iter().any(|k| k == kind))
                             {
                                 let bookmark = Bookmark {
                                     name: name.clone(),
@@ -336,11 +350,9 @@ impl BookmarkTransaction for CachedBookmarksTransaction {
         new_cs: ChangesetId,
         old_cs: ChangesetId,
         reason: BookmarkUpdateReason,
-        bundle_replay: Option<&dyn BundleReplay>,
     ) -> Result<()> {
         self.dirty = true;
-        self.transaction
-            .update(bookmark, new_cs, old_cs, reason, bundle_replay)
+        self.transaction.update(bookmark, new_cs, old_cs, reason)
     }
 
     fn create(
@@ -348,11 +360,9 @@ impl BookmarkTransaction for CachedBookmarksTransaction {
         bookmark: &BookmarkName,
         new_cs: ChangesetId,
         reason: BookmarkUpdateReason,
-        bundle_replay: Option<&dyn BundleReplay>,
     ) -> Result<()> {
         self.dirty = true;
-        self.transaction
-            .create(bookmark, new_cs, reason, bundle_replay)
+        self.transaction.create(bookmark, new_cs, reason)
     }
 
     fn force_set(
@@ -360,11 +370,9 @@ impl BookmarkTransaction for CachedBookmarksTransaction {
         bookmark: &BookmarkName,
         new_cs: ChangesetId,
         reason: BookmarkUpdateReason,
-        bundle_replay: Option<&dyn BundleReplay>,
     ) -> Result<()> {
         self.dirty = true;
-        self.transaction
-            .force_set(bookmark, new_cs, reason, bundle_replay)
+        self.transaction.force_set(bookmark, new_cs, reason)
     }
 
     fn delete(
@@ -372,22 +380,18 @@ impl BookmarkTransaction for CachedBookmarksTransaction {
         bookmark: &BookmarkName,
         old_cs: ChangesetId,
         reason: BookmarkUpdateReason,
-        bundle_replay: Option<&dyn BundleReplay>,
     ) -> Result<()> {
         self.dirty = true;
-        self.transaction
-            .delete(bookmark, old_cs, reason, bundle_replay)
+        self.transaction.delete(bookmark, old_cs, reason)
     }
 
     fn force_delete(
         &mut self,
         bookmark: &BookmarkName,
         reason: BookmarkUpdateReason,
-        bundle_replay: Option<&dyn BundleReplay>,
     ) -> Result<()> {
         self.dirty = true;
-        self.transaction
-            .force_delete(bookmark, reason, bundle_replay)
+        self.transaction.force_delete(bookmark, reason)
     }
 
     fn update_scratch(
@@ -415,11 +419,9 @@ impl BookmarkTransaction for CachedBookmarksTransaction {
         bookmark: &BookmarkName,
         new_cs: ChangesetId,
         reason: BookmarkUpdateReason,
-        bundle_replay: Option<&dyn BundleReplay>,
     ) -> Result<()> {
         self.dirty = true;
-        self.transaction
-            .create_publishing(bookmark, new_cs, reason, bundle_replay)
+        self.transaction.create_publishing(bookmark, new_cs, reason)
     }
 
     fn commit(self: Box<Self>) -> BoxFuture<'static, Result<bool>> {
@@ -469,18 +471,22 @@ mod tests {
     use super::*;
     use ascii::AsciiString;
     use fbinit::FacebookInit;
-    use futures::{
-        channel::{mpsc, oneshot},
-        future::{Either, Future},
-        stream::{Stream, StreamFuture},
-    };
+    use futures::channel::mpsc;
+    use futures::channel::oneshot;
+    use futures::future::Either;
+    use futures::future::Future;
+    use futures::stream::Stream;
+    use futures::stream::StreamFuture;
     use maplit::hashmap;
-    use mononoke_types_mocks::changesetid::{ONES_CSID, THREES_CSID, TWOS_CSID};
+    use mononoke_types_mocks::changesetid::ONES_CSID;
+    use mononoke_types_mocks::changesetid::THREES_CSID;
+    use mononoke_types_mocks::changesetid::TWOS_CSID;
     use quickcheck::quickcheck;
     use std::collections::HashSet;
     use std::fmt::Debug;
     use tokio::runtime::Runtime;
-    use tunables::{with_tunables_async, MononokeTunables};
+    use tunables::with_tunables_async;
+    use tunables::MononokeTunables;
 
     fn bookmark(name: impl AsRef<str>) -> Bookmark {
         Bookmark::new(
@@ -514,14 +520,13 @@ mod tests {
         bookmarks: &impl Bookmarks,
         ctx: CoreContext,
     ) -> Box<dyn BookmarkTransaction> {
-        let mut transaction = bookmarks.create_transaction(ctx.clone());
+        let mut transaction = bookmarks.create_transaction(ctx);
 
         // Dirty the transaction.
         transaction
             .force_delete(
-                &BookmarkName::new("".to_string()).unwrap(),
+                &BookmarkName::new("").unwrap(),
                 BookmarkUpdateReason::TestMove,
-                None,
             )
             .unwrap();
 
@@ -589,7 +594,6 @@ mod tests {
             _new_cs: ChangesetId,
             _old_cs: ChangesetId,
             _reason: BookmarkUpdateReason,
-            _bundle_replay: Option<&dyn BundleReplay>,
         ) -> Result<()> {
             Ok(())
         }
@@ -599,7 +603,6 @@ mod tests {
             _bookmark: &BookmarkName,
             _new_cs: ChangesetId,
             _reason: BookmarkUpdateReason,
-            _bundle_replay: Option<&dyn BundleReplay>,
         ) -> Result<()> {
             Ok(())
         }
@@ -609,7 +612,6 @@ mod tests {
             _bookmark: &BookmarkName,
             _new_cs: ChangesetId,
             _reason: BookmarkUpdateReason,
-            _bundle_replay: Option<&dyn BundleReplay>,
         ) -> Result<()> {
             Ok(())
         }
@@ -619,7 +621,6 @@ mod tests {
             _bookmark: &BookmarkName,
             _old_cs: ChangesetId,
             _reason: BookmarkUpdateReason,
-            _bundle_replay: Option<&dyn BundleReplay>,
         ) -> Result<()> {
             Ok(())
         }
@@ -628,7 +629,6 @@ mod tests {
             &mut self,
             _bookmark: &BookmarkName,
             _reason: BookmarkUpdateReason,
-            _bundle_replay: Option<&dyn BundleReplay>,
         ) -> Result<()> {
             Ok(())
         }
@@ -655,7 +655,6 @@ mod tests {
             _bookmark: &BookmarkName,
             _new_cs: ChangesetId,
             _reason: BookmarkUpdateReason,
-            _bundle_replay: Option<&dyn BundleReplay>,
         ) -> Result<()> {
             Ok(())
         }

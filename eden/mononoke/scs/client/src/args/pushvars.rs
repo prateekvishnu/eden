@@ -9,43 +9,48 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{anyhow, Result};
-use clap::{App, Arg, ArgMatches};
+use anyhow::Result;
 
-const ARG_PUSHVAR: &str = "PUSHVAR";
+#[derive(Clone)]
+struct PushvarEntry(String, String);
 
-/// Add arguments for specifying pushvars.
-pub(crate) fn add_pushvar_args<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
-    app.arg(
-        Arg::with_name(ARG_PUSHVAR)
-            .long("pushvar")
-            .help("Pushvar (name=value) to send with write operation")
-            .takes_value(true)
-            .multiple(true),
-    )
+impl std::str::FromStr for PushvarEntry {
+    type Err = anyhow::Error;
+
+    fn from_str(txt: &str) -> Result<Self> {
+        let mut pushvar_parts = txt.splitn(2, '=');
+        match (pushvar_parts.next(), pushvar_parts.next()) {
+            (Some(name), Some(value)) => Ok(Self(name.to_string(), value.to_string())),
+            _ => {
+                anyhow::bail!(
+                    "Pushvar specification must be of the form 'name=value', received '{}'",
+                    txt
+                )
+            }
+        }
+    }
 }
 
-/// Get specified pushvars.
-pub(crate) fn get_pushvars(matches: &ArgMatches) -> Result<Option<BTreeMap<String, Vec<u8>>>> {
-    match matches.values_of(ARG_PUSHVAR) {
-        None => Ok(None),
-        Some(pushvar_specs) => {
-            let mut pushvars = BTreeMap::new();
-            for pushvar_spec in pushvar_specs {
-                let mut pushvar_parts = pushvar_spec.splitn(2, '=');
-                match (pushvar_parts.next(), pushvar_parts.next()) {
-                    (Some(name), Some(value)) => {
-                        pushvars.insert(name.to_string(), value.to_string().into_bytes());
-                    }
-                    _ => {
-                        return Err(anyhow!(
-                            "Pushvar specification must be of the form 'name=value', received '{}'",
-                            pushvar_spec
-                        ));
-                    }
-                }
-            }
-            Ok(Some(pushvars))
+#[derive(clap::Args, Clone)]
+/// Add arguments for specifying pushvars.
+pub(crate) struct PushvarArgs {
+    #[clap(long)]
+    /// Pushvar (name=value) to send with write operation
+    pushvar: Vec<PushvarEntry>,
+}
+
+impl PushvarArgs {
+    /// Get specified pushvars.
+    pub(crate) fn into_pushvars(self) -> Option<BTreeMap<String, Vec<u8>>> {
+        if !self.pushvar.is_empty() {
+            Some(
+                self.pushvar
+                    .into_iter()
+                    .map(|e| (e.0, e.1.into_bytes()))
+                    .collect(),
+            )
+        } else {
+            None
         }
     }
 }

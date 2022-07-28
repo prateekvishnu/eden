@@ -9,28 +9,70 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Result;
 use bookmarks_types::BookmarkName;
-use metaconfig_types::{
-    BlameVersion, BookmarkOrRegex, BookmarkParams, Bundle2ReplayParams, CacheWarmupParams,
-    ComparableRegex, CrossRepoCommitValidation, DerivedDataConfig, DerivedDataTypesConfig,
-    HookBypass, HookConfig, HookManagerParams, HookParams, InfinitepushNamespace,
-    InfinitepushParams, LfsParams, PushParams, PushrebaseFlags, PushrebaseParams, RepoClientKnobs,
-    SegmentedChangelogConfig, SegmentedChangelogHeadConfig, ServiceWriteRestrictions,
-    SourceControlServiceMonitoring, SourceControlServiceParams, UnodeVersion, WalkerConfig,
-    WalkerJobParams, WalkerJobType,
-};
-use mononoke_types::{ChangesetId, MPath, PrefixTrie};
+use metaconfig_types::Address;
+use metaconfig_types::BlameVersion;
+use metaconfig_types::BookmarkOrRegex;
+use metaconfig_types::BookmarkParams;
+use metaconfig_types::CacheWarmupParams;
+use metaconfig_types::ComparableRegex;
+use metaconfig_types::CrossRepoCommitValidation;
+use metaconfig_types::DerivedDataConfig;
+use metaconfig_types::DerivedDataTypesConfig;
+use metaconfig_types::HgSyncConfig;
+use metaconfig_types::HookBypass;
+use metaconfig_types::HookConfig;
+use metaconfig_types::HookManagerParams;
+use metaconfig_types::HookParams;
+use metaconfig_types::InfinitepushNamespace;
+use metaconfig_types::InfinitepushParams;
+use metaconfig_types::LfsParams;
+use metaconfig_types::PushParams;
+use metaconfig_types::PushrebaseFlags;
+use metaconfig_types::PushrebaseParams;
+use metaconfig_types::PushrebaseRemoteMode;
+use metaconfig_types::RepoClientKnobs;
+use metaconfig_types::SegmentedChangelogConfig;
+use metaconfig_types::SegmentedChangelogHeadConfig;
+use metaconfig_types::ServiceWriteRestrictions;
+use metaconfig_types::SourceControlServiceMonitoring;
+use metaconfig_types::SourceControlServiceParams;
+use metaconfig_types::SparseProfilesConfig;
+use metaconfig_types::UnodeVersion;
+use metaconfig_types::WalkerConfig;
+use metaconfig_types::WalkerJobParams;
+use metaconfig_types::WalkerJobType;
+use mononoke_types::ChangesetId;
+use mononoke_types::MPath;
+use mononoke_types::PrefixTrie;
 use regex::Regex;
-use repos::{
-    RawBookmarkConfig, RawBundle2ReplayParams, RawCacheWarmupConfig,
-    RawCrossRepoCommitValidationConfig, RawDerivedDataConfig, RawDerivedDataTypesConfig,
-    RawHookConfig, RawHookManagerParams, RawInfinitepushParams, RawLfsParams, RawPushParams,
-    RawPushrebaseParams, RawRepoClientKnobs, RawSegmentedChangelogConfig,
-    RawSegmentedChangelogHeadConfig, RawServiceWriteRestrictions,
-    RawSourceControlServiceMonitoring, RawSourceControlServiceParams, RawWalkerConfig,
-    RawWalkerJobParams, RawWalkerJobType,
-};
+use repos::RawBookmarkConfig;
+use repos::RawCacheWarmupConfig;
+use repos::RawCrossRepoCommitValidationConfig;
+use repos::RawDerivedDataConfig;
+use repos::RawDerivedDataTypesConfig;
+use repos::RawHgSyncConfig;
+use repos::RawHookConfig;
+use repos::RawHookManagerParams;
+use repos::RawInfinitepushParams;
+use repos::RawLfsParams;
+use repos::RawPushParams;
+use repos::RawPushrebaseParams;
+use repos::RawPushrebaseRemoteMode;
+use repos::RawPushrebaseRemoteModeRemote;
+use repos::RawRepoClientKnobs;
+use repos::RawSegmentedChangelogConfig;
+use repos::RawSegmentedChangelogHeadConfig;
+use repos::RawServiceWriteRestrictions;
+use repos::RawSourceControlServiceMonitoring;
+use repos::RawSourceControlServiceParams;
+use repos::RawSparseProfilesConfig;
+use repos::RawWalkerConfig;
+use repos::RawWalkerJobParams;
+use repos::RawWalkerJobType;
 
 use crate::convert::Convert;
 use crate::errors::ConfigurationError;
@@ -176,6 +218,33 @@ impl Convert for RawPushParams {
     }
 }
 
+impl Convert for RawPushrebaseRemoteModeRemote {
+    type Output = Address;
+
+    fn convert(self) -> Result<Self::Output> {
+        match self {
+            Self::tier(t) => Ok(Address::Tier(t)),
+            Self::host_port(host) => Ok(Address::HostPort(host)),
+            Self::UnknownField(e) => anyhow::bail!("Unknown field: {}", e),
+        }
+    }
+}
+
+impl Convert for RawPushrebaseRemoteMode {
+    type Output = PushrebaseRemoteMode;
+
+    fn convert(self) -> Result<Self::Output> {
+        match self {
+            Self::local(_) => Ok(PushrebaseRemoteMode::Local),
+            Self::remote_scs(addr) => Ok(PushrebaseRemoteMode::RemoteScs(addr.convert()?)),
+            Self::remote_scs_local_fallback(addr) => Ok(
+                PushrebaseRemoteMode::RemoteScsWithLocalFallback(addr.convert()?),
+            ),
+            Self::UnknownField(e) => anyhow::bail!("Unknown field: {}", e),
+        }
+    }
+}
+
 impl Convert for RawPushrebaseParams {
     type Output = PushrebaseParams;
 
@@ -196,6 +265,7 @@ impl Convert for RawPushrebaseParams {
                     .casefolding_check
                     .unwrap_or(default.flags.casefolding_check),
                 not_generated_filenodes_limit: 500,
+                monitoring_bookmark: self.monitoring_bookmark,
             },
             commit_scribe_category: self.commit_scribe_category,
             block_merges: self.block_merges.unwrap_or(default.block_merges),
@@ -210,16 +280,9 @@ impl Convert for RawPushrebaseParams {
             allow_change_xrepo_mapping_extra: self
                 .allow_change_xrepo_mapping_extra
                 .unwrap_or(false),
-        })
-    }
-}
-
-impl Convert for RawBundle2ReplayParams {
-    type Output = Bundle2ReplayParams;
-
-    fn convert(self) -> Result<Self::Output> {
-        Ok(Bundle2ReplayParams {
-            preserve_raw_bundle2: self.preserve_raw_bundle2.unwrap_or(false),
+            remote_mode: self
+                .remote_mode
+                .map_or(Ok(default.remote_mode), Convert::convert)?,
         })
     }
 }
@@ -541,5 +604,30 @@ impl Convert for RawCrossRepoCommitValidationConfig {
             .map(BookmarkName::new)
             .collect::<Result<_, _>>()?;
         Ok(CrossRepoCommitValidation { skip_bookmarks })
+    }
+}
+
+impl Convert for RawSparseProfilesConfig {
+    type Output = SparseProfilesConfig;
+
+    fn convert(self) -> Result<Self::Output> {
+        Ok(SparseProfilesConfig {
+            sparse_profiles_location: self.sparse_profiles_location,
+            excluded_paths: self.excluded_paths.unwrap_or_default(),
+            monitored_profiles: self.monitored_profiles.unwrap_or_default(),
+        })
+    }
+}
+
+impl Convert for RawHgSyncConfig {
+    type Output = HgSyncConfig;
+
+    fn convert(self) -> Result<Self::Output> {
+        Ok(HgSyncConfig {
+            hg_repo_ssh_path: self.hg_repo_ssh_path,
+            batch_size: self.batch_size,
+            lock_on_failure: self.lock_on_failure,
+            darkstorm_backup_repo_id: self.darkstorm_backup_repo_id,
+        })
     }
 }

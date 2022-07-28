@@ -10,33 +10,40 @@ mod filenodes;
 
 use ::changesets::ArcChangesets;
 use ::filenodes::ArcFilenodes;
-use anyhow::{format_err, Error};
+use anyhow::format_err;
+use anyhow::Error;
 use blobrepo_override::DangerousOverride;
 use blobstore_factory::PutBehaviour;
 use bookmarks::BookmarkName;
-use cache_warmup::{CacheWarmupRequest, CacheWarmupTarget};
-use clap::{Arg, SubCommand};
+use cache_warmup::CacheWarmupRequest;
+use cache_warmup::CacheWarmupTarget;
+use clap::Arg;
+use clap::SubCommand;
 use cloned::cloned;
-use cmdlib::{
-    args::{self, MononokeMatches},
-    monitoring::AliveService,
-};
-use context::{CoreContext, SessionContainer};
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
+use cmdlib::monitoring::AliveService;
+use context::CoreContext;
+use context::SessionContainer;
 use derived_data_filenodes::FilenodesOnlyPublic;
 use fbinit::FacebookInit;
-use futures::{channel::mpsc, future};
+use futures::channel::mpsc;
+use futures::future;
 use mercurial_derived_data::MappedHgChangesetId;
 use metaconfig_parser::RepoConfigs;
 use metaconfig_types::CacheWarmupParams;
-use microwave::{Snapshot, SnapshotLocation};
+use microwave::Snapshot;
+use microwave::SnapshotLocation;
 use mononoke_api_types::InnerRepo;
 use repo_factory::RepoFactory;
-use slog::{info, o, Logger};
+use slog::info;
+use slog::o;
+use slog::Logger;
 use std::path::Path;
 use std::sync::Arc;
-use warm_bookmarks_cache::{
-    create_derived_data_warmer, find_all_underived_and_latest_derived, LatestDerivedBookmarkEntry,
-};
+use warm_bookmarks_cache::create_derived_data_warmer;
+use warm_bookmarks_cache::find_all_underived_and_latest_derived;
+use warm_bookmarks_cache::LatestDerivedBookmarkEntry;
 
 use crate::changesets::MicrowaveChangesets;
 use crate::filenodes::MicrowaveFilenodes;
@@ -52,8 +59,8 @@ async fn cache_warmup_target(
     bookmark: &BookmarkName,
 ) -> Result<CacheWarmupTarget, Error> {
     let warmers = vec![
-        create_derived_data_warmer::<MappedHgChangesetId, _>(&ctx, repo),
-        create_derived_data_warmer::<FilenodesOnlyPublic, _>(&ctx, repo),
+        create_derived_data_warmer::<MappedHgChangesetId, _>(ctx, repo),
+        create_derived_data_warmer::<FilenodesOnlyPublic, _>(ctx, repo),
     ];
 
     match find_all_underived_and_latest_derived(ctx, repo, bookmark, &warmers)
@@ -82,7 +89,7 @@ async fn do_main<'a>(
 
     let config_store = matches.config_store();
 
-    let RepoConfigs { repos, common } = args::load_repo_configs(config_store, &matches)?;
+    let RepoConfigs { repos, common } = args::load_repo_configs(config_store, matches)?;
 
     let location = match matches.subcommand() {
         (SUBCOMMAND_LOCAL_PATH, Some(sub)) => {

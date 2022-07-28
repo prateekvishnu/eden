@@ -15,17 +15,13 @@
     speed-test-upload-size = 1M
 """
 
-import os
 import socket
 
 from edenscm.mercurial import (
-    cmdutil,
     error,
     hg,
     httpclient,
     httpconnection,
-    progress,
-    pycompat,
     registrar,
     sslutil,
     util,
@@ -259,8 +255,7 @@ def drivespeedtests(ui, latency, upload, download):
     [
         ("", "connection", False, _("run connection tests")),
         ("", "speed", False, _("run speed tests")),
-    ]
-    + cmdutil.remoteopts,
+    ],
     _("[REMOTE]"),
 )
 def debugnetwork(ui, repo, remote="default", **opts):

@@ -201,6 +201,15 @@ Test pull:
   $ hg log -r . -T '{remotenames}\n'
   origin/foo
 
+- pull with -B and --update with wrong tweakdefaults dynamicconfig configuration
+  $ cat > "$TESTTMP/buggy.rc" << EOF
+  > [tweakdefaults]
+  > defaultdest=nonexisted
+  > EOF
+  $ HG_TEST_DYNAMICCONFIG="$TESTTMP/buggy.rc" hg pull origin -B master --update --config extensions.tweakdefaults=
+  pulling from file:/*/$TESTTMP/gitrepo/.git (glob)
+  1 files updated, 0 files merged, 0 files removed, 0 files unresolved
+
 - pull without arguments
   $ hg paths -a default "file://$TESTTMP/gitrepo/.git"
   $ hg pull
@@ -209,6 +218,20 @@ Test pull:
 - infinitepush compatibility
   $ hg pull --config extensions.infinitepush=
   pulling from file:/*/$TESTTMP/gitrepo/.git (glob)
+
+Test error message display:
+
+  $ mkdir $TESTTMP/errortest
+  $ cd $TESTTMP/errortest
+  $ hg clone --git "$TESTTMP/nonexisted"
+  abort: git command failed with exit code 128
+    git * (glob)
+      fatal: '$TESTTMP/nonexisted' does not appear to be a git repository
+      fatal: Could not read from remote repository.
+  
+      Please make sure you have the correct access rights
+      and the repository exists.
+  [255]
 
 Test clone with flags (--noupdate, --updaterev):
 
@@ -418,3 +441,22 @@ Rebase merging conflicts
   rebasing e03992db70e4 "B"
   merging f
 
+Test amend:
+
+  $ cd
+  $ hg init --git amend
+  $ cd amend
+  $ enable amend
+  $ echo 1 > file
+  $ hg commit -Aqm 'one'
+  $ echo 2 > file
+  $ hg commit -Aqm 'base'
+  $ echo 3 > file
+# This used to trigger a bug.
+  $ HGEDITOR=cat hg commit --amend --config committemplate.changeset='{diff()}'
+  diff --git a/file b/file
+  --- a/file
+  +++ b/file
+  @@ -1,1 +1,1 @@
+  -1
+  +3

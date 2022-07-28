@@ -5,7 +5,9 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Context, Error};
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use changeset_info::ChangesetInfo;
 use context::CoreContext;
@@ -110,7 +112,7 @@ pub async fn get_mapping_change_version(
     source_cs_id: ChangesetId,
 ) -> Result<Option<CommitSyncConfigVersion>, Error> {
     if tunables::tunables().get_allow_change_xrepo_mapping_extra() {
-        let cs_info = ChangesetInfo::derive(&ctx, repo, source_cs_id).await?;
+        let cs_info = ChangesetInfo::derive(ctx, repo, source_cs_id).await?;
 
         let maybe_mapping = cs_info
             .extra()

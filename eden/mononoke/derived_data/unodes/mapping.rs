@@ -5,20 +5,34 @@
  * GNU General Public License version 2.
  */
 
-use crate::derive::{derive_unode_manifest, derive_unode_manifest_stack};
-use anyhow::{anyhow, Context, Error, Result};
+use crate::derive::derive_unode_manifest;
+use crate::derive::derive_unode_manifest_stack;
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
-use blobstore::{Blobstore, BlobstoreGetData, Loadable};
+use blobstore::Blobstore;
+use blobstore::BlobstoreGetData;
+use blobstore::Loadable;
 use bytes::Bytes;
 use context::CoreContext;
-use derived_data::batch::{split_bonsais_in_linear_stacks, FileConflicts};
+use derived_data::batch::split_bonsais_in_linear_stacks;
+use derived_data::batch::FileConflicts;
 use derived_data::impl_bonsai_derived_via_manager;
-use derived_data_manager::{dependencies, BonsaiDerivable, DerivationContext};
-use futures::{future::try_join_all, TryFutureExt};
+use derived_data_manager::dependencies;
+use derived_data_manager::BonsaiDerivable;
+use derived_data_manager::DerivationContext;
+use futures::future::try_join_all;
+use futures::TryFutureExt;
 use metaconfig_types::UnodeVersion;
-use mononoke_types::{
-    BlobstoreBytes, BonsaiChangeset, ChangesetId, ContentId, FileType, MPath, ManifestUnodeId,
-};
+use mononoke_types::BlobstoreBytes;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::ChangesetId;
+use mononoke_types::ContentId;
+use mononoke_types::FileType;
+use mononoke_types::MPath;
+use mononoke_types::ManifestUnodeId;
 use slog::debug;
 use stats::prelude::*;
 use std::collections::HashMap;
@@ -120,7 +134,7 @@ impl BonsaiDerivable for RootUnodeManifestId {
                 stack
                     .parents
                     .into_iter()
-                    .map(|p| derivation_ctx.fetch_unknown_dependency::<Self>(&ctx, Some(&res), p)),
+                    .map(|p| derivation_ctx.fetch_unknown_dependency::<Self>(ctx, Some(&res), p)),
             )
             .await?;
             if let Some(item) = stack.stack_items.first() {
@@ -137,7 +151,7 @@ impl BonsaiDerivable for RootUnodeManifestId {
                 // we can't derive stack for a merge commit,
                 // so let's derive it without batching
                 for item in stack.stack_items {
-                    let bonsai = item.cs_id.load(&ctx, derivation_ctx.blobstore()).await?;
+                    let bonsai = item.cs_id.load(ctx, derivation_ctx.blobstore()).await?;
                     let parents = derivation_ctx
                         .fetch_unknown_parents(ctx, Some(&res), &bonsai)
                         .await?;
@@ -242,15 +256,25 @@ mod test {
     use derived_data_manager::BatchDeriveOptions;
     use derived_data_test_utils::iterate_all_manifest_entries;
     use fbinit::FacebookInit;
+    use fixtures::BranchEven;
+    use fixtures::BranchUneven;
+    use fixtures::BranchWide;
+    use fixtures::Linear;
+    use fixtures::ManyDiamonds;
+    use fixtures::ManyFilesDirs;
+    use fixtures::MergeEven;
+    use fixtures::MergeUneven;
     use fixtures::TestRepoFixture;
-    use fixtures::{
-        BranchEven, BranchUneven, BranchWide, Linear, ManyDiamonds, ManyFilesDirs, MergeEven,
-        MergeUneven, UnsharedMergeEven, UnsharedMergeUneven,
-    };
-    use futures::{compat::Stream01CompatExt, Future, Stream, TryStreamExt};
+    use fixtures::UnsharedMergeEven;
+    use fixtures::UnsharedMergeUneven;
+    use futures::compat::Stream01CompatExt;
+    use futures::Future;
+    use futures::Stream;
+    use futures::TryStreamExt;
     use manifest::Entry;
     use mercurial_derived_data::DeriveHgChangeset;
-    use mercurial_types::{HgChangesetId, HgManifestId};
+    use mercurial_types::HgChangesetId;
+    use mercurial_types::HgManifestId;
     use mononoke_types::ChangesetId;
     use repo_derived_data::RepoDerivedDataRef;
     use revset::AncestorsNodeStream;
@@ -333,7 +357,7 @@ mod test {
 
         let commits_desc_to_anc = all_commits_descendants_to_ancestors(ctx.clone(), repo.clone())
             .and_then(move |(bcs_id, hg_cs_id)| async move {
-                let unode_id = verify_unode(&ctx, &repo, bcs_id, hg_cs_id).await?;
+                let unode_id = verify_unode(ctx, repo, bcs_id, hg_cs_id).await?;
                 Ok((bcs_id, hg_cs_id, unode_id))
             })
             .try_collect::<Vec<_>>()
@@ -352,11 +376,11 @@ mod test {
         let manager = repo.repo_derived_data().manager();
 
         manager
-            .backfill_batch::<RootUnodeManifestId>(&ctx, csids.clone(), options, None)
+            .backfill_batch::<RootUnodeManifestId>(ctx, csids.clone(), options, None)
             .await
             .unwrap();
         let batch_derived = manager
-            .fetch_derived_batch::<RootUnodeManifestId>(&ctx, csids, None)
+            .fetch_derived_batch::<RootUnodeManifestId>(ctx, csids, None)
             .await
             .unwrap();
 

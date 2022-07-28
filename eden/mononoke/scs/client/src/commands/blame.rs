@@ -7,59 +7,82 @@
 
 //! Fetch the blame of a file
 
-use anyhow::{format_err, Context, Error};
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
-use futures::{future, stream};
-use futures_util::stream::StreamExt;
+use anyhow::format_err;
+use anyhow::Result;
+use clap::Parser;
 use maplit::btreeset;
 use serde_json::json;
 use source_control::types as thrift;
 use std::fmt::Write as _;
 use std::io::Write;
-use std::str::FromStr;
-use unicode_truncate::{Alignment, UnicodeTruncateStr};
+use unicode_truncate::Alignment;
+use unicode_truncate::UnicodeTruncateStr;
 use unicode_width::UnicodeWidthStr;
 
-use crate::args::commit_id::{
-    add_commit_id_args, add_scheme_args, get_commit_id, get_request_schemes, get_schemes,
-    map_commit_ids, resolve_commit_id,
-};
-use crate::args::path::{add_path_args, get_path};
-use crate::args::repo::{add_repo_args, get_repo_specifier};
-use crate::connection::Connection;
+use crate::args::commit_id::map_commit_ids;
+use crate::args::commit_id::resolve_commit_id;
+use crate::args::commit_id::CommitIdArgs;
+use crate::args::commit_id::SchemeArgs;
+use crate::args::path::PathArgs;
+use crate::args::repo::RepoArgs;
 use crate::lib::commit_id::render_commit_id;
 use crate::lib::datetime;
-use crate::render::{Render, RenderStream};
-
-pub(super) const NAME: &str = "blame";
-
-const ARG_USER: &str = "USER";
-const ARG_DATE: &str = "DATE";
-const ARG_DATE_SHORT: &str = "DATE_SHORT";
-const ARG_LINE_NUMBER: &str = "LINE_NUMBER";
-const ARG_ORIGIN_LINE_NUMBER: &str = "ORIGIN_LINE_NUMBER";
-const ARG_ORIGIN_PATH: &str = "ORIGIN_PATH";
-const ARG_PARENT: &str = "PARENT";
-const ARG_PARENT_INDEX: &str = "PARENT_INDEX";
-const ARG_PARENT_LINE_RANGE: &str = "PARENT_LINE_RANGE";
-const ARG_TITLE: &str = "TITLE";
-const ARG_TITLE_WIDTH: &str = "TITLE_WIDTH";
-const ARG_COMMIT_NUMBER: &str = "COMMIT_NUMBER";
-const ARG_NO_COMMIT_ID: &str = "NO_COMMIT_ID";
+use crate::render::Render;
+use crate::ScscApp;
 
 const DEFAULT_TITLE_WIDTH: usize = 32;
-const DEFAULT_TITLE_WIDTH_STR: &str = "32";
 
-pub(super) fn make_subcommand<'a, 'b>() -> App<'a, 'b> {
-    let cmd = SubCommand::with_name(NAME)
-        .about("Fetch the blame of a file")
-        .setting(AppSettings::ColoredHelp);
-    let cmd = add_repo_args(cmd);
-    let cmd = add_scheme_args(cmd);
-    let cmd = add_commit_id_args(cmd);
-    let cmd = add_path_args(cmd);
-    let cmd = add_args(cmd);
-    cmd
+#[derive(Parser)]
+/// Fetch the blame of a file
+pub(super) struct CommandArgs {
+    #[clap(flatten)]
+    repo_args: RepoArgs,
+    #[clap(flatten)]
+    scheme_args: SchemeArgs,
+    #[clap(flatten)]
+    commit_id_args: CommitIdArgs,
+    #[clap(flatten)]
+    path_args: PathArgs,
+
+    #[clap(long)]
+    /// Show blame for the first parent of the commit
+    parent: bool,
+    #[clap(long, conflicts_with = "parent")]
+    /// Show blame for the Nth parent of the commit
+    parent_index: Option<usize>,
+    #[clap(long, short)]
+    /// List the author
+    user: bool,
+    #[clap(long, short)]
+    /// List the date
+    date: bool,
+    #[clap(short = 'q')]
+    /// List the date in short format
+    date_short: bool,
+    #[clap(long, short)]
+    /// Show current line number
+    line_number: bool,
+    #[clap(long, short)]
+    /// Show origin line number
+    origin_line_number: bool,
+    #[clap(long, short = 'O')]
+    /// Show origin path if different from current path
+    origin_path: bool,
+    #[clap(long, short = 'P')]
+    /// Show the line range in the parent this line replaces
+    parent_line_range: bool,
+    #[clap(long, short = 'T')]
+    /// Show the title (first line of the commit message) of the blamed changeset
+    title: bool,
+    #[clap(long, default_value_t = DEFAULT_TITLE_WIDTH)]
+    /// Set thc maxiucbdrkccuefmum width of the title (if shown)
+    title_width: usize,
+    #[clap(long, short = 'n')]
+    /// Show numbers for commits (specific to this blame revision)
+    commit_number: bool,
+    #[clap(long)]
+    /// Do not show commit ids
+    no_commit_id: bool,
 }
 
 struct BlameOut {
@@ -67,15 +90,12 @@ struct BlameOut {
 }
 
 impl Render for BlameOut {
-    fn render(&self, matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
-        let schemes = get_schemes(matches);
-        let path = get_path(matches).expect("path is required");
-        let title_width = matches
-            .value_of(ARG_TITLE_WIDTH)
-            .map(usize::from_str)
-            .transpose()
-            .context("Invalid title width")?
-            .unwrap_or(DEFAULT_TITLE_WIDTH);
+    type Args = CommandArgs;
+
+    fn render(&self, args: &Self::Args, w: &mut dyn Write) -> Result<()> {
+        let schemes = args.scheme_args.scheme_string_set();
+        let path = args.path_args.path.clone();
+        let title_width = args.title_width;
         let number_width = |n| ((n + 1) as f32).log10().ceil() as usize;
 
         match self.blame {
@@ -133,7 +153,7 @@ impl Render for BlameOut {
 
                 for line in blame.lines.iter() {
                     let mut separator = "";
-                    if matches.is_present(ARG_USER) {
+                    if args.user {
                         let author = blame.authors[line.author_index as usize].as_str();
                         write!(
                             w,
@@ -142,7 +162,7 @@ impl Render for BlameOut {
                         )?;
                         separator = " ";
                     }
-                    if matches.is_present(ARG_COMMIT_NUMBER) {
+                    if args.commit_number {
                         if let Some(commit_numbers) = &blame.commit_numbers {
                             let commit_number =
                                 format!("#{}", commit_numbers[line.commit_id_index as usize]);
@@ -156,7 +176,7 @@ impl Render for BlameOut {
                         }
                         separator = " ";
                     }
-                    if !matches.is_present(ARG_NO_COMMIT_ID) {
+                    if !args.no_commit_id {
                         write!(w, "{}", separator)?;
                         render_commit_id(
                             None,
@@ -170,9 +190,9 @@ impl Render for BlameOut {
                         )?;
                         separator = " ";
                     }
-                    if matches.is_present(ARG_DATE) || matches.is_present(ARG_DATE_SHORT) {
+                    if args.date || args.date_short {
                         let blame_date = datetime(&blame.dates[line.date_index as usize]);
-                        let blame_date_formatted = if matches.is_present(ARG_DATE_SHORT) {
+                        let blame_date_formatted = if args.date_short {
                             blame_date.format("%F")
                         } else {
                             blame_date.format("%+")
@@ -180,10 +200,10 @@ impl Render for BlameOut {
                         write!(w, "{}{}", separator, blame_date_formatted)?;
                         separator = " ";
                     }
-                    if separator != "" {
+                    if !separator.is_empty() {
                         separator = ":";
                     }
-                    if matches.is_present(ARG_TITLE) {
+                    if args.title {
                         let title = match line.title_index {
                             Some(title_index) => match blame.titles.as_ref() {
                                 Some(titles) => titles[title_index as usize].as_str(),
@@ -199,7 +219,7 @@ impl Render for BlameOut {
                         )?;
                         separator = ":";
                     }
-                    if matches.is_present(ARG_PARENT_LINE_RANGE) {
+                    if args.parent_line_range {
                         let mut plr = String::with_capacity(max_parent_line_range_width);
                         if let Some(parent_index) = line.parent_index {
                             if parent_index != 0 {
@@ -226,7 +246,7 @@ impl Render for BlameOut {
                         )?;
                         separator = ":";
                     }
-                    if matches.is_present(ARG_ORIGIN_PATH) {
+                    if args.origin_path {
                         let origin_path = blame.paths[line.path_index as usize].as_str();
                         write!(
                             w,
@@ -240,7 +260,7 @@ impl Render for BlameOut {
                         )?;
                         separator = ":";
                     }
-                    if matches.is_present(ARG_ORIGIN_LINE_NUMBER) {
+                    if args.origin_line_number {
                         write!(
                             w,
                             "{}{:>width$}",
@@ -250,7 +270,7 @@ impl Render for BlameOut {
                         )?;
                         separator = ":";
                     }
-                    if matches.is_present(ARG_LINE_NUMBER) {
+                    if args.line_number {
                         write!(
                             w,
                             "{}{:>width$}",
@@ -260,7 +280,7 @@ impl Render for BlameOut {
                         )?;
                         separator = ":";
                     }
-                    if separator != "" {
+                    if !separator.is_empty() {
                         separator = ": ";
                     }
                     write!(
@@ -278,11 +298,11 @@ impl Render for BlameOut {
         }
     }
 
-    fn render_json(&self, matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    fn render_json(&self, args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         match self.blame {
             thrift::Blame::blame_compact(ref blame) => {
                 let mut lines = Vec::new();
-                let use_short_date = matches.is_present(ARG_DATE_SHORT);
+                let use_short_date = args.date_short;
                 for line in blame.lines.iter() {
                     let blame_date = datetime(&blame.dates[line.date_index as usize]);
                     let formatted_blame_date = if use_short_date {
@@ -349,13 +369,10 @@ impl Render for BlameOut {
     }
 }
 
-pub(super) async fn run(
-    matches: &ArgMatches<'_>,
-    connection: Connection,
-) -> Result<RenderStream, Error> {
-    let repo = get_repo_specifier(matches).expect("repository is required");
-    let commit_id = get_commit_id(matches)?;
-    let id = resolve_commit_id(&connection, &repo, &commit_id).await?;
+pub(super) async fn run(app: ScscApp, args: CommandArgs) -> Result<()> {
+    let repo = args.repo_args.clone().into_repo_specifier();
+    let commit_id = args.commit_id_args.clone().into_commit_id();
+    let id = resolve_commit_id(&app.connection, &repo, &commit_id).await?;
 
     let mut commit = thrift::CommitSpecifier {
         repo,
@@ -363,14 +380,10 @@ pub(super) async fn run(
         ..Default::default()
     };
 
-    let parent_index = if matches.is_present(ARG_PARENT) {
+    let parent_index = if args.parent {
         Some(0)
     } else {
-        matches
-            .value_of(ARG_PARENT_INDEX)
-            .map(usize::from_str)
-            .transpose()
-            .context("Invalid parent index")?
+        args.parent_index
     };
 
     if let Some(parent_index) = parent_index {
@@ -378,12 +391,11 @@ pub(super) async fn run(
             identity_schemes: btreeset! { thrift::CommitIdentityScheme::BONSAI },
             ..Default::default()
         };
-        let response = connection.commit_info(&commit, &params).await?;
+        let response = app.connection.commit_info(&commit, &params).await?;
         commit.id.clone_from(
             response
                 .parents
-                .iter()
-                .nth(parent_index)
+                .get(parent_index)
                 .ok_or_else(|| {
                     format_err!("Commit does not have a parent with index {}", parent_index)
                 })?
@@ -396,14 +408,14 @@ pub(super) async fn run(
                 })?,
         );
     }
-    let path = get_path(matches).expect("path is required");
+    let path = args.path_args.path.clone();
     let commit_and_path = thrift::CommitPathSpecifier {
         commit,
         path,
         ..Default::default()
     };
 
-    let identity_schemes = get_request_schemes(&matches);
+    let identity_schemes = args.scheme_args.clone().into_request_schemes();
 
     let params = thrift::CommitPathBlameParams {
         format: thrift::BlameFormat::COMPACT,
@@ -416,92 +428,16 @@ pub(super) async fn run(
         }),
         ..Default::default()
     };
-    let response = connection
+    let response = app
+        .connection
         .commit_path_blame(&commit_and_path, &params)
         .await?;
-    let output: Box<dyn Render> = Box::new(BlameOut {
-        blame: response.blame,
-    });
-
-    Ok(stream::once(future::ok(output)).boxed())
-}
-
-fn add_args<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
-    app.arg(
-        Arg::with_name(ARG_USER)
-            .short("u")
-            .long("user")
-            .help("List the author"),
-    )
-    .arg(
-        Arg::with_name(ARG_DATE)
-            .short("d")
-            .long("date")
-            .help("List the date"),
-    )
-    .arg(
-        Arg::with_name(ARG_DATE_SHORT)
-            .short("q")
-            .help("List the date in short format"),
-    )
-    .arg(
-        Arg::with_name(ARG_LINE_NUMBER)
-            .short("l")
-            .long("line-number")
-            .help("Show current line number"),
-    )
-    .arg(
-        Arg::with_name(ARG_ORIGIN_LINE_NUMBER)
-            .short("o")
-            .long("origin-line-number")
-            .help("Show origin line number"),
-    )
-    .arg(
-        Arg::with_name(ARG_ORIGIN_PATH)
-            .short("O")
-            .long("origin-path")
-            .help("Show origin path if different from current path"),
-    )
-    .arg(
-        Arg::with_name(ARG_PARENT)
-            .long("parent")
-            .help("Show blame for the first parent of the commit"),
-    )
-    .arg(
-        Arg::with_name(ARG_PARENT_INDEX)
-            .long("parent-index")
-            .takes_value(true)
-            .help("Show blame for the Nth parent of the commit")
-            .conflicts_with(ARG_PARENT),
-    )
-    .arg(
-        Arg::with_name(ARG_PARENT_LINE_RANGE)
-            .short("P")
-            .long("parent-line-range")
-            .help("Show the line range in the parent this line replaces"),
-    )
-    .arg(
-        Arg::with_name(ARG_TITLE)
-            .short("T")
-            .long("title")
-            .help("Show the title (first line of the commit message) of the blamed changeset"),
-    )
-    .arg(
-        Arg::with_name(ARG_TITLE_WIDTH)
-            .long("title-width")
-            .help("Set the maximum width of the title (if shown)")
-            .takes_value(true)
-            .default_value(DEFAULT_TITLE_WIDTH_STR),
-    )
-    .arg(
-        Arg::with_name(ARG_COMMIT_NUMBER)
-            .short("n")
-            .long("commit-number")
-            .help("Show numbers for commits (specific to this blame revision)"),
-    )
-    .arg(
-        Arg::with_name(ARG_NO_COMMIT_ID)
-            .long("no-commit-id")
-            .help("Do not show commit ids"),
-    )
+    app.target
+        .render_one(
+            &args,
+            BlameOut {
+                blame: response.blame,
+            },
+        )
+        .await
 }

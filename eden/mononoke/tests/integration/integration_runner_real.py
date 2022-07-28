@@ -38,13 +38,19 @@ DISABLE_ALL_NETWORK_ACCESS_SKIPLIST: Set[str] = {
     "test-hook-verify-integrity.t",
     "test-bypass-readonly-acl.t",
     # Components linked with SM library invoke some network calls to loopback
-    # address for configerator and ODS even without being part of actual execution
-    # Whitelisting the below tests until RCA is completed for SM integration so
+    # address for configerator and ODS even without being part of actual execution.
+    # Skip the below tests until RCA is completed for SM integration so
     # that integration tests do not time-out due to failed network call retries.
     # TODO(rajshar): Investigate root cause for network calls from SM Client.
+    # Post: https://fb.workplace.com/groups/sm.users/permalink/2490367831097595/
     "test-new-walker-checkpoint.t",
     "test-new-walker-count-objects.t",
     "test-new-walker-count-public-chunked.t",
+    "test-mirror-hg-commits-basic.t",
+    "test-backfill-derived-data.t",
+    "test-mononoke-hg-sync-job.t",
+    # TOOD(simonfaR) Investigate why this fails, even though it should never talk to SMC
+    "test-remote-gitimport.t",
 }
 
 

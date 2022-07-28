@@ -11,22 +11,97 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use manifest::Manifest;
+use manifest_tree::TreeManifest;
 use parking_lot::Mutex;
+use parking_lot::RwLock;
 use pathmatcher::ExactMatcher;
 use pathmatcher::Matcher;
-use status::{Status, StatusBuilder};
+use status::Status;
+use status::StatusBuilder;
+use storemodel::ReadFileContents;
 use treestate::filestate::StateFlags;
 use treestate::treestate::TreeState;
 use types::RepoPathBuf;
 
+use crate::edenfs::EdenFileSystem;
+use crate::filechangedetector::HgModifiedTime;
 use crate::filesystem::ChangeType;
+use crate::filesystem::PendingChangeResult;
+use crate::filesystem::PhysicalFileSystem;
+use crate::watchmanfs::WatchmanFileSystem;
+
+type ArcReadFileContents = Arc<dyn ReadFileContents<Error = anyhow::Error> + Send + Sync>;
+
+pub enum FileSystem {
+    Normal(PhysicalFileSystem),
+    Watchman(WatchmanFileSystem),
+    Eden(EdenFileSystem),
+}
+
+impl FileSystem {
+    pub fn pending_changes<M: Matcher + Clone + Send + Sync + 'static>(
+        &self,
+        manifest: Arc<RwLock<TreeManifest>>,
+        store: ArcReadFileContents,
+        treestate: Arc<Mutex<TreeState>>,
+        last_write: HgModifiedTime,
+        matcher: M,
+        _list_unknown: bool,
+    ) -> Result<Box<dyn Iterator<Item = Result<PendingChangeResult>>>> {
+        match self {
+            Self::Normal(fs) => {
+                fs.pending_changes(manifest, store, treestate, matcher, false, last_write, 8)
+            }
+            Self::Watchman(fs) => fs.pending_changes(treestate, last_write, manifest, store),
+            Self::Eden(fs) => fs.pending_changes(),
+        }
+    }
+}
+
+pub fn status<M: Matcher + Clone + Send + Sync + 'static>(
+    filesystem: FileSystem,
+    manifest: Arc<RwLock<TreeManifest>>,
+    store: ArcReadFileContents,
+    treestate: Arc<Mutex<TreeState>>,
+    last_write: HgModifiedTime,
+    matcher: M,
+    _list_unknown: bool,
+) -> Result<Status> {
+    let pending_changes = filesystem
+        .pending_changes(
+            manifest.clone(),
+            store,
+            treestate.clone(),
+            last_write,
+            matcher.clone(),
+            _list_unknown,
+        )?
+        .filter_map(|result| match result {
+            Ok(PendingChangeResult::File(change_type)) => {
+                match matcher.matches_file(change_type.get_path()) {
+                    Ok(true) => Some(Ok(change_type)),
+                    Err(e) => Some(Err(e)),
+                    _ => None,
+                }
+            }
+            Err(e) => Some(Err(e)),
+            _ => None,
+        });
+
+    compute_status(
+        &*manifest.read(),
+        treestate,
+        pending_changes,
+        matcher.clone(),
+    )
+}
 
 /// Compute the status of the working copy relative to the current commit.
 #[allow(unused_variables)]
 pub fn compute_status<M: Matcher + Clone + Send + Sync + 'static>(
     manifest: &impl Manifest,
     treestate: Arc<Mutex<TreeState>>,
-    pending_changes: impl Iterator<Item = ChangeType>,
+    pending_changes: impl Iterator<Item = Result<ChangeType>>,
     matcher: M,
 ) -> Result<Status> {
     let mut modified = vec![];
@@ -44,8 +119,9 @@ pub fn compute_status<M: Matcher + Clone + Send + Sync + 'static>(
     let mut manifest_files = HashMap::<RepoPathBuf, (bool, bool)>::new();
     for change in pending_changes {
         let (path, is_deleted) = match change {
-            ChangeType::Changed(path) => (path, false),
-            ChangeType::Deleted(path) => (path, true),
+            Ok(ChangeType::Changed(path)) => (path, false),
+            Ok(ChangeType::Deleted(path)) => (path, true),
+            Err(e) => return Err(e),
         };
 
         match treestate.get(&path)? {
@@ -324,9 +400,9 @@ mod tests {
         let changes = changes.iter().map(|&(path, is_deleted)| {
             let path = RepoPathBuf::from_string(path.to_string()).expect("path");
             if is_deleted {
-                ChangeType::Deleted(path)
+                Ok(ChangeType::Deleted(path))
             } else {
-                ChangeType::Changed(path)
+                Ok(ChangeType::Changed(path))
             }
         });
 

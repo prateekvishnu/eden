@@ -5,23 +5,39 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Error};
+use anyhow::anyhow;
+use anyhow::Error;
 use async_trait::async_trait;
 use blobrepo::BlobRepo;
 use blobstore::Blobstore;
-use bulkops::{Direction, PublicChangesetBulkFetch};
-use changeset_fetcher::{ArcChangesetFetcher, ChangesetFetcher};
+use bulkops::Direction;
+use bulkops::PublicChangesetBulkFetch;
+use changeset_fetcher::ArcChangesetFetcher;
+use changeset_fetcher::ChangesetFetcher;
 use changesets::ChangesetEntry;
-use clap_old::{App, Arg, ArgMatches, SubCommand};
-use cmdlib::args::{self, MononokeMatches};
-use context::{CoreContext, SessionClass};
+use clap_old::App;
+use clap_old::Arg;
+use clap_old::ArgMatches;
+use clap_old::SubCommand;
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
+use context::CoreContext;
+use context::SessionClass;
 use fbinit::FacebookInit;
 use fbthrift::compact_protocol;
-use futures::{future::try_join, TryStreamExt};
-use mononoke_types::{BlobstoreBytes, ChangesetId, Generation};
+use futures::future::try_join;
+use futures::TryStreamExt;
+use mononoke_types::BlobstoreBytes;
+use mononoke_types::ChangesetId;
+use mononoke_types::Generation;
 use phases::PhasesArc;
-use skiplist::{deserialize_skiplist_index, sparse, SkiplistIndex, SkiplistNodeType};
-use slog::{debug, info, Logger};
+use skiplist::deserialize_skiplist_index;
+use skiplist::sparse;
+use skiplist::SkiplistIndex;
+use skiplist::SkiplistNodeType;
+use slog::debug;
+use slog::info;
+use slog::Logger;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -96,7 +112,7 @@ pub async fn subcommand_skiplist<'a>(
             // completes fully.
             ctx.session_mut()
                 .override_session_class(SessionClass::Background);
-            let repo = args::open_repo(fb, &logger, &matches).await?;
+            let repo = args::open_repo(fb, &logger, matches).await?;
             build_skiplist_index(&ctx, &repo, key, &logger, rebuild, exponent)
                 .await
                 .map_err(SubcommandError::Error)
@@ -108,7 +124,7 @@ pub async fn subcommand_skiplist<'a>(
                 .to_string();
 
             let ctx = CoreContext::test_mock(fb);
-            let repo = args::open_repo(fb, &logger, &matches).await?;
+            let repo = args::open_repo(fb, &logger, matches).await?;
             let maybe_index = read_skiplist_index(ctx.clone(), repo, key, logger.clone()).await?;
             match maybe_index {
                 Some(index) => {
@@ -177,7 +193,7 @@ async fn build_skiplist_index<'a, S: ToString>(
         let mut index = skiplist_index.get_all_skip_edges();
         let max_skip = NonZeroU64::new(2u64.pow(skiplist_depth - 1))
             .ok_or_else(|| anyhow!("invalid skiplist depth"))?;
-        sparse::update_sparse_skiplist(&ctx, heads, &mut index, max_skip, &cs_fetcher).await?;
+        sparse::update_sparse_skiplist(ctx, heads, &mut index, max_skip, &cs_fetcher).await?;
         index
     };
 
@@ -200,7 +216,7 @@ async fn build_skiplist_index<'a, S: ToString>(
 
     debug!(logger, "storing {} bytes", bytes.len());
     blobstore
-        .put(&ctx, key, BlobstoreBytes::from_bytes(bytes))
+        .put(ctx, key, BlobstoreBytes::from_bytes(bytes))
         .await
 }
 
@@ -210,7 +226,7 @@ async fn fetch_all_public_changesets_and_build_changeset_fetcher(
 ) -> Result<ArcChangesetFetcher, Error> {
     let fetcher = PublicChangesetBulkFetch::new(repo.get_changesets_object(), repo.phases_arc());
     let fetched_changesets = fetcher
-        .fetch(&ctx, Direction::OldestFirst)
+        .fetch(ctx, Direction::OldestFirst)
         .try_collect::<Vec<_>>()
         .await?;
 

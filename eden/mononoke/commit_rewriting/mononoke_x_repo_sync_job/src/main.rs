@@ -41,40 +41,118 @@ use crate::sync::SyncResult;
 /// each commit into the large repo. Note that some bookmarks called "common_pushrebase_bookmarks"
 /// are treated specially, see comments in the code for more details
 /// ```
-use anyhow::{format_err, Error, Result};
+use anyhow::format_err;
+/// Mononoke Cross Repo sync job
+///
+/// This is a special job used to tail "small" Mononoke repo into "large" Mononoke repo when
+/// small repo is a source of truth (i.e. "hg push" go directly to small repo).
+/// At the moment there two main limitations:
+/// 1) Syncing of some merge commits is not supported
+/// 2) Root commits and their descendants that are not merged into a main line
+/// aren't going to be synced. For example,
+///
+/// ```text
+///   O <- main bookmark
+///   |
+///   O
+///   |   A <- new_bookmark, that added a new root commit
+///   O   |
+///    ...
+///
+///   Commit A, its ancestors and new_bookmark aren't going to be synced to the large repo.
+///   However if commit A gets merged into a mainline e.g.
+///   O <- main bookmark
+///   | \
+///   O  \
+///   |   A <- new_bookmark, that added a new root commit
+///   O   |
+///    ...
+///
+///   Then commit A and all of its ancestors WILL be synced to the large repo, however
+///   new_bookmark still WILL NOT be synced to the large repo.
+///
+/// This job does tailing by following bookmark update log of the small repo and replaying
+/// each commit into the large repo. Note that some bookmarks called "common_pushrebase_bookmarks"
+/// are treated specially, see comments in the code for more details
+/// ```
+use anyhow::Error;
+/// Mononoke Cross Repo sync job
+///
+/// This is a special job used to tail "small" Mononoke repo into "large" Mononoke repo when
+/// small repo is a source of truth (i.e. "hg push" go directly to small repo).
+/// At the moment there two main limitations:
+/// 1) Syncing of some merge commits is not supported
+/// 2) Root commits and their descendants that are not merged into a main line
+/// aren't going to be synced. For example,
+///
+/// ```text
+///   O <- main bookmark
+///   |
+///   O
+///   |   A <- new_bookmark, that added a new root commit
+///   O   |
+///    ...
+///
+///   Commit A, its ancestors and new_bookmark aren't going to be synced to the large repo.
+///   However if commit A gets merged into a mainline e.g.
+///   O <- main bookmark
+///   | \
+///   O  \
+///   |   A <- new_bookmark, that added a new root commit
+///   O   |
+///    ...
+///
+///   Then commit A and all of its ancestors WILL be synced to the large repo, however
+///   new_bookmark still WILL NOT be synced to the large repo.
+///
+/// This job does tailing by following bookmark update log of the small repo and replaying
+/// each commit into the large repo. Note that some bookmarks called "common_pushrebase_bookmarks"
+/// are treated specially, see comments in the code for more details
+/// ```
+use anyhow::Result;
 use backsyncer::format_counter as format_backsyncer_counter;
 use blobrepo::BlobRepo;
-use bookmarks::{BookmarkName, Freshness};
+use bookmarks::BookmarkName;
+use bookmarks::Freshness;
 use cached_config::ConfigStore;
 use clap_old::ArgMatches;
-use cmdlib::{
-    args::{self, MononokeClapApp, MononokeMatches},
-    helpers, monitoring,
-};
+use cmdlib::args;
+use cmdlib::args::MononokeClapApp;
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers;
+use cmdlib::monitoring;
 use cmdlib_x_repo::create_commit_syncer_from_matches;
 use context::CoreContext;
-use cross_repo_sync::{
-    types::{Source, Target},
-    CommitSyncer,
-};
+use cross_repo_sync::types::Source;
+use cross_repo_sync::types::Target;
+use cross_repo_sync::CommitSyncer;
 use derived_data_utils::derive_data_for_csids;
 use fbinit::FacebookInit;
-use futures::{
-    future::{self, try_join},
-    stream::{self, TryStreamExt},
-    StreamExt,
-};
+use futures::future;
+use futures::future::try_join;
+use futures::stream;
+use futures::stream::TryStreamExt;
+use futures::StreamExt;
 use futures_stats::TimedFutureExt;
-use live_commit_sync_config::{CfgrLiveCommitSyncConfig, LiveCommitSyncConfig};
+use live_commit_sync_config::CfgrLiveCommitSyncConfig;
+use live_commit_sync_config::LiveCommitSyncConfig;
 use mononoke_api_types::InnerRepo;
 use mononoke_hg_sync_job_helper_lib::wait_for_latest_log_id_to_be_synced;
-use mononoke_types::{ChangesetId, RepositoryId};
-use mutable_counters::{ArcMutableCounters, MutableCountersArc, MutableCountersRef};
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
+use mutable_counters::ArcMutableCounters;
+use mutable_counters::MutableCountersArc;
+use mutable_counters::MutableCountersRef;
 use regex::Regex;
 use scuba_ext::MononokeScubaSampleBuilder;
 use skiplist::SkiplistIndex;
-use slog::{debug, error, info, warn};
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use slog::debug;
+use slog::error;
+use slog::info;
+use slog::warn;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Duration;
 use synced_commit_mapping::SyncedCommitMapping;
 
 mod cli;
@@ -82,13 +160,23 @@ mod reporting;
 mod setup;
 mod sync;
 
-use crate::cli::{
-    create_app, ARG_BACKSYNC_BACKPRESSURE_REPOS_IDS, ARG_BOOKMARK_REGEX, ARG_CATCH_UP_ONCE,
-    ARG_DERIVED_DATA_TYPES, ARG_HG_SYNC_BACKPRESSURE, ARG_ONCE, ARG_TAIL, ARG_TARGET_BOOKMARK,
-};
-use crate::reporting::{add_common_fields, log_bookmark_update_result, log_noop_iteration};
-use crate::setup::{get_scuba_sample, get_sleep_duration, get_starting_commit};
-use crate::sync::{sync_commit_and_ancestors, sync_single_bookmark_update_log};
+use crate::cli::create_app;
+use crate::cli::ARG_BACKSYNC_BACKPRESSURE_REPOS_IDS;
+use crate::cli::ARG_BOOKMARK_REGEX;
+use crate::cli::ARG_CATCH_UP_ONCE;
+use crate::cli::ARG_DERIVED_DATA_TYPES;
+use crate::cli::ARG_HG_SYNC_BACKPRESSURE;
+use crate::cli::ARG_ONCE;
+use crate::cli::ARG_TAIL;
+use crate::cli::ARG_TARGET_BOOKMARK;
+use crate::reporting::add_common_fields;
+use crate::reporting::log_bookmark_update_result;
+use crate::reporting::log_noop_iteration;
+use crate::setup::get_scuba_sample;
+use crate::setup::get_sleep_duration;
+use crate::setup::get_starting_commit;
+use crate::sync::sync_commit_and_ancestors;
+use crate::sync::sync_single_bookmark_update_log;
 
 fn print_error(ctx: CoreContext, error: &Error) {
     error!(ctx.logger(), "{}", error);
@@ -163,7 +251,7 @@ async fn run_in_tailing_mode<M: SyncedCommitMapping + Clone + 'static>(
         TailingArgs::CatchUpOnce(commit_syncer) => {
             let scuba_sample = MononokeScubaSampleBuilder::with_discard();
             tail(
-                &ctx,
+                ctx,
                 &commit_syncer,
                 &target_mutable_counters,
                 scuba_sample,
@@ -197,7 +285,7 @@ async fn run_in_tailing_mode<M: SyncedCommitMapping + Clone + 'static>(
                 }
 
                 let synced_something = tail(
-                    &ctx,
+                    ctx,
                     &commit_syncer,
                     &target_mutable_counters,
                     scuba_sample.clone(),
@@ -237,10 +325,10 @@ async fn tail<M: SyncedCommitMapping + Clone + 'static>(
 ) -> Result<bool, Error> {
     let source_repo = commit_syncer.get_source_repo();
     let bookmark_update_log = source_repo.bookmark_update_log();
-    let counter = format_counter(&commit_syncer);
+    let counter = format_counter(commit_syncer);
 
     let maybe_start_id = target_mutable_counters.get_counter(ctx, &counter).await?;
-    let start_id = maybe_start_id.ok_or(format_err!("counter not found"))?;
+    let start_id = maybe_start_id.ok_or_else(|| format_err!("counter not found"))?;
     let limit = 10;
     let log_entries = bookmark_update_log
         .read_next_bookmark_log_entries(ctx.clone(), start_id as u64, limit, Freshness::MaybeStale)
@@ -272,24 +360,24 @@ async fn tail<M: SyncedCommitMapping + Clone + 'static>(
 
             if !skip {
                 let (stats, res) = sync_single_bookmark_update_log(
-                    &ctx,
-                    &commit_syncer,
+                    ctx,
+                    commit_syncer,
                     entry,
                     source_skiplist_index,
                     target_skiplist_index,
-                    &common_pushrebase_bookmarks,
+                    common_pushrebase_bookmarks,
                     scuba_sample.clone(),
                 )
                 .timed()
                 .await;
 
-                log_bookmark_update_result(&ctx, entry_id, scuba_sample.clone(), &res, stats);
+                log_bookmark_update_result(ctx, entry_id, scuba_sample.clone(), &res, stats);
                 let maybe_synced_css = res?;
 
                 if let SyncResult::Synced(synced_css) = maybe_synced_css {
                     derive_data_for_csids(
-                        &ctx,
-                        &commit_syncer.get_target_repo(),
+                        ctx,
+                        commit_syncer.get_target_repo(),
                         synced_css,
                         derived_data_types,
                     )?
@@ -400,21 +488,21 @@ async fn run<'a>(
     matches: &'a MononokeMatches<'a>,
 ) -> Result<(), Error> {
     let config_store = matches.config_store();
-    let mut scuba_sample = get_scuba_sample(ctx.clone(), &matches);
+    let mut scuba_sample = get_scuba_sample(ctx.clone(), matches);
 
-    let source_repo_id = args::get_source_repo_id(config_store, &matches)?;
-    let target_repo_id = args::get_target_repo_id(config_store, &matches)?;
+    let source_repo_id = args::get_source_repo_id(config_store, matches)?;
+    let target_repo_id = args::get_target_repo_id(config_store, matches)?;
 
     let logger = ctx.logger();
-    let source_repo = args::open_repo_with_repo_id(fb, &logger, source_repo_id, &matches);
-    let target_repo = args::open_repo_with_repo_id(fb, &logger, target_repo_id, &matches);
+    let source_repo = args::open_repo_with_repo_id(fb, logger, source_repo_id, matches);
+    let target_repo = args::open_repo_with_repo_id(fb, logger, target_repo_id, matches);
 
     let (source_repo, target_repo): (InnerRepo, InnerRepo) =
         try_join(source_repo, target_repo).await?;
 
-    let commit_syncer = create_commit_syncer_from_matches(&ctx, &matches).await?;
+    let commit_syncer = create_commit_syncer_from_matches(&ctx, matches, None).await?;
 
-    let live_commit_sync_config = Arc::new(CfgrLiveCommitSyncConfig::new(&logger, &config_store)?);
+    let live_commit_sync_config = Arc::new(CfgrLiveCommitSyncConfig::new(logger, config_store)?);
     let common_commit_sync_config =
         live_commit_sync_config.get_common_config(source_repo.blob_repo.get_repoid())?;
 
@@ -434,7 +522,7 @@ async fn run<'a>(
                 .value_of(ARG_TARGET_BOOKMARK)
                 .map(BookmarkName::new)
                 .transpose()?;
-            let bcs = get_starting_commit(&ctx, &sub_m, source_repo.blob_repo.clone()).await?;
+            let bcs = get_starting_commit(&ctx, sub_m, source_repo.blob_repo.clone()).await?;
 
             run_in_single_commit_mode(
                 &ctx,
@@ -530,7 +618,7 @@ impl BackpressureParams {
                         ctx.fb,
                         ctx.logger(),
                         RepositoryId::new(repo_id),
-                        &matches,
+                        matches,
                     )
                 })
                 .try_buffer_unordered(100)

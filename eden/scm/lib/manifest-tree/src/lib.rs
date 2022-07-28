@@ -19,7 +19,6 @@ use std::fmt;
 use std::sync::Arc;
 
 use anyhow::Result;
-use bytes::Bytes;
 use manifest::DiffEntry;
 use manifest::DirDiffEntry;
 use manifest::Directory;
@@ -27,7 +26,8 @@ use manifest::File;
 use manifest::FileMetadata;
 use manifest::FsNodeMetadata;
 use manifest::List;
-use manifest::Manifest;
+pub use manifest::Manifest;
+use minibytes::Bytes;
 use once_cell::sync::OnceCell;
 use pathmatcher::Matcher;
 use sha1::Digest;
@@ -250,7 +250,7 @@ impl Manifest for TreeManifest {
         fn compute_sha1(content: &[u8], format: TreeFormat) -> HgId {
             let mut hasher = Sha1::new();
             match format {
-                TreeFormat::Git => hasher.input(format!("tree {}\0", content.len())),
+                TreeFormat::Git => hasher.update(format!("tree {}\0", content.len())),
                 TreeFormat::Hg => {
                     // XXX: No p1, p2 to produce a genuine SHA1.
                     // This code path is only meaningful for tests.
@@ -260,8 +260,8 @@ impl Manifest for TreeManifest {
                     );
                 }
             }
-            hasher.input(content);
-            let buf: [u8; HgId::len()] = hasher.result().into();
+            hasher.update(content);
+            let buf: [u8; HgId::len()] = hasher.finalize().into();
             (&buf).into()
         }
         fn do_flush<'a, 'b, 'c>(
@@ -416,14 +416,14 @@ impl TreeManifest {
             // Even if parents are sorted two hashes go into hash computation but surprise
             // the NULL_ID is not a special case in this case and gets sorted.
             if p1 < p2 {
-                hasher.input(p1.as_ref());
-                hasher.input(p2.as_ref());
+                hasher.update(p1.as_ref());
+                hasher.update(p2.as_ref());
             } else {
-                hasher.input(p2.as_ref());
-                hasher.input(p1.as_ref());
+                hasher.update(p2.as_ref());
+                hasher.update(p1.as_ref());
             }
-            hasher.input(content.as_ref());
-            let buf: [u8; HgId::len()] = hasher.result().into();
+            hasher.update(content.as_ref());
+            let buf: [u8; HgId::len()] = hasher.finalize().into();
             (&buf).into()
         }
         struct Executor<'a> {
@@ -1062,7 +1062,7 @@ mod tests {
         // depends on the implementation but it is valid for finalize to query the store
         // for the values returned in the previous finalize call
 
-        use bytes::Bytes;
+        use minibytes::Bytes;
         for (path, hgid, raw, _, _) in tree_changed.iter() {
             store
                 .insert(&path, *hgid, Bytes::copy_from_slice(&raw[..]))

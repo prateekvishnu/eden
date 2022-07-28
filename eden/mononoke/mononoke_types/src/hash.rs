@@ -5,21 +5,31 @@
  * GNU General Public License version 2.
  */
 
-use std::fmt::{self, Debug, Display};
+use std::fmt;
+use std::fmt::Debug;
+use std::fmt::Display;
 use std::io::Write;
 use std::str::FromStr;
 
 use abomonation_derive::Abomonation;
-use anyhow::{bail, Error, Result};
-use ascii::{AsciiStr, AsciiString};
-use blake2::{
-    digest::{Update, VariableOutput},
-    VarBlake2b,
-};
-use edenapi_types::{Sha1 as EdenapiSha1, Sha256 as EdenapiSha256};
-use faster_hex::{hex_decode, hex_encode};
-use quickcheck::{empty_shrinker, Arbitrary, Gen};
-use serde_derive::{Deserialize, Serialize};
+use anyhow::bail;
+use anyhow::Error;
+use anyhow::Result;
+use ascii::AsciiStr;
+use ascii::AsciiString;
+use blake2::digest::Update;
+use blake2::digest::VariableOutput;
+use blake2::VarBlake2b;
+use edenapi_types::GitSha1 as EdenapiGitSha1;
+use edenapi_types::Sha1 as EdenapiSha1;
+use edenapi_types::Sha256 as EdenapiSha256;
+use faster_hex::hex_decode;
+use faster_hex::hex_encode;
+use quickcheck::empty_shrinker;
+use quickcheck::Arbitrary;
+use quickcheck::Gen;
+use serde_derive::Deserialize;
+use serde_derive::Serialize;
 use sql::mysql;
 
 use crate::errors::ErrorKind;
@@ -62,9 +72,10 @@ impl Blake2 {
     pub fn from_bytes<B: AsRef<[u8]>>(bytes: B) -> Result<Self> {
         let bytes = bytes.as_ref();
         if bytes.len() != BLAKE2_HASH_LENGTH_BYTES {
-            bail!(ErrorKind::InvalidBlake2Input(
-                format!("need exactly {} bytes", BLAKE2_HASH_LENGTH_BYTES).into()
-            ));
+            bail!(ErrorKind::InvalidBlake2Input(format!(
+                "need exactly {} bytes",
+                BLAKE2_HASH_LENGTH_BYTES
+            )));
         } else {
             let mut ret = [0; BLAKE2_HASH_LENGTH_BYTES];
             ret.copy_from_slice(bytes);
@@ -178,9 +189,10 @@ impl FromStr for Blake2 {
 
     fn from_str(s: &str) -> Result<Self> {
         if s.len() != BLAKE2_HASH_LENGTH_HEX {
-            bail!(ErrorKind::InvalidBlake2Input(
-                format!("need exactly {} hex digits", BLAKE2_HASH_LENGTH_HEX).into()
-            ));
+            bail!(ErrorKind::InvalidBlake2Input(format!(
+                "need exactly {} hex digits",
+                BLAKE2_HASH_LENGTH_HEX
+            )));
         }
 
         let mut ret = Blake2([0; BLAKE2_HASH_LENGTH_BYTES]);
@@ -237,13 +249,10 @@ impl Blake2Prefix {
     pub fn from_bytes<B: AsRef<[u8]> + ?Sized>(bytes: &B) -> Result<Self> {
         let bytes = bytes.as_ref();
         if bytes.len() > BLAKE2_HASH_LENGTH_BYTES {
-            bail!(ErrorKind::InvalidBlake2Input(
-                format!(
-                    "prefix needs to be less or equal to {} bytes",
-                    BLAKE2_HASH_LENGTH_BYTES
-                )
-                .into()
-            ))
+            bail!(ErrorKind::InvalidBlake2Input(format!(
+                "prefix needs to be less or equal to {} bytes",
+                BLAKE2_HASH_LENGTH_BYTES
+            )))
         } else {
             let min_tail: Vec<u8> = vec![0x00; BLAKE2_HASH_LENGTH_BYTES - bytes.len()];
             let max_tail: Vec<u8> = vec![0xff; BLAKE2_HASH_LENGTH_BYTES - bytes.len()];
@@ -295,13 +304,10 @@ impl FromStr for Blake2Prefix {
     type Err = Error;
     fn from_str(s: &str) -> Result<Blake2Prefix> {
         if s.len() > BLAKE2_HASH_LENGTH_HEX {
-            bail!(ErrorKind::InvalidBlake2Input(
-                format!(
-                    "prefix needs to be less or equal {} hex digits",
-                    BLAKE2_HASH_LENGTH_HEX
-                )
-                .into()
-            ));
+            bail!(ErrorKind::InvalidBlake2Input(format!(
+                "prefix needs to be less or equal {} hex digits",
+                BLAKE2_HASH_LENGTH_HEX
+            )));
         }
         let min_tail: String = String::from_utf8(vec![b'0'; BLAKE2_HASH_LENGTH_HEX - s.len()])?;
         let max_tail: String = String::from_utf8(vec![b'f'; BLAKE2_HASH_LENGTH_HEX - s.len()])?;
@@ -511,6 +517,18 @@ impl Display for RichGitSha1 {
     }
 }
 
+impl From<GitSha1> for EdenapiGitSha1 {
+    fn from(v: GitSha1) -> Self {
+        EdenapiGitSha1::from(v.0)
+    }
+}
+
+impl From<EdenapiGitSha1> for GitSha1 {
+    fn from(v: EdenapiGitSha1) -> Self {
+        GitSha1::from_byte_array(v.into())
+    }
+}
+
 impl Arbitrary for GitSha1 {
     fn arbitrary(g: &mut Gen) -> Self {
         let mut bytes = [0; 20];
@@ -584,13 +602,14 @@ impl Arbitrary for Sha256 {
 #[cfg(test)]
 mod test {
     use super::*;
-    use quickcheck::{quickcheck, TestResult};
+    use quickcheck::quickcheck;
+    use quickcheck::TestResult;
 
     // NULL is not exposed because no production code should use it.
     const NULL: Blake2 = Blake2([0; BLAKE2_HASH_LENGTH_BYTES]);
 
     // This hash is from https://asecuritysite.com/encryption/blake.
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     const NILHASH: Blake2 = Blake2([0x0e, 0x57, 0x51, 0xc0,
                                     0x26, 0xe5, 0x43, 0xb2,
                                     0xe8, 0xab, 0x2e, 0xb0,

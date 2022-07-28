@@ -59,6 +59,7 @@ from .. import pycompat
 from . import _readers
 
 if pycompat.iswindows:
+    # pyre-fixme[21]: Could not find a module corresponding to import `eden.thrift.windows_thrift`.
     from eden.thrift.windows_thrift import WindowsSocketHandle
 
 try:
@@ -445,7 +446,7 @@ class HTTPConnection(object):
         proxy_headers=None,
         ssl_wrap_socket=None,
         unix_socket_path=None,
-        **ssl_opts
+        **ssl_opts,
     ):
         """Create a new HTTPConnection.
 

@@ -6,15 +6,23 @@
  */
 
 use anyhow::Error;
-use context::{CoreContext, PerfCounterType};
+use context::CoreContext;
+use context::PerfCounterType;
 use faster_hex::hex_encode;
-use futures::future::{self, Future};
+use futures::future;
+use futures::future::Future;
 use itertools::Itertools;
-use mercurial_types::{HgChangesetId, HgFileNodeId};
-use mononoke_types::{RepoPath, RepositoryId};
-use path_hash::{PathBytes, PathHashBytes, PathWithHash};
-use rand::{thread_rng, Rng};
-use sql::{queries, Connection};
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgFileNodeId;
+use mononoke_types::RepoPath;
+use mononoke_types::RepositoryId;
+use path_hash::PathBytes;
+use path_hash::PathHashBytes;
+use path_hash::PathWithHash;
+use rand::thread_rng;
+use rand::Rng;
+use sql::queries;
+use sql::Connection;
 use stats::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -25,14 +33,20 @@ use thiserror::Error as DeriveError;
 use tokio::time::timeout;
 use tunables::tunables;
 
-use filenodes::{FilenodeInfo, FilenodeRangeResult, FilenodeResult, PreparedFilenode};
+use filenodes::FilenodeInfo;
+use filenodes::FilenodeRangeResult;
+use filenodes::FilenodeResult;
+use filenodes::PreparedFilenode;
 
-use crate::connections::{AcquireReason, Connections};
-use crate::local_cache::{CacheKey, LocalCache};
+use crate::connections::AcquireReason;
+use crate::connections::Connections;
+use crate::local_cache::CacheKey;
+use crate::local_cache::LocalCache;
 use crate::remote_cache::RemoteCache;
 use crate::shards::Shards;
 use crate::sql_timeout_knobs;
-use crate::structs::{CachedFilenode, CachedHistory};
+use crate::structs::CachedFilenode;
+use crate::structs::CachedHistory;
 
 define_stats! {
     prefix = "mononoke.filenodes";
@@ -364,12 +378,8 @@ fn convert_cached_filenodes(
     cached: Option<CachedHistory>,
 ) -> Result<FilenodeRangeResult<Vec<FilenodeInfo>>, Error> {
     match cached {
-        Some(cached) => {
-            return Ok(FilenodeRangeResult::Present(cached.try_into()?));
-        }
-        None => {
-            return Ok(FilenodeRangeResult::TooBig);
-        }
+        Some(cached) => Ok(FilenodeRangeResult::Present(cached.try_into()?)),
+        None => Ok(FilenodeRangeResult::TooBig),
     }
 }
 
@@ -382,9 +392,9 @@ struct FilenodeCacheFiller<'a> {
 
 impl<'a> FilenodeCacheFiller<'a> {
     fn fill(&self, filenode: CachedFilenode) {
-        self.local_cache.fill(&self.key, &filenode);
+        self.local_cache.fill(self.key, &filenode);
         if let Ok(filenode) = filenode.try_into() {
-            self.remote_cache.fill_filenode(&self.key, filenode);
+            self.remote_cache.fill_filenode(self.key, filenode);
         }
     }
 }
@@ -442,12 +452,12 @@ async fn select_partial_filenode(
     filenode: HgFileNodeId,
     recorder: &PerfCounterRecorder<'_>,
 ) -> Result<Option<PartialFilenode>, ErrorKind> {
-    let connection = connections.checkout(&pwh, AcquireReason::Filenodes);
+    let connection = connections.checkout(pwh, AcquireReason::Filenodes);
 
     recorder.increment();
 
     let rows = enforce_sql_timeout(SelectFilenode::query(
-        &connection,
+        connection,
         &repo_id,
         &pwh.hash,
         pwh.sql_is_tree(),
@@ -473,10 +483,10 @@ struct HistoryCacheFiller<'a> {
 
 impl<'a> HistoryCacheFiller<'a> {
     fn fill(&self, maybe_history: Option<CachedHistory>) {
-        self.local_cache.fill(&self.key, &maybe_history);
+        self.local_cache.fill(self.key, &maybe_history);
         let maybe_history = maybe_history.map(|history| history.try_into()).transpose();
         if let Ok(maybe_history) = maybe_history {
-            self.remote_cache.fill_history(&self.key, maybe_history);
+            self.remote_cache.fill_history(self.key, maybe_history);
         }
     }
 }
@@ -494,10 +504,9 @@ async fn select_history_from_sql(
         return Ok(FilenodeRangeResult::Disabled);
     }
 
-    let maybe_partial =
-        select_partial_history(&connections, repo_id, &pwh, recorder, limit).await?;
+    let maybe_partial = select_partial_history(connections, repo_id, pwh, recorder, limit).await?;
     if let Some(partial) = maybe_partial {
-        let history = fill_paths(&connections, &pwh, repo_id, partial, recorder).await?;
+        let history = fill_paths(connections, pwh, repo_id, partial, recorder).await?;
         let history = CachedHistory { history };
         filler.fill(Some(history.clone()));
         Ok(FilenodeRangeResult::Present(history))
@@ -514,7 +523,7 @@ async fn select_partial_history(
     recorder: &PerfCounterRecorder<'_>,
     limit: Option<u64>,
 ) -> Result<Option<Vec<PartialFilenode>>, ErrorKind> {
-    let connection = connections.checkout(&pwh, AcquireReason::History);
+    let connection = connections.checkout(pwh, AcquireReason::History);
 
     recorder.increment();
 
@@ -524,7 +533,7 @@ async fn select_partial_history(
     let rows = match limit {
         Some(limit) => {
             let rows = enforce_sql_timeout(SelectLimitedFilenodes::query(
-                &connection,
+                connection,
                 &repo_id,
                 &pwh.hash,
                 pwh.sql_is_tree(),
@@ -539,7 +548,7 @@ async fn select_partial_history(
         }
         None => {
             enforce_sql_timeout(SelectAllFilenodes::query(
-                &connection,
+                connection,
                 &repo_id,
                 &pwh.hash,
                 pwh.sql_is_tree(),
@@ -550,7 +559,7 @@ async fn select_partial_history(
 
     let history = rows
         .into_iter()
-        .map(|row| convert_row_to_partial_filenode(row))
+        .map(convert_row_to_partial_filenode)
         .collect::<Result<Vec<PartialFilenode>, ErrorKind>>()?;
 
     // TODO: It'd be nice to have some eviction here.
@@ -565,10 +574,9 @@ fn convert_row_to_partial_filenode(row: FilenodeRow) -> Result<PartialFilenode, 
     let copyfrom = if has_copyinfo == 0 {
         None
     } else {
-        let from_path_hash =
-            from_path_hash.ok_or_else(|| ErrorKind::FixedCopyInfoMissing(filenode))?;
+        let from_path_hash = from_path_hash.ok_or(ErrorKind::FixedCopyInfoMissing(filenode))?;
 
-        let from_node = from_node.ok_or_else(|| ErrorKind::FixedCopyInfoMissing(filenode))?;
+        let from_node = from_node.ok_or(ErrorKind::FixedCopyInfoMissing(filenode))?;
 
         Some((from_path_hash, from_node))
     };
@@ -642,7 +650,7 @@ async fn select_paths<I: Iterator<Item = PathHashBytes>>(
     recorder: &PerfCounterRecorder<'_>,
 ) -> Result<HashMap<PathHashBytes, PathBytes>, ErrorKind> {
     let futs = iter
-        .group_by(|path_hash| connections.shard_id(&path_hash))
+        .group_by(|path_hash| connections.shard_id(path_hash))
         .into_iter()
         .map(|(shard_id, group)| {
             let group = group.collect::<Vec<_>>();
@@ -655,7 +663,7 @@ async fn select_paths<I: Iterator<Item = PathHashBytes>>(
                 let connection = connections.checkout_by_shard_id(shard_id, AcquireReason::Paths);
 
                 let output =
-                    enforce_sql_timeout(SelectPaths::query(&connection, &repo_id, &group[..]))
+                    enforce_sql_timeout(SelectPaths::query(connection, &repo_id, &group[..]))
                         .await?
                         .into_iter()
                         .collect::<HashMap<_, _>>();

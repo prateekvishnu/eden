@@ -10,14 +10,17 @@ use anyhow::Result;
 use ascii::AsciiStr;
 use async_trait::async_trait;
 use context::CoreContext;
-use mononoke_types::{hash::GitSha1, BonsaiChangeset, ChangesetId};
+use mononoke_types::hash::GitSha1;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::ChangesetId;
 use slog::warn;
 
 mod errors;
 mod sql;
 
 pub use crate::errors::AddGitMappingErrorKind;
-pub use crate::sql::{SqlBonsaiGitMapping, SqlBonsaiGitMappingBuilder};
+pub use crate::sql::SqlBonsaiGitMapping;
+pub use crate::sql::SqlBonsaiGitMappingBuilder;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct BonsaiGitMappingEntry {
@@ -119,7 +122,7 @@ pub trait BonsaiGitMapping: Send + Sync {
         changesets: &[BonsaiChangeset],
     ) -> Result<()> {
         let mut entries = vec![];
-        for bcs in changesets.into_iter() {
+        for bcs in changesets.iter() {
             match extract_git_sha1_from_bonsai_extra(bcs.extra()) {
                 Ok(Some(git_sha1)) => {
                     let entry = BonsaiGitMappingEntry::new(git_sha1, bcs.get_changeset_id());

@@ -11,8 +11,10 @@ use blobstore::Loadable;
 use context::CoreContext;
 use derived_data::BonsaiDerived;
 use fsnodes::RootFsnodeId;
-use futures::{future::try_join, TryStreamExt};
-use manifest::{Diff, ManifestOps};
+use futures::future::try_join;
+use futures::TryStreamExt;
+use manifest::Diff;
+use manifest::ManifestOps;
 use mercurial_derived_data::DeriveHgChangeset;
 use mercurial_types::MPath;
 use mononoke_types::ChangesetId;
@@ -56,11 +58,9 @@ pub async fn get_changed_content_working_copy_paths(
         .try_filter_map(|diff| async move {
             use Diff::*;
             let maybe_path = match diff {
-                Added(maybe_path, entry) => entry.into_leaf().and_then(|_| maybe_path),
+                Added(maybe_path, entry) => entry.into_leaf().and(maybe_path),
                 Removed(_maybe_path, _entry) => None,
-                Changed(maybe_path, _old_entry, new_entry) => {
-                    new_entry.into_leaf().and_then(|_| maybe_path)
-                }
+                Changed(maybe_path, _old_entry, new_entry) => new_entry.into_leaf().and(maybe_path),
             };
 
             Ok(maybe_path)
@@ -91,9 +91,7 @@ pub async fn get_colliding_paths_between_commits(
             let maybe_path = match diff {
                 Added(_maybe_path, _entry) => None,
                 Removed(_maybe_path, _entry) => None,
-                Changed(maybe_path, _old_entry, new_entry) => {
-                    new_entry.into_leaf().and_then(|_| maybe_path)
-                }
+                Changed(maybe_path, _old_entry, new_entry) => new_entry.into_leaf().and(maybe_path),
             };
 
             Ok(maybe_path)
@@ -126,11 +124,9 @@ pub async fn get_changed_working_copy_paths(
         .try_filter_map(|diff| async move {
             use Diff::*;
             let maybe_path = match diff {
-                Added(maybe_path, entry) => entry.into_leaf().and_then(|_| maybe_path),
+                Added(maybe_path, entry) => entry.into_leaf().and(maybe_path),
                 Removed(_maybe_path, _entry) => None,
-                Changed(maybe_path, _old_entry, new_entry) => {
-                    new_entry.into_leaf().and_then(|_| maybe_path)
-                }
+                Changed(maybe_path, _old_entry, new_entry) => new_entry.into_leaf().and(maybe_path),
             };
 
             Ok(maybe_path)

@@ -6,14 +6,19 @@
  */
 
 use fbinit::FacebookInit;
-use futures_stats::{FutureStats, StreamStats};
+use futures_stats::FutureStats;
+use futures_stats::StreamStats;
 use metadata::Metadata;
 use nonzero_ext::nonzero;
+use observability::ObservabilityContext;
+use observability::ScubaLoggingDecisionFields;
 pub use observability::ScubaVerbosityLevel;
-use observability::{ObservabilityContext, ScubaLoggingDecisionFields};
 use permission_checker::MononokeIdentitySetExt;
-use scuba::{builder::ServerData, ScubaSample, ScubaSampleBuilder};
-pub use scuba::{Sampling, ScubaValue};
+use scuba::builder::ServerData;
+pub use scuba::Sampling;
+use scuba::ScubaSample;
+use scuba::ScubaSampleBuilder;
+pub use scuba::ScubaValue;
 use std::collections::hash_map::Entry;
 use std::io::Error as IoError;
 use std::num::NonZeroU64;
@@ -113,10 +118,8 @@ impl MononokeScubaSampleBuilder {
             // "source_hostname" to remain compatible with historical logging
             self.inner
                 .add("source_hostname", client_hostname.to_owned());
-        } else {
-            if let Some(client_ip) = metadata.client_ip() {
-                self.inner.add("client_ip", client_ip.to_string());
-            }
+        } else if let Some(client_ip) = metadata.client_ip() {
+            self.inner.add("client_ip", client_ip.to_string());
         }
         if let Some(unix_name) = metadata.unix_name() {
             // "unix_username" to remain compatible with historical logging

@@ -5,17 +5,23 @@
  * GNU General Public License version 2.
  */
 
-use clap_old::{App, Arg, ArgMatches, SubCommand};
+use clap_old::App;
+use clap_old::Arg;
+use clap_old::ArgMatches;
+use clap_old::SubCommand;
 use fbinit::FacebookInit;
 use std::str::FromStr;
 
-use anyhow::{anyhow, Error};
+use anyhow::anyhow;
+use anyhow::Error;
 use blobrepo::BlobRepo;
-use cmdlib::args::{self, MononokeMatches};
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
 use context::CoreContext;
 use mercurial_derived_data::DeriveHgChangeset;
 use mercurial_types::HgChangesetId;
-use mononoke_types::{hash::GitSha1, ChangesetId};
+use mononoke_types::hash::GitSha1;
+use mononoke_types::ChangesetId;
 use slog::Logger;
 
 use crate::error::SubcommandError;
@@ -62,7 +68,7 @@ pub async fn subcommand_hash_convert<'a>(
         return Err(anyhow!("source and target should be different").into());
     }
     let ctx = CoreContext::new_with_logger(fb, logger.clone());
-    let repo: BlobRepo = args::open_repo(fb, &logger, &matches).await?;
+    let repo: BlobRepo = args::open_repo(fb, &logger, matches).await?;
 
     let cs_id = convert_to_bonsai(&ctx, &repo, &source, &source_hash).await?;
     println!("{}", convert_from_bonsai(&ctx, &repo, cs_id, target).await?);
@@ -81,7 +87,7 @@ async fn convert_to_bonsai(
             .bonsai_hg_mapping()
             .get_bonsai_from_hg(
                 ctx,
-                HgChangesetId::from_str(&hash).expect("source hash is not valid hg changeset id"),
+                HgChangesetId::from_str(hash).expect("source hash is not valid hg changeset id"),
             )
             .await?;
 

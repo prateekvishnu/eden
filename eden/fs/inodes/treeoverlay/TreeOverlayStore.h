@@ -86,7 +86,7 @@ class TreeOverlayStore {
   /**
    * Save tree into storage
    */
-  void saveTree(InodeNumber inodeNumber, const overlay::OverlayDir& odir);
+  void saveTree(InodeNumber inodeNumber, overlay::OverlayDir&& odir);
 
   /**
    * Load tree from storage
@@ -122,6 +122,11 @@ class TreeOverlayStore {
    * Remove a child from the given parent
    */
   void removeChild(InodeNumber parent, PathComponentPiece childName);
+
+  /**
+   * Has the child for the given parent
+   */
+  bool hasChild(InodeNumber parent, PathComponentPiece childName);
 
   /**
    * Remove a child from the given parent

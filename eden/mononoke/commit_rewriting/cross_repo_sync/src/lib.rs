@@ -7,48 +7,64 @@
 
 #![feature(trait_alias)]
 
-use anyhow::{bail, format_err, Context, Error};
+use anyhow::bail;
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use blobstore::Loadable;
 use bookmark_renaming::BookmarkRenamer;
 use bookmarks::BookmarkName;
-use cacheblob::{InProcessLease, LeaseOps, MemcacheOps};
+use cacheblob::InProcessLease;
+use cacheblob::LeaseOps;
+use cacheblob::MemcacheOps;
+use commit_transformation::rewrite_commit as multi_mover_rewrite_commit;
+use commit_transformation::upload_commits;
 pub use commit_transformation::CommitRewrittenToEmpty;
-use commit_transformation::{
-    rewrite_commit as multi_mover_rewrite_commit, upload_commits, MultiMover,
-};
+use commit_transformation::MultiMover;
 use context::CoreContext;
 use environment::Caching;
 use fbinit::FacebookInit;
+use futures::channel::oneshot;
+use futures::future;
 use futures::future::try_join;
-use futures::{
-    channel::oneshot,
-    future::{self, TryFutureExt},
-    stream::{self, StreamExt, TryStreamExt},
-    FutureExt,
-};
+use futures::future::TryFutureExt;
+use futures::stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use futures::FutureExt;
 use live_commit_sync_config::LiveCommitSyncConfig;
-use maplit::{hashmap, hashset};
-use metaconfig_types::{
-    CommitSyncConfigVersion, CommitSyncDirection, CommonCommitSyncConfig, PushrebaseFlags,
-};
-use mononoke_types::{
-    BonsaiChangeset, BonsaiChangesetMut, ChangesetId, FileChange, MPath, RepositoryId,
-};
+use maplit::hashmap;
+use maplit::hashset;
+use metaconfig_types::CommitSyncConfigVersion;
+use metaconfig_types::CommitSyncDirection;
+use metaconfig_types::CommonCommitSyncConfig;
+use metaconfig_types::PushrebaseFlags;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::BonsaiChangesetMut;
+use mononoke_types::ChangesetId;
+use mononoke_types::FileChange;
+use mononoke_types::MPath;
+use mononoke_types::RepositoryId;
 use movers::Mover;
 use phases::PhasesRef;
-use pushrebase::{do_pushrebase_bonsai, PushrebaseError};
+use pushrebase::do_pushrebase_bonsai;
+use pushrebase::PushrebaseError;
 use reachabilityindex::LeastCommonAncestorsHint;
 use scuba_ext::MononokeScubaSampleBuilder;
-use slog::{debug, info};
-use std::collections::{HashMap, HashSet, VecDeque};
+use slog::debug;
+use slog::info;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use synced_commit_mapping::{
-    EquivalentWorkingCopyEntry, SyncedCommitMapping, SyncedCommitMappingEntry,
-    SyncedCommitSourceRepo,
-};
+use std::time::Duration;
+use std::time::Instant;
+use synced_commit_mapping::EquivalentWorkingCopyEntry;
+use synced_commit_mapping::SyncedCommitMapping;
+use synced_commit_mapping::SyncedCommitMappingEntry;
+use synced_commit_mapping::SyncedCommitSourceRepo;
 use thiserror::Error;
 use topo_sort::sort_topological;
 use tunables::tunables;
@@ -56,9 +72,12 @@ use tunables::tunables;
 use crate::pushrebase_hook::CrossRepoSyncPushrebaseHook;
 use reporting::log_rewrite;
 pub use reporting::CommitSyncContext;
+use sync_config_version_utils::get_mapping_change_version;
+use sync_config_version_utils::get_version;
+use sync_config_version_utils::get_version_for_merge;
 pub use sync_config_version_utils::CHANGE_XREPO_MAPPING_EXTRA;
-use sync_config_version_utils::{get_mapping_change_version, get_version, get_version_for_merge};
-use types::{Source, Target};
+use types::Source;
+use types::Target;
 
 mod commit_sync_data_provider;
 pub mod commit_sync_outcome;
@@ -68,11 +87,13 @@ mod sync_config_version_utils;
 pub mod types;
 pub mod validation;
 
-pub use crate::commit_sync_outcome::{
-    commit_sync_outcome_exists, get_commit_sync_outcome, get_commit_sync_outcome_with_hint,
-    get_plural_commit_sync_outcome, CandidateSelectionHint, CommitSyncOutcome,
-    PluralCommitSyncOutcome,
-};
+pub use crate::commit_sync_outcome::commit_sync_outcome_exists;
+pub use crate::commit_sync_outcome::get_commit_sync_outcome;
+pub use crate::commit_sync_outcome::get_commit_sync_outcome_with_hint;
+pub use crate::commit_sync_outcome::get_plural_commit_sync_outcome;
+pub use crate::commit_sync_outcome::CandidateSelectionHint;
+pub use crate::commit_sync_outcome::CommitSyncOutcome;
+pub use crate::commit_sync_outcome::PluralCommitSyncOutcome;
 pub use commit_sync_data_provider::CommitSyncDataProvider;
 
 const LEASE_WARNING_THRESHOLD: Duration = Duration::from_secs(60);
@@ -156,7 +177,7 @@ async fn remap_parents<'a, M: SyncedCommitMapping + Clone + 'static>(
             .get_commit_sync_outcome_with_hint(ctx, Source(*commit), hint.clone())
             .await?;
         let sync_outcome: Result<_, Error> =
-            maybe_sync_outcome.ok_or(ErrorKind::ParentNotRemapped(*commit).into());
+            maybe_sync_outcome.ok_or_else(|| ErrorKind::ParentNotRemapped(*commit).into());
         let sync_outcome = sync_outcome?;
 
         use CommitSyncOutcome::*;
@@ -263,7 +284,7 @@ where
             }
             None => {
                 let maybe_mapping_change =
-                    get_mapping_change_version(&ctx, commit_syncer.get_source_repo(), cs_id);
+                    get_mapping_change_version(ctx, commit_syncer.get_source_repo(), cs_id);
                 let parents = source_repo.get_changeset_parents_by_bonsai(ctx.clone(), cs_id);
                 let (maybe_mapping_change, parents) =
                     try_join(maybe_mapping_change, parents).await?;
@@ -335,13 +356,13 @@ impl CommitSyncRepos {
 
         if source_repo.get_repoid() == small_repo_id {
             Ok(CommitSyncRepos::SmallToLarge {
-                large_repo: target_repo.clone(),
-                small_repo: source_repo.clone(),
+                large_repo: target_repo,
+                small_repo: source_repo,
             })
         } else {
             Ok(CommitSyncRepos::LargeToSmall {
-                large_repo: source_repo.clone(),
-                small_repo: target_repo.clone(),
+                large_repo: source_repo,
+                small_repo: target_repo,
             })
         }
     }
@@ -633,7 +654,7 @@ where
         ancestor_selection_hint: CandidateSelectionHint,
     ) -> Result<Option<ChangesetId>, Error> {
         let (unsynced_ancestors, synced_ancestors_versions) =
-            find_toposorted_unsynced_ancestors(&ctx, self, source_cs_id).await?;
+            find_toposorted_unsynced_ancestors(ctx, self, source_cs_id).await?;
 
         let source_repo = self.repos.get_source_repo();
         let target_repo = self.repos.get_target_repo();
@@ -718,10 +739,7 @@ where
         let commit_sync_outcome = self
             .get_commit_sync_outcome(ctx, source_cs_id)
             .await?
-            .ok_or(format_err!(
-                "was not able to remap a commit {}",
-                source_cs_id
-            ))?;
+            .ok_or_else(|| format_err!("was not able to remap a commit {}", source_cs_id))?;
         use CommitSyncOutcome::*;
         let res = match commit_sync_outcome {
             NotSyncCandidate(_) => None,
@@ -944,7 +962,7 @@ where
                 update_mapping_with_version(
                     ctx,
                     hashmap! { source_cs_id => frozen_cs_id },
-                    &self,
+                    self,
                     sync_config_version,
                 )
                 .await?;
@@ -1128,7 +1146,6 @@ where
                     &pushrebase_flags,
                     &bookmark,
                     &rewritten_list,
-                    None,
                     &[CrossRepoSyncPushrebaseHook::new(
                         hash,
                         self.repos.clone(),
@@ -1185,7 +1202,7 @@ where
                 update_mapping_with_version(
                     ctx,
                     hashmap! { source_cs_id => frozen.get_changeset_id() },
-                    &self,
+                    self,
                     &expected_version,
                 )
                 .await?;
@@ -1216,7 +1233,7 @@ where
             .await?;
 
         let parent_sync_outcome = maybe_parent_sync_outcome
-            .ok_or(format_err!("Parent commit {} is not synced yet", p))?;
+            .ok_or_else(|| format_err!("Parent commit {} is not synced yet", p))?;
 
         use CommitSyncOutcome::*;
         match parent_sync_outcome {
@@ -1283,7 +1300,7 @@ where
                         update_mapping_with_version(
                             ctx,
                             hashmap! { source_cs_id => frozen.get_changeset_id() },
-                            &self,
+                            self,
                             &version,
                         )
                         .await?;
@@ -1446,7 +1463,7 @@ where
                     let parent_cs_id = new_parents
                         .values()
                         .next()
-                        .ok_or(Error::msg("logic merge: cannot find merge parent"))?;
+                        .ok_or_else(|| Error::msg("logic merge: cannot find merge parent"))?;
                     self.update_wc_equivalence_with_version(
                         ctx,
                         source_cs_id,
@@ -1503,11 +1520,11 @@ where
         update_mapping_with_version(
             ctx,
             hashmap! { source_cs_id =>  target_cs_id},
-            &self,
+            self,
             &version,
         )
         .await?;
-        return Ok(target_cs_id);
+        Ok(target_cs_id)
     }
 
     // Some of the parents were removed - we need to remove copy-info that's not necessary
@@ -1728,6 +1745,7 @@ pub fn create_synced_commit_mapping_entry(
     }
 }
 
+#[derive(Clone)]
 pub struct Syncers<M: SyncedCommitMapping + Clone + 'static> {
     pub large_to_small: CommitSyncer<M>,
     pub small_to_large: CommitSyncer<M>,
@@ -1749,7 +1767,7 @@ where
     let small_to_large_commit_sync_repos =
         CommitSyncRepos::new(small_repo.clone(), large_repo.clone(), &common_config)?;
     let large_to_small_commit_sync_repos =
-        CommitSyncRepos::new(large_repo.clone(), small_repo.clone(), &common_config)?;
+        CommitSyncRepos::new(large_repo, small_repo, &common_config)?;
 
     let large_to_small_commit_syncer = CommitSyncer::new(
         ctx,

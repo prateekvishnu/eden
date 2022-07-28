@@ -10,67 +10,109 @@
 
 use std::sync::Arc;
 
-use acl_regions::{build_acl_regions, ArcAclRegions};
+use acl_regions::build_acl_regions;
+use acl_regions::ArcAclRegions;
 use anyhow::Result;
 use blame::BlameRoot;
 use blobstore::Blobstore;
-use bonsai_git_mapping::{ArcBonsaiGitMapping, SqlBonsaiGitMappingBuilder};
-use bonsai_globalrev_mapping::{ArcBonsaiGlobalrevMapping, SqlBonsaiGlobalrevMappingBuilder};
-use bonsai_hg_mapping::{ArcBonsaiHgMapping, SqlBonsaiHgMappingBuilder};
-use bonsai_svnrev_mapping::{ArcBonsaiSvnrevMapping, SqlBonsaiSvnrevMappingBuilder};
-use bookmarks::{bookmark_heads_fetcher, ArcBookmarkUpdateLog, ArcBookmarks, BookmarkName};
-use cacheblob::{InProcessLease, LeaseOps};
-use changeset_fetcher::{ArcChangesetFetcher, SimpleChangesetFetcher};
+use bonsai_git_mapping::ArcBonsaiGitMapping;
+use bonsai_git_mapping::SqlBonsaiGitMappingBuilder;
+use bonsai_globalrev_mapping::ArcBonsaiGlobalrevMapping;
+use bonsai_globalrev_mapping::SqlBonsaiGlobalrevMappingBuilder;
+use bonsai_hg_mapping::ArcBonsaiHgMapping;
+use bonsai_hg_mapping::SqlBonsaiHgMappingBuilder;
+use bonsai_svnrev_mapping::ArcBonsaiSvnrevMapping;
+use bonsai_svnrev_mapping::SqlBonsaiSvnrevMappingBuilder;
+use bookmarks::bookmark_heads_fetcher;
+use bookmarks::ArcBookmarkUpdateLog;
+use bookmarks::ArcBookmarks;
+use bookmarks::BookmarkName;
+use cacheblob::InProcessLease;
+use cacheblob::LeaseOps;
+use changeset_fetcher::ArcChangesetFetcher;
+use changeset_fetcher::SimpleChangesetFetcher;
 use changeset_info::ChangesetInfo;
 use changesets::ArcChangesets;
 use changesets_impl::SqlChangesetsBuilder;
 use context::CoreContext;
-use dbbookmarks::{ArcSqlBookmarks, SqlBookmarksBuilder};
+use dbbookmarks::ArcSqlBookmarks;
+use dbbookmarks::SqlBookmarksBuilder;
 use deleted_manifest::RootDeletedManifestV2Id;
 use derived_data_filenodes::FilenodesOnlyPublic;
 use derived_data_manager::BonsaiDerivable;
-use ephemeral_blobstore::{ArcRepoEphemeralStore, RepoEphemeralStore};
+use ephemeral_blobstore::ArcRepoEphemeralStore;
+use ephemeral_blobstore::RepoEphemeralStore;
 use fastlog::RootFastlog;
 use fbinit::FacebookInit;
 use filenodes::ArcFilenodes;
-use filestore::{ArcFilestoreConfig, FilestoreConfig};
+use filestore::ArcFilestoreConfig;
+use filestore::FilestoreConfig;
 use fsnodes::RootFsnodeId;
 use git_types::TreeHandle;
+use hooks::ArcHookManager;
+use hooks::HookManager;
+use hooks_content_stores::RepoFileContentManager;
 use live_commit_sync_config::TestLiveCommitSyncConfig;
-use maplit::{hashmap, hashset};
+use maplit::hashmap;
+use maplit::hashset;
 use megarepo_mapping::MegarepoMapping;
 use memblob::Memblob;
 use mercurial_derived_data::MappedHgChangesetId;
-use mercurial_mutation::{ArcHgMutationStore, SqlHgMutationStoreBuilder};
-use metaconfig_types::{
-    ArcRepoConfig, BlameVersion, DerivedDataConfig, DerivedDataTypesConfig, RepoConfig,
-    SegmentedChangelogConfig, SegmentedChangelogHeadConfig, UnodeVersion,
-};
+use mercurial_mutation::ArcHgMutationStore;
+use mercurial_mutation::SqlHgMutationStoreBuilder;
+use metaconfig_types::ArcRepoConfig;
+use metaconfig_types::BlameVersion;
+use metaconfig_types::DerivedDataConfig;
+use metaconfig_types::DerivedDataTypesConfig;
+use metaconfig_types::RepoConfig;
+use metaconfig_types::SegmentedChangelogConfig;
+use metaconfig_types::SegmentedChangelogHeadConfig;
+use metaconfig_types::UnodeVersion;
 use mononoke_types::RepositoryId;
-use mutable_counters::{ArcMutableCounters, SqlMutableCountersBuilder};
-use mutable_renames::{ArcMutableRenames, MutableRenames, SqlMutableRenamesStore};
+use mutable_counters::ArcMutableCounters;
+use mutable_counters::SqlMutableCountersBuilder;
+use mutable_renames::ArcMutableRenames;
+use mutable_renames::MutableRenames;
+use mutable_renames::SqlMutableRenamesStore;
 use newfilenodes::NewFilenodesBuilder;
 use phases::ArcPhases;
-use pushrebase_mutation_mapping::{
-    ArcPushrebaseMutationMapping, SqlPushrebaseMutationMappingConnection,
-};
+use pushrebase_mutation_mapping::ArcPushrebaseMutationMapping;
+use pushrebase_mutation_mapping::SqlPushrebaseMutationMappingConnection;
 use redactedblobstore::RedactedBlobs;
 use rendezvous::RendezVousOptions;
-use repo_blobstore::{ArcRepoBlobstore, RepoBlobstore};
-use repo_cross_repo::{ArcRepoCrossRepo, RepoCrossRepo};
-use repo_derived_data::{ArcRepoDerivedData, RepoDerivedData};
-use repo_identity::{ArcRepoIdentity, RepoIdentity};
+use repo_blobstore::ArcRepoBlobstore;
+use repo_blobstore::RepoBlobstore;
+use repo_bookmark_attrs::ArcRepoBookmarkAttrs;
+use repo_bookmark_attrs::RepoBookmarkAttrs;
+use repo_cross_repo::ArcRepoCrossRepo;
+use repo_cross_repo::RepoCrossRepo;
+use repo_derived_data::ArcRepoDerivedData;
+use repo_derived_data::RepoDerivedData;
+use repo_identity::ArcRepoIdentity;
+use repo_identity::RepoIdentity;
+use repo_lock::AlwaysUnlockedRepoLock;
+use repo_lock::ArcRepoLock;
 use repo_lock::SqlRepoLock;
-use repo_permission_checker::{AlwaysAllowMockRepoPermissionChecker, ArcRepoPermissionChecker};
+use repo_permission_checker::AlwaysAllowMockRepoPermissionChecker;
+use repo_permission_checker::ArcRepoPermissionChecker;
+use repo_sparse_profiles::ArcRepoSparseProfiles;
+use repo_sparse_profiles::RepoSparseProfiles;
+use repo_sparse_profiles::SqlSparseProfilesSizes;
 use requests_table::SqlLongRunningRequestsQueue;
 use scuba_ext::MononokeScubaSampleBuilder;
-use segmented_changelog::{new_test_segmented_changelog, SegmentedChangelogSqlConnections};
+use segmented_changelog::new_test_segmented_changelog;
+use segmented_changelog::SegmentedChangelogSqlConnections;
 use segmented_changelog_types::ArcSegmentedChangelog;
 use skeleton_manifest::RootSkeletonManifestId;
-use skiplist::{ArcSkiplistIndex, SkiplistIndex};
-use sql::{rusqlite::Connection as SqliteConnection, Connection, SqlConnectionsWithSchema};
+use skiplist::ArcSkiplistIndex;
+use skiplist::SkiplistIndex;
+use sql::rusqlite::Connection as SqliteConnection;
+use sql::Connection;
+use sql::SqlConnectionsWithSchema;
 use sql_construct::SqlConstruct;
 use sqlphases::SqlPhasesBuilder;
+use streaming_clone::ArcStreamingClone;
+use streaming_clone::StreamingCloneBuilder;
 use synced_commit_mapping::SqlSyncedCommitMapping;
 use unodes::RootUnodeManifestId;
 
@@ -91,6 +133,7 @@ pub struct TestRepoFactory {
     metadata_db: SqlConnectionsWithSchema,
     hg_mutation_db: SqlConnectionsWithSchema,
     redacted: Option<Arc<RedactedBlobs>>,
+    permission_checker: Option<ArcRepoPermissionChecker>,
     derived_data_lease: Option<Box<dyn Fn() -> Arc<dyn LeaseOps> + Send + Sync>>,
     filenodes_override: Option<Box<dyn Fn(ArcFilenodes) -> ArcFilenodes + Send + Sync>>,
 }
@@ -179,6 +222,8 @@ impl TestRepoFactory {
         metadata_con.execute_batch(SqlSyncedCommitMapping::CREATION_QUERY)?;
         metadata_con.execute_batch(SegmentedChangelogSqlConnections::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlRepoLock::CREATION_QUERY)?;
+        metadata_con.execute_batch(SqlSparseProfilesSizes::CREATION_QUERY)?;
+        metadata_con.execute_batch(StreamingCloneBuilder::CREATION_QUERY)?;
         let metadata_db =
             SqlConnectionsWithSchema::new_single(Connection::with_sqlite(metadata_con));
 
@@ -194,6 +239,7 @@ impl TestRepoFactory {
             metadata_db,
             hg_mutation_db,
             redacted: None,
+            permission_checker: None,
             derived_data_lease: None,
             filenodes_override: None,
         })
@@ -225,6 +271,15 @@ impl TestRepoFactory {
     /// Redact content in repos that are built by this factory.
     pub fn redacted(&mut self, redacted: Option<RedactedBlobs>) -> &mut Self {
         self.redacted = redacted.map(Arc::new);
+        self
+    }
+
+    /// Set a custom permission checker
+    pub fn with_permission_checker(
+        &mut self,
+        permission_checker: ArcRepoPermissionChecker,
+    ) -> &mut Self {
+        self.permission_checker = Some(permission_checker);
         self
     }
 
@@ -380,10 +435,14 @@ impl TestRepoFactory {
         ))
     }
 
-    /// Construct mock, allow-all security checker.
+    /// Construct permission checker.  By default this allows all access.
     pub fn permission_checker(&self) -> Result<ArcRepoPermissionChecker> {
-        let permission_checker = AlwaysAllowMockRepoPermissionChecker::new();
-        Ok(Arc::new(permission_checker))
+        if let Some(permission_checker) = &self.permission_checker {
+            Ok(permission_checker.clone())
+        } else {
+            let permission_checker = AlwaysAllowMockRepoPermissionChecker::new();
+            Ok(Arc::new(permission_checker))
+        }
     }
 
     /// Construct Filenodes.
@@ -468,14 +527,13 @@ impl TestRepoFactory {
 
     /// Construct filestore config based on the config in the factory.
     pub fn filestore_config(&self, repo_config: &ArcRepoConfig) -> ArcFilestoreConfig {
-        let filestore_config = repo_config
-            .filestore
-            .as_ref()
-            .map(|p| FilestoreConfig {
+        let filestore_config = repo_config.filestore.as_ref().map_or_else(
+            FilestoreConfig::no_chunking_filestore,
+            |p| FilestoreConfig {
                 chunk_size: Some(p.chunk_size),
                 concurrency: p.concurrency,
-            })
-            .unwrap_or_else(|| FilestoreConfig::no_chunking_filestore());
+            },
+        );
         Arc::new(filestore_config)
     }
 
@@ -532,6 +590,58 @@ impl TestRepoFactory {
             repo_config.acl_region_config.as_ref(),
             skiplist_index.clone(),
             changeset_fetcher.clone(),
+        )
+    }
+
+    /// Hook manager
+    pub fn hook_manager(
+        &self,
+        repo_identity: &ArcRepoIdentity,
+        repo_derived_data: &ArcRepoDerivedData,
+        bookmarks: &ArcBookmarks,
+        repo_blobstore: &ArcRepoBlobstore,
+    ) -> ArcHookManager {
+        let content_store = RepoFileContentManager::from_parts(
+            bookmarks.clone(),
+            repo_blobstore.clone(),
+            repo_derived_data.clone(),
+        );
+
+        Arc::new(HookManager::new_test(
+            repo_identity.name().to_string(),
+            Box::new(content_store),
+        ))
+    }
+
+    /// Sparse profiles
+    pub fn sparse_profile(&self, _repo_config: &ArcRepoConfig) -> ArcRepoSparseProfiles {
+        Arc::new(RepoSparseProfiles {
+            sql_profile_sizes: None,
+        })
+    }
+
+    /// Construct unlocked repo lock.
+    pub fn repo_lock(&self) -> Result<ArcRepoLock> {
+        let repo_lock = AlwaysUnlockedRepoLock {};
+        Ok(Arc::new(repo_lock))
+    }
+
+    /// Repo bookmark attrs
+    pub fn repo_bookmark_attrs(&self, repo_config: &ArcRepoConfig) -> Result<ArcRepoBookmarkAttrs> {
+        Ok(Arc::new(RepoBookmarkAttrs::new_test(
+            repo_config.bookmarks.clone(),
+        )?))
+    }
+
+    /// Streaming clone
+    pub fn streaming_clone(
+        &self,
+        repo_identity: &ArcRepoIdentity,
+        repo_blobstore: &ArcRepoBlobstore,
+    ) -> ArcStreamingClone {
+        Arc::new(
+            StreamingCloneBuilder::from_sql_connections(self.metadata_db.clone().into())
+                .build(repo_identity.id(), repo_blobstore.clone()),
         )
     }
 }

@@ -7,34 +7,48 @@
 
 use ascii::AsciiString;
 
-use anyhow::{format_err, Error};
+use anyhow::format_err;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use blobstore::Loadable;
-use bookmarks::{BookmarkName, BookmarkUpdateReason};
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
 use commit_transformation::upload_commits;
 use context::CoreContext;
-use cross_repo_sync::{
-    rewrite_commit, update_mapping_with_version, CommitRewrittenToEmpty, CommitSyncContext,
-    CommitSyncDataProvider, CommitSyncRepos, CommitSyncer, Syncers,
-};
-use live_commit_sync_config::{
-    LiveCommitSyncConfig, TestLiveCommitSyncConfig, TestLiveCommitSyncConfigSource,
-};
+use cross_repo_sync::rewrite_commit;
+use cross_repo_sync::update_mapping_with_version;
+use cross_repo_sync::CommitRewrittenToEmpty;
+use cross_repo_sync::CommitSyncContext;
+use cross_repo_sync::CommitSyncDataProvider;
+use cross_repo_sync::CommitSyncRepos;
+use cross_repo_sync::CommitSyncer;
+use cross_repo_sync::Syncers;
+use live_commit_sync_config::LiveCommitSyncConfig;
+use live_commit_sync_config::TestLiveCommitSyncConfig;
+use live_commit_sync_config::TestLiveCommitSyncConfigSource;
 use maplit::hashmap;
-use megarepolib::{common::ChangesetArgs, perform_move};
-use metaconfig_types::{
-    CommitSyncConfig, CommitSyncConfigVersion, CommonCommitSyncConfig,
-    DefaultSmallToLargeCommitSyncPathAction, SmallRepoCommitSyncConfig, SmallRepoPermanentConfig,
-};
+use megarepolib::common::ChangesetArgs;
+use megarepolib::perform_move;
+use metaconfig_types::CommitSyncConfig;
+use metaconfig_types::CommitSyncConfigVersion;
+use metaconfig_types::CommonCommitSyncConfig;
+use metaconfig_types::DefaultSmallToLargeCommitSyncPathAction;
+use metaconfig_types::SmallRepoCommitSyncConfig;
+use metaconfig_types::SmallRepoPermanentConfig;
+use mononoke_types::ChangesetId;
+use mononoke_types::DateTime;
+use mononoke_types::MPath;
 use mononoke_types::RepositoryId;
-use mononoke_types::{ChangesetId, DateTime, MPath};
 use sql_construct::SqlConstruct;
-use std::{collections::HashMap, str::FromStr, sync::Arc};
-use synced_commit_mapping::{
-    SqlSyncedCommitMapping, SyncedCommitMapping, SyncedCommitMappingEntry,
-};
+use std::collections::HashMap;
+use std::str::FromStr;
+use std::sync::Arc;
+use synced_commit_mapping::SqlSyncedCommitMapping;
+use synced_commit_mapping::SyncedCommitMapping;
+use synced_commit_mapping::SyncedCommitMappingEntry;
 use test_repo_factory::TestRepoFactory;
-use tests_utils::{bookmark, CreateCommitContext};
+use tests_utils::bookmark;
+use tests_utils::CreateCommitContext;
 
 pub fn xrepo_mapping_version_with_small_repo() -> CommitSyncConfigVersion {
     CommitSyncConfigVersion("TEST_VERSION_NAME".to_string())
@@ -67,7 +81,7 @@ where
     let source_repo = commit_syncer.get_source_repo();
     let target_repo = commit_syncer.get_target_repo();
 
-    let bookmark_val = maybe_bookmark_val.ok_or(format_err!("master not found"))?;
+    let bookmark_val = maybe_bookmark_val.ok_or_else(|| format_err!("master not found"))?;
     let source_bcs_mut = source_bcs.into_mut();
     let maybe_rewritten = {
         let map = HashMap::new();
@@ -102,7 +116,6 @@ where
         &bookmark_name,
         target_bcs.get_changeset_id(),
         BookmarkUpdateReason::TestMove,
-        None,
     )
     .unwrap();
     txn.commit().await.unwrap();
@@ -198,11 +211,11 @@ pub async fn init_small_large_repo(
         commit_sync_data_provider,
     );
 
-    let first_bcs_id = CreateCommitContext::new_root(&ctx, &smallrepo)
+    let first_bcs_id = CreateCommitContext::new_root(ctx, &smallrepo)
         .add_file("file", "content")
         .commit()
         .await?;
-    let second_bcs_id = CreateCommitContext::new(&ctx, &smallrepo, vec![first_bcs_id])
+    let second_bcs_id = CreateCommitContext::new(ctx, &smallrepo, vec![first_bcs_id])
         .add_file("file2", "content")
         .commit()
         .await?;
@@ -225,10 +238,10 @@ pub async fn init_small_large_repo(
             CommitSyncContext::Tests,
         )
         .await?;
-    bookmark(&ctx, &smallrepo, "premove")
+    bookmark(ctx, &smallrepo, "premove")
         .set_to(second_bcs_id)
         .await?;
-    bookmark(&ctx, &megarepo, "premove")
+    bookmark(ctx, &megarepo, "premove")
         .set_to(second_bcs_id)
         .await?;
 
@@ -240,7 +253,7 @@ pub async fn init_small_large_repo(
         mark_public: false,
     };
     let move_hg_cs = perform_move(
-        &ctx,
+        ctx,
         &megarepo,
         second_bcs_id,
         Arc::new(prefix_mover),
@@ -254,35 +267,35 @@ pub async fn init_small_large_repo(
         .await?;
     let move_bcs_id = maybe_move_bcs_id.unwrap();
 
-    bookmark(&ctx, &megarepo, "megarepo_start")
+    bookmark(ctx, &megarepo, "megarepo_start")
         .set_to(move_bcs_id)
         .await?;
 
-    bookmark(&ctx, &smallrepo, "megarepo_start")
+    bookmark(ctx, &smallrepo, "megarepo_start")
         .set_to("premove")
         .await?;
 
     // Master commit in the small repo after "big move"
-    let small_master_bcs_id = CreateCommitContext::new(&ctx, &smallrepo, vec![second_bcs_id])
+    let small_master_bcs_id = CreateCommitContext::new(ctx, &smallrepo, vec![second_bcs_id])
         .add_file("file3", "content3")
         .commit()
         .await?;
 
     // Master commit in large repo after "big move"
-    let large_master_bcs_id = CreateCommitContext::new(&ctx, &megarepo, vec![move_bcs_id])
+    let large_master_bcs_id = CreateCommitContext::new(ctx, &megarepo, vec![move_bcs_id])
         .add_file("prefix/file3", "content3")
         .commit()
         .await?;
 
-    bookmark(&ctx, &smallrepo, "master")
+    bookmark(ctx, &smallrepo, "master")
         .set_to(small_master_bcs_id)
         .await?;
-    bookmark(&ctx, &megarepo, "master")
+    bookmark(ctx, &megarepo, "master")
         .set_to(large_master_bcs_id)
         .await?;
 
     update_mapping_with_version(
-        &ctx,
+        ctx,
         hashmap! { small_master_bcs_id => large_master_bcs_id},
         &small_to_large_commit_syncer,
         &version_with_small_repo,
@@ -296,7 +309,7 @@ pub async fn init_small_large_repo(
     println!(
         "{:?}",
         small_to_large_commit_syncer
-            .get_commit_sync_outcome(&ctx, small_master_bcs_id)
+            .get_commit_sync_outcome(ctx, small_master_bcs_id)
             .await?
     );
 
@@ -362,7 +375,7 @@ pub fn get_live_commit_sync_config() -> Arc<dyn LiveCommitSyncConfig> {
         common_pushrebase_bookmarks: vec![],
         small_repos: hashmap! {
             RepositoryId::new(1) => SmallRepoPermanentConfig {
-                bookmark_prefix: bookmark_prefix,
+                bookmark_prefix,
             }
         },
         large_repo_id: RepositoryId::new(0),

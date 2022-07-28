@@ -5,9 +5,15 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{bail, Context, Result};
-use bookmarks::{BookmarkName, BookmarkUpdateReason, Bookmarks, BookmarksRef};
-use clap::{Parser, Subcommand};
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Result;
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
+use bookmarks::Bookmarks;
+use bookmarks::BookmarksRef;
+use clap::Parser;
+use clap::Subcommand;
 use mononoke_app::args::RepoArgs;
 use mononoke_app::MononokeApp;
 use mononoke_types::ChangesetId;
@@ -102,7 +108,7 @@ pub async fn run(app: MononokeApp, args: CommandArgs) -> Result<()> {
             reason,
             to,
         } => {
-            txn.create(&bookmark, to, reason, None)?;
+            txn.create(&bookmark, to, reason)?;
         }
         BookmarkOperation::Update {
             bookmark,
@@ -110,7 +116,7 @@ pub async fn run(app: MononokeApp, args: CommandArgs) -> Result<()> {
             from: Some(from),
             to,
         } => {
-            txn.update(&bookmark, to, from, reason, None)?;
+            txn.update(&bookmark, to, from, reason)?;
         }
         BookmarkOperation::Update {
             bookmark,
@@ -118,21 +124,21 @@ pub async fn run(app: MononokeApp, args: CommandArgs) -> Result<()> {
             from: None,
             to,
         } => {
-            txn.force_set(&bookmark, to, reason, None)?;
+            txn.force_set(&bookmark, to, reason)?;
         }
         BookmarkOperation::Delete {
             bookmark,
             reason,
             from: Some(from),
         } => {
-            txn.delete(&bookmark, from, reason, None)?;
+            txn.delete(&bookmark, from, reason)?;
         }
         BookmarkOperation::Delete {
             bookmark,
             reason,
             from: None,
         } => {
-            txn.force_delete(&bookmark, reason, None)?;
+            txn.force_delete(&bookmark, reason)?;
         }
     }
 

@@ -11,10 +11,10 @@ use context::CoreContext;
 use futures_old::stream::Stream;
 use futures_old::Async;
 use futures_old::Poll;
-use mononoke_types::{ChangesetId, Generation};
+use mononoke_types::ChangesetId;
+use mononoke_types::Generation;
 use std::collections::hash_set::IntoIter;
 use std::collections::HashSet;
-use std::mem::replace;
 
 use crate::setcommon::*;
 use crate::BonsaiNodeStream;
@@ -111,7 +111,7 @@ impl Stream for UnionNodeStream {
             // Return any errors
             {
                 if self.inputs.iter().any(|&(_, ref state)| state.is_err()) {
-                    let inputs = replace(&mut self.inputs, Vec::new());
+                    let inputs = std::mem::take(&mut self.inputs);
                     let (_, err) = inputs
                         .into_iter()
                         .find(|&(_, ref state)| state.is_err())
@@ -132,7 +132,7 @@ impl Stream for UnionNodeStream {
                     if self.accumulator.is_empty() {
                         self.update_current_generation();
                     } else {
-                        let full_accumulator = replace(&mut self.accumulator, HashSet::new());
+                        let full_accumulator = std::mem::take(&mut self.accumulator);
                         self.drain = Some(full_accumulator.into_iter());
                     }
                 }
@@ -150,20 +150,26 @@ impl Stream for UnionNodeStream {
 mod test {
     use super::*;
     use crate::errors::ErrorKind;
+    use crate::fixtures::BranchEven;
+    use crate::fixtures::BranchUneven;
+    use crate::fixtures::BranchWide;
+    use crate::fixtures::Linear;
     use crate::fixtures::TestRepoFixture;
-    use crate::fixtures::{BranchEven, BranchUneven, BranchWide, Linear};
-    use crate::setcommon::{NotReadyEmptyStream, RepoErrorStream};
+    use crate::setcommon::NotReadyEmptyStream;
+    use crate::setcommon::RepoErrorStream;
     use crate::tests::get_single_bonsai_streams;
     use crate::tests::TestChangesetFetcher;
     use crate::BonsaiNodeStream;
     use context::CoreContext;
     use failure_ext::err_downcast;
     use fbinit::FacebookInit;
-    use futures::{compat::Stream01CompatExt, stream::StreamExt as _};
+    use futures::compat::Stream01CompatExt;
+    use futures::stream::StreamExt as _;
     use futures_ext::StreamExt;
     use futures_old::executor::spawn;
     use revset_test_helper::assert_changesets_sequence;
-    use revset_test_helper::{single_changeset_id, string_to_bonsai};
+    use revset_test_helper::single_changeset_id;
+    use revset_test_helper::string_to_bonsai;
     use std::sync::Arc;
 
     #[fbinit::test]

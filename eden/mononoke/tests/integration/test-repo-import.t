@@ -133,19 +133,17 @@
   Does the git repo you're about to merge has multiple heads (unmerged branches)? It's unsafe to use this tool when it does. (y/n) * Let's get this merged! (glob)
   * using repo "repo" repoid RepositoryId(0) (glob)
   * Started importing git commits to Mononoke (glob)
-  * GitRepo:$TESTTMP/repo-git commit 1 of 5 - Oid:ce435b03 => Bid:48f1b400 (glob)
-  * GitRepo:$TESTTMP/repo-git commit 2 of 5 - Oid:2c01e4a5 => Bid:949a7a4d (glob)
-  * GitRepo:$TESTTMP/repo-git commit 3 of 5 - Oid:38f71f7e => Bid:ee7d2370 (glob)
-  * GitRepo:$TESTTMP/repo-git commit 4 of 5 - Oid:13aef6ec => Bid:135f711c (glob)
-  * GitRepo:$TESTTMP/repo-git commit 5 of 5 - Oid:6783febd => Bid:585522d1 (glob)
+  * GitRepo:$TESTTMP/repo-git commit 1 of 5 - Oid:ce435b03 => Bid:071d73e6 (glob)
+  * GitRepo:$TESTTMP/repo-git commit 2 of 5 - Oid:2c01e4a5 => Bid:4dbc9506 (glob)
+  * GitRepo:$TESTTMP/repo-git commit 3 of 5 - Oid:38f71f7e => Bid:d805ae48 (glob)
+  * GitRepo:$TESTTMP/repo-git commit 4 of 5 - Oid:13aef6ec => Bid:260f78ba (glob)
+  * GitRepo:$TESTTMP/repo-git commit 5 of 5 - Oid:6783febd => Bid:8d76deb1 (glob)
   * Added commits to Mononoke (glob)
-  * Saving gitimported bonsai changesets (glob)
-  * Saved gitimported bonsai changesets (glob)
-  * Commit 1/5: Remapped ChangesetId(Blake2(48f1b400fb9efb27719d05fea6616413124a00825c11b696e679b59abfa97a62)) => ChangesetId(Blake2(863f670ddbe41f99e0c3414d3463817c6b7e0ff1c5657f6fa726c8d842da86d9)) (glob)
-  * Commit 2/5: Remapped ChangesetId(Blake2(949a7a4d4df6d48ae385b4df86451a96b02433bc51b3912812c78c4bb0a6447a)) => ChangesetId(Blake2(2dcfd5aae7492591bca9870e9679b74ca607f50093a667c635b3e3e183c11681)) (glob)
-  * Commit 3/5: Remapped ChangesetId(Blake2(ee7d237062f2fc084e89b22a95b03949d4fffb6c830538a335be94d36abbd053)) => ChangesetId(Blake2(2f29ea56dc77ff7c5d126cb8b12e8e4d0e9f3429ae7a2d6c18d719357513b3f6)) (glob)
-  * Commit 4/5: Remapped ChangesetId(Blake2(135f711c4dfd11c9ea70a00dc9dbb722a430f2a3f7abe2e8a007d655bde81a22)) => ChangesetId(Blake2(dc499d83522455400be709b4abea4440077855d80e9d9f41a8a352127a63d66d)) (glob)
-  * Commit 5/5: Remapped ChangesetId(Blake2(585522d15abaef2252a610d6b6d6a2614a17735cd1704ef020c7570bb531ce6d)) => ChangesetId(Blake2(4d8f98568393aa024eef343bf5bb4695dbf1386824dc0775faa7fe5e95707115)) (glob)
+  * Commit 1/5: Remapped ChangesetId(Blake2(071d73e6b97823ffbde324c6147a785013f479157ade3f83c9b016c8f40c09de)) => ChangesetId(Blake2(4f830791a5ae7a2981d6c252d2be0bd7ebd3b1090080074b4b4bae6deb250b4a)) (glob)
+  * Commit 2/5: Remapped ChangesetId(Blake2(4dbc950685a833a9329f7f31116b92232f6d759769c699ded44fba4e239c66a4)) => ChangesetId(Blake2(fea472cdf364ad6499f20e5f32c0ba01cb73fda8cab229c24f456df085b17622)) (glob)
+  * Commit 3/5: Remapped ChangesetId(Blake2(d805ae48f71b290203959f8b9eb859bea762989fe5c32439dbd39f48c9050960)) => ChangesetId(Blake2(6b49fda25c209960aad992721e872237737671564a6ce0f0347f04f4c0fee177)) (glob)
+  * Commit 4/5: Remapped ChangesetId(Blake2(260f78ba75e428610060f950dc7b4aa06a81e8b34179a38e6f46492f90c76084)) => ChangesetId(Blake2(5d2a4db5b6b759b8767ed501d1a53a4bec89ea3778bfa9516b62c6986c78f132)) (glob)
+  * Commit 5/5: Remapped ChangesetId(Blake2(8d76deb176f7a48e0ab67b66cb791c6461406b6e35aedc440f6e4f9e3b27127c)) => ChangesetId(Blake2(11b1e6976133cca327762371e8c523d3a0cd3ff2abe34385c8253df72cc989a9)) (glob)
   * Saving shifted bonsai changesets (glob)
   * Saved shifted bonsai changesets (glob)
   * Start deriving data types (glob)
@@ -165,37 +163,37 @@
   * SegmentedChangelogTailer is done (glob)
   * Finished tailing segmented changelog (glob)
   * Start moving the bookmark (glob)
-  * Created bookmark BookmarkName { bookmark: "repo_import_new_repo" } pointing to 863f670ddbe41f99e0c3414d3463817c6b7e0ff1c5657f6fa726c8d842da86d9 (glob)
-  * Set bookmark BookmarkName { bookmark: "repo_import_new_repo" } to point to ChangesetId(Blake2(2f29ea56dc77ff7c5d126cb8b12e8e4d0e9f3429ae7a2d6c18d719357513b3f6)) (glob)
-  * Set bookmark BookmarkName { bookmark: "repo_import_new_repo" } to point to ChangesetId(Blake2(4d8f98568393aa024eef343bf5bb4695dbf1386824dc0775faa7fe5e95707115)) (glob)
+  * Created bookmark BookmarkName { bookmark: "repo_import_new_repo" } pointing to 4f830791a5ae7a2981d6c252d2be0bd7ebd3b1090080074b4b4bae6deb250b4a (glob)
+  * Set bookmark BookmarkName { bookmark: "repo_import_new_repo" } to point to ChangesetId(Blake2(6b49fda25c209960aad992721e872237737671564a6ce0f0347f04f4c0fee177)) (glob)
+  * Set bookmark BookmarkName { bookmark: "repo_import_new_repo" } to point to ChangesetId(Blake2(11b1e6976133cca327762371e8c523d3a0cd3ff2abe34385c8253df72cc989a9)) (glob)
   * Finished moving the bookmark (glob)
   * Merging the imported commits into given bookmark, master_bookmark (glob)
   * Done checking path conflicts (glob)
-  * Creating a merge bonsai changeset with parents: c3384961b16276f2db77df9d7c874bbe981cf0525bd6f84a502f919044f2dabd, 2dcfd5aae7492591bca9870e9679b74ca607f50093a667c635b3e3e183c11681 (glob)
-  * Created merge bonsai: d4400860328c35d4116c437bea850d72bc213104c151c8b54f8db9191719ee2a and changeset: BonsaiChangeset { inner: BonsaiChangesetMut { parents: [ChangesetId(Blake2(c3384961b16276f2db77df9d7c874bbe981cf0525bd6f84a502f919044f2dabd)), ChangesetId(Blake2(2dcfd5aae7492591bca9870e9679b74ca607f50093a667c635b3e3e183c11681))], author: "user", author_date: DateTime(2005-04-02T21:37:00+01:00), committer: Some("user"), committer_date: Some(DateTime(2005-04-02T21:37:00+01:00)), message: "merging", extra: {}, file_changes: {}, is_snapshot: false }, id: ChangesetId(Blake2(d4400860328c35d4116c437bea850d72bc213104c151c8b54f8db9191719ee2a)) } (glob)
+  * Creating a merge bonsai changeset with parents: c3384961b16276f2db77df9d7c874bbe981cf0525bd6f84a502f919044f2dabd, fea472cdf364ad6499f20e5f32c0ba01cb73fda8cab229c24f456df085b17622 (glob)
+  * Created merge bonsai: 3b27309e57b5809695eb8978fa999d34fafbbe33d17420d9e0301351a19e40a1 and changeset: BonsaiChangeset { inner: BonsaiChangesetMut { parents: [ChangesetId(Blake2(c3384961b16276f2db77df9d7c874bbe981cf0525bd6f84a502f919044f2dabd)), ChangesetId(Blake2(fea472cdf364ad6499f20e5f32c0ba01cb73fda8cab229c24f456df085b17622))], author: "user", author_date: DateTime(2005-04-02T21:37:00+01:00), committer: Some("user"), committer_date: Some(DateTime(2005-04-02T21:37:00+01:00)), message: "merging", extra: {}, file_changes: {}, is_snapshot: false }, id: ChangesetId(Blake2(3b27309e57b5809695eb8978fa999d34fafbbe33d17420d9e0301351a19e40a1)) } (glob)
   * Finished merging (glob)
   * Running pushrebase (glob)
-  * Finished pushrebasing to d4400860328c35d4116c437bea850d72bc213104c151c8b54f8db9191719ee2a (glob)
-  * Set bookmark BookmarkName { bookmark: "repo_import_new_repo" } to the merge commit: ChangesetId(Blake2(d4400860328c35d4116c437bea850d72bc213104c151c8b54f8db9191719ee2a)) (glob)
+  * Finished pushrebasing to 3b27309e57b5809695eb8978fa999d34fafbbe33d17420d9e0301351a19e40a1 (glob)
+  * Set bookmark BookmarkName { bookmark: "repo_import_new_repo" } to the merge commit: ChangesetId(Blake2(3b27309e57b5809695eb8978fa999d34fafbbe33d17420d9e0301351a19e40a1)) (glob)
 
 # Check if we derived all the types for imported commits. Checking last one after bookmark move, before setting it to the merge commit.
-  $ MERGE_PARENT_GIT="4d8f98568393aa024eef343bf5bb4695dbf1386824dc0775faa7fe5e95707115"
+  $ MERGE_PARENT_GIT="11b1e6976133cca327762371e8c523d3a0cd3ff2abe34385c8253df72cc989a9"
   $ mononoke_admin derived-data exists changeset_info $MERGE_PARENT_GIT 2> /dev/null
-  Derived: 4d8f98568393aa024eef343bf5bb4695dbf1386824dc0775faa7fe5e95707115
+  Derived: 11b1e6976133cca327762371e8c523d3a0cd3ff2abe34385c8253df72cc989a9
   $ mononoke_admin derived-data exists blame $MERGE_PARENT_GIT 2> /dev/null
-  Derived: 4d8f98568393aa024eef343bf5bb4695dbf1386824dc0775faa7fe5e95707115
+  Derived: 11b1e6976133cca327762371e8c523d3a0cd3ff2abe34385c8253df72cc989a9
   $ mononoke_admin derived-data exists deleted_manifest $MERGE_PARENT_GIT 2> /dev/null
-  Derived: 4d8f98568393aa024eef343bf5bb4695dbf1386824dc0775faa7fe5e95707115
+  Derived: 11b1e6976133cca327762371e8c523d3a0cd3ff2abe34385c8253df72cc989a9
   $ mononoke_admin derived-data exists fastlog $MERGE_PARENT_GIT 2> /dev/null
-  Derived: 4d8f98568393aa024eef343bf5bb4695dbf1386824dc0775faa7fe5e95707115
+  Derived: 11b1e6976133cca327762371e8c523d3a0cd3ff2abe34385c8253df72cc989a9
   $ mononoke_admin derived-data exists filenodes $MERGE_PARENT_GIT 2> /dev/null
-  Derived: 4d8f98568393aa024eef343bf5bb4695dbf1386824dc0775faa7fe5e95707115
+  Derived: 11b1e6976133cca327762371e8c523d3a0cd3ff2abe34385c8253df72cc989a9
   $ mononoke_admin derived-data exists fsnodes $MERGE_PARENT_GIT 2> /dev/null
-  Derived: 4d8f98568393aa024eef343bf5bb4695dbf1386824dc0775faa7fe5e95707115
+  Derived: 11b1e6976133cca327762371e8c523d3a0cd3ff2abe34385c8253df72cc989a9
   $ mononoke_admin derived-data exists hgchangesets $MERGE_PARENT_GIT 2> /dev/null
-  Derived: 4d8f98568393aa024eef343bf5bb4695dbf1386824dc0775faa7fe5e95707115
+  Derived: 11b1e6976133cca327762371e8c523d3a0cd3ff2abe34385c8253df72cc989a9
   $ mononoke_admin derived-data exists unodes $MERGE_PARENT_GIT 2> /dev/null
-  Derived: 4d8f98568393aa024eef343bf5bb4695dbf1386824dc0775faa7fe5e95707115
+  Derived: 11b1e6976133cca327762371e8c523d3a0cd3ff2abe34385c8253df72cc989a9
 
 # Start Mononoke
   $ start_and_wait_for_mononoke_server
@@ -211,29 +209,29 @@
     "datetime": * (glob)
     "dest_bookmark_name": "master_bookmark",
     "dest_path": "new_dir/new_repo",
-    "git_merge_bcs_id": "949a7a4d4df6d48ae385b4df86451a96b02433bc51b3912812c78c4bb0a6447a",
+    "git_merge_bcs_id": "4dbc950685a833a9329f7f31116b92232f6d759769c699ded44fba4e239c66a4",
     "git_merge_rev_id": "2c01e4a5658421e2bfcd08e31d9b69399319bcd3",
     "git_repo_path": "$TESTTMP/repo-git",
     "gitimport_bcs_ids": [
-      "48f1b400fb9efb27719d05fea6616413124a00825c11b696e679b59abfa97a62",
-      "949a7a4d4df6d48ae385b4df86451a96b02433bc51b3912812c78c4bb0a6447a",
-      "ee7d237062f2fc084e89b22a95b03949d4fffb6c830538a335be94d36abbd053",
-      "135f711c4dfd11c9ea70a00dc9dbb722a430f2a3f7abe2e8a007d655bde81a22",
-      "585522d15abaef2252a610d6b6d6a2614a17735cd1704ef020c7570bb531ce6d"
+      "071d73e6b97823ffbde324c6147a785013f479157ade3f83c9b016c8f40c09de",
+      "4dbc950685a833a9329f7f31116b92232f6d759769c699ded44fba4e239c66a4",
+      "d805ae48f71b290203959f8b9eb859bea762989fe5c32439dbd39f48c9050960",
+      "260f78ba75e428610060f950dc7b4aa06a81e8b34179a38e6f46492f90c76084",
+      "8d76deb176f7a48e0ab67b66cb791c6461406b6e35aedc440f6e4f9e3b27127c"
     ],
     "hg_sync_check_disabled": true,
     "import_stage": "PushCommit",
-    "imported_cs_id": "2dcfd5aae7492591bca9870e9679b74ca607f50093a667c635b3e3e183c11681",
+    "imported_cs_id": "fea472cdf364ad6499f20e5f32c0ba01cb73fda8cab229c24f456df085b17622",
     "merged_cs_id": * (glob)
     "move_bookmark_commits_done": 4,
     "phab_check_disabled": true,
     "recovery_file_path": "$TESTTMP/repo-git/recovery_file.json",
     "shifted_bcs_ids": [
-      "863f670ddbe41f99e0c3414d3463817c6b7e0ff1c5657f6fa726c8d842da86d9",
-      "2dcfd5aae7492591bca9870e9679b74ca607f50093a667c635b3e3e183c11681",
-      "2f29ea56dc77ff7c5d126cb8b12e8e4d0e9f3429ae7a2d6c18d719357513b3f6",
-      "dc499d83522455400be709b4abea4440077855d80e9d9f41a8a352127a63d66d",
-      "4d8f98568393aa024eef343bf5bb4695dbf1386824dc0775faa7fe5e95707115"
+      "4f830791a5ae7a2981d6c252d2be0bd7ebd3b1090080074b4b4bae6deb250b4a",
+      "fea472cdf364ad6499f20e5f32c0ba01cb73fda8cab229c24f456df085b17622",
+      "6b49fda25c209960aad992721e872237737671564a6ce0f0347f04f4c0fee177",
+      "5d2a4db5b6b759b8767ed501d1a53a4bec89ea3778bfa9516b62c6986c78f132",
+      "11b1e6976133cca327762371e8c523d3a0cd3ff2abe34385c8253df72cc989a9"
     ],
     "sleep_time": {
       "nanos": 0,
@@ -257,11 +255,11 @@
   (activating bookmark master_bookmark)
 
   $ log -r "ancestors(master_bookmark)"
-  @    merging [draft;rev=5;40df911090f8]
+  @    merging [draft;rev=5;dd88c051bcb0]
   ├─╮
-  │ o  Add file3 [draft;rev=4;73e94258a70f]
+  │ o  Add file3 [draft;rev=4;fe8342d2de1a]
   │ │
-  │ o  Add file1 and file2 [draft;rev=3;91693bb0642b]
+  │ o  Add file1 and file2 [draft;rev=3;4ad443ff73f0]
   │
   o  C [draft;rev=2;26805aba1e60]
   │

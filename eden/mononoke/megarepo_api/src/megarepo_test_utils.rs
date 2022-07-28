@@ -5,24 +5,36 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Error};
+use anyhow::anyhow;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use commit_transformation::create_source_to_target_multi_mover;
 use context::CoreContext;
 use maplit::btreemap;
-use megarepo_config::{
-    MononokeMegarepoConfigs, SourceRevision, SyncConfigVersion, Target, TestMononokeMegarepoConfigs,
-};
-use megarepo_mapping::{
-    CommitRemappingState, MegarepoMapping, Source, SourceMappingRules, SourceName, SyncTargetConfig,
-};
+use megarepo_config::MergeMode;
+use megarepo_config::MononokeMegarepoConfigs;
+use megarepo_config::SourceRevision;
+use megarepo_config::SyncConfigVersion;
+use megarepo_config::Target;
+use megarepo_config::TestMononokeMegarepoConfigs;
+use megarepo_mapping::CommitRemappingState;
+use megarepo_mapping::MegarepoMapping;
+use megarepo_mapping::Source;
+use megarepo_mapping::SourceMappingRules;
+use megarepo_mapping::SourceName;
+use megarepo_mapping::SyncTargetConfig;
 use mononoke_api::Mononoke;
-use mononoke_types::{ChangesetId, RepositoryId};
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
 use mutable_renames::MutableRenames;
+use std::collections::BTreeMap;
 use std::path::Path;
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 use test_repo_factory::TestRepoFactory;
-use tests_utils::{bookmark, list_working_copy_utf8, resolve_cs_id, CreateCommitContext};
+use tests_utils::bookmark;
+use tests_utils::list_working_copy_utf8;
+use tests_utils::resolve_cs_id;
+use tests_utils::CreateCommitContext;
 
 pub struct MegarepoTest {
     pub blobrepo: BlobRepo,
@@ -79,24 +91,24 @@ impl MegarepoTest {
             version.clone(),
         )?;
 
-        let mut init_target_cs = CreateCommitContext::new_root(&ctx, &self.blobrepo);
+        let mut init_target_cs = CreateCommitContext::new_root(ctx, &self.blobrepo);
 
         let mut remapping_state = btreemap! {};
         for source in initial_config.sources {
             let mover = create_source_to_target_multi_mover(source.mapping.clone())?;
             let init_source_cs_id = match source.revision {
                 SourceRevision::bookmark(bookmark) => {
-                    resolve_cs_id(&ctx, &self.blobrepo, bookmark).await?
+                    resolve_cs_id(ctx, &self.blobrepo, bookmark).await?
                 }
                 SourceRevision::hash(hash) => {
                     let cs_id = ChangesetId::from_bytes(hash)?;
-                    resolve_cs_id(&ctx, &self.blobrepo, cs_id).await?
+                    resolve_cs_id(ctx, &self.blobrepo, cs_id).await?
                 }
                 _ => {
                     unimplemented!()
                 }
             };
-            let source_wc = list_working_copy_utf8(&ctx, &self.blobrepo, init_source_cs_id).await?;
+            let source_wc = list_working_copy_utf8(ctx, &self.blobrepo, init_source_cs_id).await?;
 
             for (file, content) in source_wc {
                 let target_files = mover(&file)?;
@@ -117,7 +129,7 @@ impl MegarepoTest {
         let init_target_cs_id = init_target_cs.get_changeset_id();
         blobrepo::save_bonsai_changesets(vec![init_target_cs], ctx.clone(), &self.blobrepo).await?;
 
-        bookmark(&ctx, &self.blobrepo, target.bookmark.clone())
+        bookmark(ctx, &self.blobrepo, target.bookmark.clone())
             .set_to(init_target_cs_id)
             .await?;
         Ok(init_target_cs_id)
@@ -174,6 +186,7 @@ pub struct SourceVersionBuilder {
     config_builder: SyncTargetConfigBuilder,
     linkfiles: BTreeMap<String, String>,
     copyfiles: BTreeMap<String, String>,
+    merge_mode: Option<MergeMode>,
 }
 
 impl SourceVersionBuilder {
@@ -194,6 +207,7 @@ impl SourceVersionBuilder {
             config_builder,
             linkfiles: BTreeMap::new(),
             copyfiles: BTreeMap::new(),
+            merge_mode: None,
         }
     }
 
@@ -228,6 +242,11 @@ impl SourceVersionBuilder {
     #[allow(dead_code)]
     pub fn copyfile<S1: ToString, S2: ToString>(mut self, src: S1, dst: S2) -> Self {
         self.copyfiles.insert(src.to_string(), dst.to_string());
+        self
+    }
+
+    pub fn merge_mode(mut self, mode: MergeMode) -> Self {
+        self.merge_mode = Some(mode);
         self
     }
 
@@ -269,6 +288,7 @@ impl SourceVersionBuilder {
                 linkfiles: self.linkfiles,
                 overrides,
             },
+            merge_mode: self.merge_mode,
         };
         self.config_builder.add_source(source);
         Ok(self.config_builder)

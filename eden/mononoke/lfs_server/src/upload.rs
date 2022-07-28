@@ -6,30 +6,46 @@
  */
 
 use std::collections::HashMap;
-use std::str::{self, FromStr};
+use std::str;
+use std::str::FromStr;
 
-use anyhow::{Context, Error};
+use anyhow::Context;
+use anyhow::Error;
 use bytes::Bytes;
-use futures::{channel::mpsc::channel, SinkExt, Stream, StreamExt, TryStreamExt};
+use filestore::Alias;
+use filestore::FetchKey;
+use filestore::FilestoreConfigRef;
+use filestore::StoreRequest;
+use futures::channel::mpsc::channel;
+use futures::SinkExt;
+use futures::Stream;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use futures_util::try_join;
-use gotham::state::{FromState, State};
-use gotham_derive::{StateData, StaticResponseExtender};
+use gotham::state::FromState;
+use gotham::state::State;
+use gotham_derive::StateData;
+use gotham_derive::StaticResponseExtender;
+use gotham_ext::error::HttpError;
+use gotham_ext::middleware::HttpScubaKey;
+use gotham_ext::middleware::ScubaMiddlewareState;
+use gotham_ext::response::EmptyBody;
+use gotham_ext::response::TryIntoResponse;
 use http::header::CONTENT_LENGTH;
-use hyper::{Body, Request};
+use hyper::Body;
+use hyper::Request;
+use lfs_protocol::ObjectAction;
+use lfs_protocol::ObjectStatus;
+use lfs_protocol::Operation;
+use lfs_protocol::RequestBatch;
+use lfs_protocol::RequestObject;
+use lfs_protocol::ResponseBatch;
+use lfs_protocol::Sha256 as LfsSha256;
+use lfs_protocol::Transfer;
+use mononoke_types::hash::Sha256;
+use repo_blobstore::RepoBlobstoreRef;
 use serde::Deserialize;
 use stats::prelude::*;
-
-use filestore::{self, Alias, FetchKey, StoreRequest};
-use gotham_ext::{
-    error::HttpError,
-    middleware::{HttpScubaKey, ScubaMiddlewareState},
-    response::{EmptyBody, TryIntoResponse},
-};
-use lfs_protocol::{
-    ObjectAction, ObjectStatus, Operation, RequestBatch, RequestObject, ResponseBatch,
-    Sha256 as LfsSha256, Transfer,
-};
-use mononoke_types::hash::Sha256;
 
 use crate::errors::ErrorKind;
 use crate::lfs_server_context::RepositoryRequestContext;
@@ -52,11 +68,11 @@ const BUFFER_SIZE: usize = 5;
 mod closeable_sender {
     use pin_project::pin_project;
 
-    use futures::{
-        channel::mpsc::{SendError, Sender},
-        sink::Sink,
-        task::{Context, Poll},
-    };
+    use futures::channel::mpsc::SendError;
+    use futures::channel::mpsc::Sender;
+    use futures::sink::Sink;
+    use futures::task::Context;
+    use futures::task::Poll;
     use std::pin::Pin;
 
     #[pin_project]
@@ -128,7 +144,7 @@ fn find_actions(
         Transfer::Basic => objects
             .into_iter()
             .find(|o| o.object == *object)
-            .ok_or(ErrorKind::UpstreamMissingObject(*object).into())
+            .ok_or_else(|| ErrorKind::UpstreamMissingObject(*object).into())
             .and_then(|o| match o.status {
                 ObjectStatus::Ok {
                     authenticated: false,
@@ -152,8 +168,8 @@ where
     STATS::internal_uploads.add_value(1);
 
     filestore::store(
-        ctx.repo.blobstore(),
-        ctx.repo.filestore_config(),
+        ctx.repo.repo_blobstore(),
+        *ctx.repo.filestore_config(),
         &ctx.ctx,
         &StoreRequest::with_sha256(size, oid),
         data,
@@ -211,7 +227,7 @@ where
         let body = Body::wrap_stream(data);
         let req = Request::put(href)
             .header("Content-Length", &size.to_string())
-            .body(body.into())?;
+            .body(body)?;
 
         // NOTE: We read the response body here, otherwise Hyper will not allow this connection to
         // be reused.
@@ -258,8 +274,8 @@ where
         .map_err(|()| ErrorKind::ClientCancelled)
         .err_into();
 
-    let internal_upload = internal_upload(&ctx, oid, size, internal_recv);
-    let upstream_upload = upstream_upload(&ctx, oid, size, upstream_recv);
+    let internal_upload = internal_upload(ctx, oid, size, internal_recv);
+    let upstream_upload = upstream_upload(ctx, oid, size, upstream_recv);
 
     let mut received: usize = 0;
 
@@ -301,7 +317,7 @@ async fn sync_internal_and_upstream(
 ) -> Result<(), Error> {
     let key = FetchKey::Aliased(Alias::Sha256(oid));
 
-    let res = filestore::fetch(ctx.repo.get_blobstore(), ctx.ctx.clone(), &key).await?;
+    let res = filestore::fetch(ctx.repo.repo_blobstore().clone(), ctx.ctx.clone(), &key).await?;
 
     match res {
         Some(stream) => {
@@ -328,11 +344,11 @@ async fn sync_internal_and_upstream(
                 .upstream_batch(&batch)
                 .await
                 .context(ErrorKind::UpstreamBatchError)?
-                .ok_or_else(|| ErrorKind::ObjectCannotBeSynced(object))?;
+                .ok_or(ErrorKind::ObjectCannotBeSynced(object))?;
 
             let action = find_actions(batch, &object)?
                 .remove(&Operation::Download)
-                .ok_or_else(|| ErrorKind::ObjectCannotBeSynced(object))?;
+                .ok_or(ErrorKind::ObjectCannotBeSynced(object))?;
 
             let req = Request::get(action.href).body(Body::empty())?;
 
@@ -419,9 +435,11 @@ pub async fn upload(state: &mut State) -> Result<impl TryIntoResponse, HttpError
 #[cfg(test)]
 mod test {
     use super::*;
-    use chaosblob::{ChaosBlobstore, ChaosOptions};
+    use chaosblob::ChaosBlobstore;
+    use chaosblob::ChaosOptions;
     use fbinit::FacebookInit;
-    use futures::{future, stream};
+    use futures::future;
+    use futures::stream;
     use memblob::Memblob;
     use std::num::NonZeroU32;
     use std::sync::Arc;

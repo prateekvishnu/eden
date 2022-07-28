@@ -10,32 +10,38 @@
 
 #![deny(missing_docs)]
 
-use anyhow::{anyhow, Error, Result};
-use std::{
-    collections::{HashMap, HashSet},
-    fmt,
-    num::{NonZeroU64, NonZeroUsize},
-    ops::Deref,
-    path::PathBuf,
-    str,
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
-};
+use anyhow::anyhow;
+use anyhow::Error;
+use anyhow::Result;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fmt;
+use std::num::NonZeroU64;
+use std::num::NonZeroUsize;
+use std::ops::Deref;
+use std::path::PathBuf;
+use std::str;
+use std::str::FromStr;
+use std::time::Duration;
 
 use ascii::AsciiString;
 use bookmarks_types::BookmarkName;
-use derive_more::{From, Into};
-use fbinit::FacebookInit;
-use metadata::Metadata;
-use mononoke_types::{BonsaiChangeset, ChangesetId, MPath, PrefixTrie, RepositoryId};
-use mysql_common::value::convert::{ConvIr, FromValue, ParseIr};
-use permission_checker::{BoxMembershipChecker, MembershipCheckerBuilder};
+use derive_more::From;
+use derive_more::Into;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::ChangesetId;
+use mononoke_types::MPath;
+use mononoke_types::PrefixTrie;
+use mononoke_types::RepositoryId;
+use mysql_common::value::convert::ConvIr;
+use mysql_common::value::convert::FromValue;
+use mysql_common::value::convert::ParseIr;
 use regex::Regex;
 use scuba::ScubaValue;
 use serde_derive::Deserialize;
 use sql::mysql;
-use sql::mysql_async::{FromValueError, Value};
+use sql::mysql_async::FromValueError;
+use sql::mysql_async::Value;
 
 /// A Regex that can be compared against other Regexes.
 ///
@@ -80,18 +86,13 @@ impl PartialEq for ComparableRegex {
 
 impl Eq for ComparableRegex {}
 
-/// Single entry that
+/// Structure representing general purpose identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AllowlistEntry {
-    /// Hardcoded allowed identity name i.e. USER (identity type) stash (identity data)
-    HardcodedIdentity {
-        /// Identity type
-        ty: String,
-        /// Identity data
-        data: String,
-    },
-    /// Name of the tier
-    Tier(String),
+pub struct Identity {
+    /// Type of this identity.
+    pub id_type: String,
+    /// Associated data for this identity.
+    pub id_data: String,
 }
 
 /// Configuration for how blobs are redacted
@@ -106,10 +107,14 @@ pub struct RedactionConfig {
 }
 
 /// Configuration for all repos
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommonConfig {
-    /// Who can interact with Mononoke
-    pub security_config: Vec<AllowlistEntry>,
+    /// Hipster tier that is permitted to act as a trusted proxy.
+    pub trusted_parties_hipster_tier: Option<String>,
+    /// Identities that act as trusted proxies.
+    pub trusted_parties_allowlist: Vec<Identity>,
+    /// Identities that are permitted to access all repos.
+    pub global_allowlist: Vec<Identity>,
     /// Parent category to use for load limiting
     pub loadlimiter_category: Option<String>,
     /// Params for logging censored blobstore accesses
@@ -119,6 +124,8 @@ pub struct CommonConfig {
     pub enable_http_control_api: bool,
     /// Configuration for redaction of blobs
     pub redaction_config: RedactionConfig,
+    /// Service identity for interal Mononoke services.
+    pub internal_identity: Identity,
 }
 
 /// Configuration for logging of censored blobstore accesses
@@ -138,8 +145,6 @@ pub struct RepoConfig {
     pub enabled: bool,
     /// Persistent storage for this repo
     pub storage_config: StorageConfig,
-    /// Address of the SQL database used to lock writes to a repo.
-    pub write_lock_db_address: Option<String>,
     /// How large a cache to use (in bytes) for RepoGenCache derived information
     pub generation_cache_size: usize,
     /// Numerical repo id of the repo.
@@ -172,8 +177,6 @@ pub struct RepoConfig {
     pub hook_manager_params: Option<HookManagerParams>,
     /// Skiplist blobstore key (used to make revset faster)
     pub skiplist_index_blobstore_key: Option<String>,
-    /// Params fro the bunle2 replay
-    pub bundle2_replay_params: Bundle2ReplayParams,
     /// Max number of results in listkeyspatterns.
     pub list_keys_patterns_max: u64,
     /// Params for File storage
@@ -188,11 +191,6 @@ pub struct RepoConfig {
     pub source_control_service_monitoring: Option<SourceControlServiceMonitoring>,
     /// Derived data config for this repo
     pub derived_data_config: DerivedDataConfig,
-    /// Name of this repository in hgsql.
-    pub hgsql_name: HgsqlName,
-    /// Name of this repository in hgsql ... for globalrevs. This could, in some cases, not be the
-    /// same as HgsqlName.
-    pub hgsql_globalrevs_name: HgsqlGlobalrevsName,
     /// Whether to enforce strict LFS ACL checks for this repo.
     pub enforce_lfs_acl_check: bool,
     /// Whether to use warm bookmark cache while serving data hg wireprotocol
@@ -212,6 +210,12 @@ pub struct RepoConfig {
     pub walker_config: Option<WalkerConfig>,
     /// Cross-repo commit validation config
     pub cross_repo_commit_validation_config: Option<CrossRepoCommitValidation>,
+    /// Monitored spares profiles configuration.
+    pub sparse_profiles_config: Option<SparseProfilesConfig>,
+    /// Configuration related to hg-sync job for prod repos
+    pub hg_sync_config: Option<HgSyncConfig>,
+    /// Configuration related to hg-sync job for backup repos
+    pub backup_hg_sync_config: Option<HgSyncConfig>,
 }
 
 /// Backup repo configuration
@@ -434,123 +438,6 @@ impl From<Regex> for BookmarkOrRegex {
     }
 }
 
-/// Attributes for a single bookmark
-pub struct SingleBookmarkAttr {
-    params: BookmarkParams,
-    membership: Option<BoxMembershipChecker>,
-}
-
-impl SingleBookmarkAttr {
-    fn new(params: BookmarkParams, membership: Option<BoxMembershipChecker>) -> Self {
-        Self { params, membership }
-    }
-
-    /// Bookmark parameters from config
-    pub fn params(&self) -> &BookmarkParams {
-        &self.params
-    }
-
-    /// Membership checker
-    pub fn membership(&self) -> &Option<BoxMembershipChecker> {
-        &self.membership
-    }
-}
-
-/// Collection of all bookmark attribtes
-#[derive(Clone)]
-pub struct BookmarkAttrs {
-    bookmark_attrs: Arc<Vec<SingleBookmarkAttr>>,
-}
-
-impl BookmarkAttrs {
-    /// create bookmark attributes from bookmark params vector
-    pub async fn new(
-        fb: FacebookInit,
-        bookmark_params: impl IntoIterator<Item = BookmarkParams>,
-    ) -> Result<Self, Error> {
-        let mut v = vec![];
-        for params in bookmark_params {
-            let membership_checker = match params.allowed_hipster_group {
-                Some(ref hipster_group) => {
-                    Some(MembershipCheckerBuilder::for_group(fb, &hipster_group).await?)
-                }
-                None => None,
-            };
-
-            v.push(SingleBookmarkAttr::new(params, membership_checker));
-        }
-
-        Ok(Self {
-            bookmark_attrs: Arc::new(v),
-        })
-    }
-
-    /// select bookmark params matching provided bookmark
-    pub fn select<'a>(
-        &'a self,
-        bookmark: &'a BookmarkName,
-    ) -> impl Iterator<Item = &'a SingleBookmarkAttr> {
-        self.bookmark_attrs
-            .iter()
-            .filter(move |attr| attr.params().bookmark.matches(bookmark))
-    }
-
-    /// check if provided bookmark is fast-forward only
-    pub fn is_fast_forward_only(&self, bookmark: &BookmarkName) -> bool {
-        self.select(bookmark)
-            .any(|attr| attr.params().only_fast_forward)
-    }
-
-    /// Check if a bookmark config overrides whether date should be rewritten during pushrebase.
-    /// Return None if there are no bookmark config overriding rewrite_dates.
-    pub fn should_rewrite_dates(&self, bookmark: &BookmarkName) -> Option<bool> {
-        for attr in self.select(bookmark) {
-            // NOTE: If there are multiple patterns matching the bookmark, the first match
-            // overrides others. It might not be the most desired behavior, though.
-            if let Some(rewrite_dates) = attr.params().rewrite_dates {
-                return Some(rewrite_dates);
-            }
-        }
-        None
-    }
-
-    /// check if provided unix name is allowed to move specified bookmark
-    pub async fn is_allowed_user(
-        &self,
-        user: &str,
-        metadata: &Metadata,
-        bookmark: &BookmarkName,
-    ) -> Result<bool, Error> {
-        // NOTE: `Iterator::all` combinator returns `true` if selected set is empty
-        //       which is consistent with what we want
-        for attr in self.select(bookmark) {
-            let maybe_allowed_users = attr
-                .params()
-                .allowed_users
-                .as_ref()
-                .map(|re| re.is_match(user));
-
-            let maybe_member = if let Some(membership) = &attr.membership {
-                Some(membership.is_member(&metadata.identities()).await?)
-            } else {
-                None
-            };
-
-            // Check if either is user is allowed to access it
-            // or that they are a member of hipster group.
-            let allowed = match (maybe_allowed_users, maybe_member) {
-                (Some(x), Some(y)) => x || y,
-                (Some(x), None) | (None, Some(x)) => x,
-                (None, None) => true,
-            };
-            if !allowed {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-}
-
 /// Configuration for a bookmark
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct BookmarkParams {
@@ -701,7 +588,7 @@ impl Default for PushParams {
 }
 
 /// Flags for the pushrebase inner loop
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct PushrebaseFlags {
     /// Update dates of rebased commits
     pub rewritedates: bool,
@@ -713,6 +600,8 @@ pub struct PushrebaseFlags {
     pub casefolding_check: bool,
     /// How many commits are allowed to not have filenodes generated.
     pub not_generated_filenodes_limit: u64,
+    /// Which bookmark to track in ODS
+    pub monitoring_bookmark: Option<String>,
 }
 
 impl Default for PushrebaseFlags {
@@ -723,6 +612,37 @@ impl Default for PushrebaseFlags {
             forbid_p2_root_rebases: true,
             casefolding_check: true,
             not_generated_filenodes_limit: 500,
+            monitoring_bookmark: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+/// Either an SMC tier or a host/port pair
+pub enum Address {
+    /// An SMC tier
+    Tier(String),
+    /// A host:port string
+    HostPort(String),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+/// How to do pushrebase on Mononoke
+pub enum PushrebaseRemoteMode {
+    /// Do pushrebase in the same process
+    Local,
+    /// Call SCS and do pushrebase remotely, forwarding errors
+    RemoteScs(Address),
+    /// Call SCS and do pushrebase remotely, retrying errors locally
+    RemoteScsWithLocalFallback(Address),
+}
+
+impl PushrebaseRemoteMode {
+    /// SCS address used for pushrebase, if any
+    pub fn scs_address(&self) -> Option<&Address> {
+        match self {
+            Self::RemoteScs(address) | Self::RemoteScsWithLocalFallback(address) => Some(address),
+            Self::Local => None,
         }
     }
 }
@@ -748,6 +668,8 @@ pub struct PushrebaseParams {
     /// Normally pushes of a commit like this are not allowed unless
     /// this option is set to false.
     pub allow_change_xrepo_mapping_extra: bool,
+    /// How to do pushrebase on Mononoke
+    pub remote_mode: PushrebaseRemoteMode,
 }
 
 impl Default for PushrebaseParams {
@@ -760,6 +682,7 @@ impl Default for PushrebaseParams {
             globalrevs_publishing_bookmark: None,
             populate_git_mapping: false,
             allow_change_xrepo_mapping_extra: false,
+            remote_mode: PushrebaseRemoteMode::Local,
         }
     }
 }
@@ -1068,6 +991,8 @@ pub struct RemoteMetadataDatabaseConfig {
     pub filenodes: ShardableRemoteDatabaseConfig,
     /// Database for commit mutation metadata.
     pub mutation: RemoteDatabaseConfig,
+    /// Database for sparse profiles sizes.
+    pub sparse_profiles: RemoteDatabaseConfig,
 }
 
 /// Configuration for the Metadata database
@@ -1144,13 +1069,6 @@ pub struct EphemeralBlobstoreConfig {
     /// Mode deciding if the bubbles should be simply marked as
     /// expired or completely deleted from the backing store.
     pub bubble_deletion_mode: BubbleDeletionMode,
-}
-
-/// Params for the bundle2 replay
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
-pub struct Bundle2ReplayParams {
-    /// A flag specifying whether to preserve raw bundle2 contents in the blobstore
-    pub preserve_raw_bundle2: bool,
 }
 
 /// Regex for valid branches that Infinite Pushes can be directed to.
@@ -1742,4 +1660,31 @@ pub struct CrossRepoCommitValidation {
     /// Commits that are only found via the changelog for this named bookmark
     /// are skipped for validation (e.g. import bookmarks can be skipped)
     pub skip_bookmarks: HashSet<BookmarkName>,
+}
+
+/// Configuration for sparse profile monitoring
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct SparseProfilesConfig {
+    /// Location where sparse profiles are stored within the repo
+    pub sparse_profiles_location: String,
+    /// Excluded paths and files from monitoring
+    /// used as glob patterns for pathmatchers
+    pub excluded_paths: Vec<String>,
+    /// Exact list of monitored profiles
+    /// Takes precedence over excludes.
+    pub monitored_profiles: Vec<String>,
+}
+
+/// Repo-specific configuration parameters for hg sync job
+/// for a specific job variant
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct HgSyncConfig {
+    /// Remote path to hg repo to replay to
+    pub hg_repo_ssh_path: String,
+    /// Maximum number of bundles allowed over a single hg peer
+    pub batch_size: i64,
+    /// If set, mononoke repo will be locked on sync failure
+    pub lock_on_failure: bool,
+    /// The darkstorm backup repo-id to be used as target for sync
+    pub darkstorm_backup_repo_id: Option<i32>,
 }

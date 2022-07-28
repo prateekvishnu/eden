@@ -1654,6 +1654,8 @@ class Test(unittest.TestCase):
             hgrc.write("ipv6 = %s\n" % str(self._useipv6))
             hgrc.write("[workingcopy]\n")
             hgrc.write("enablerustwalker=True\n")
+            hgrc.write("[config]\n")
+            hgrc.write("use-rust=true\n")
 
             # treemanifest
             hgrc.write("[extensions]\n")
@@ -2679,7 +2681,7 @@ class TestSuite(unittest.TestSuite):
         loadtest=None,
         showchannels=False,
         *args,
-        **kwargs
+        **kwargs,
     ):
         """Create a new instance that can run tests with a configuration.
 
@@ -3813,7 +3815,7 @@ class TestRunner(object):
             useipv6=useipv6,
             watchman=self._watchman,
             options=self.options,
-            **kwds
+            **kwds,
         )
         t.should_reload = True
         return t

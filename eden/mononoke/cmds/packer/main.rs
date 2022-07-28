@@ -5,16 +5,22 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{bail, Context, Result};
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Result;
 use blobstore_factory::make_packblob;
 use borrowed::borrowed;
 use clap_old::Arg;
-use cmdlib::args::{self, MononokeClapApp};
+use cmdlib::args;
+use cmdlib::args::MononokeClapApp;
 use context::CoreContext;
 use fbinit::FacebookInit;
-use futures::stream::{self, TryStreamExt};
-use metaconfig_types::{BlobConfig, BlobstoreId};
-use std::io::{self, BufRead};
+use futures::stream;
+use futures::stream::TryStreamExt;
+use metaconfig_types::BlobConfig;
+use metaconfig_types::BlobstoreId;
+use std::io;
+use std::io::BufRead;
 
 mod pack_utils;
 
@@ -102,7 +108,7 @@ fn main(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::new_for_bulk_processing(fb, logger.clone());
     let blobstore_options = matches.blobstore_options();
     let readonly_storage = matches.readonly_storage();
-    let blobconfig = args::get_config(&config_store, &matches)?
+    let blobconfig = args::get_config(config_store, &matches)?
         .1
         .storage_config
         .blobstore;
@@ -143,9 +149,9 @@ fn main(fb: FacebookInit) -> Result<()> {
             fb,
             get_blobconfig(blobconfig, inner_id)?,
             *readonly_storage,
-            &blobstore_options,
-            &logger,
-            &config_store,
+            blobstore_options,
+            logger,
+            config_store,
         )
         .await?;
         stream::iter(input_lines.split(String::is_empty).map(Result::Ok))
@@ -154,11 +160,11 @@ fn main(fb: FacebookInit) -> Result<()> {
                 async move {
                     let pack_keys: Vec<&str> = pack_keys.iter().map(|i| i.as_ref()).collect();
                     pack_utils::repack_keys(
-                        &ctx,
-                        &blobstore,
+                        ctx,
+                        blobstore,
                         PACK_PREFIX,
                         zstd_level,
-                        &repo_prefix,
+                        repo_prefix,
                         &pack_keys,
                         dry_run,
                         scuba,

@@ -7,17 +7,20 @@
 
 use std::fmt;
 
-use context::{CoreContext, SessionContainer};
+use context::CoreContext;
+use context::SessionContainer;
 use fbinit::FacebookInit;
-use gotham::state::{FromState, State};
+use gotham::state::FromState;
+use gotham::state::State;
 use gotham_derive::StateData;
-use gotham_ext::{
-    middleware::{ClientIdentity, Middleware},
-    state_ext::StateExt,
-};
-use hyper::{body::Body, Response};
+use gotham_ext::middleware::ClientIdentity;
+use gotham_ext::middleware::Middleware;
+use gotham_ext::state_ext::StateExt;
+use hyper::body::Body;
+use hyper::Response;
 use scuba_ext::MononokeScubaSampleBuilder;
-use slog::{o, Logger};
+use slog::o;
+use slog::Logger;
 
 #[derive(Copy, Clone)]
 pub enum LfsMethod {
@@ -90,9 +93,9 @@ impl Middleware for RequestContextMiddleware {
         let session = SessionContainer::new_with_defaults(self.fb);
         let ctx = session.new_context(logger, MononokeScubaSampleBuilder::with_discard());
 
-        let should_log = ClientIdentity::try_borrow_from(&state)
-            .map(|client_identity| !client_identity.is_proxygen_test_identity())
-            .unwrap_or(true);
+        let should_log = ClientIdentity::try_borrow_from(state).map_or(true, |client_identity| {
+            !client_identity.is_proxygen_test_identity()
+        });
 
         state.put(RequestContext::new(ctx, should_log));
 

@@ -9,15 +9,20 @@ use std::time::Duration;
 
 use blobrepo::BlobRepo;
 use clap::Arg;
-use criterion::{BenchmarkId, Criterion, Throughput};
-use futures::{
-    future::{self, TryFutureExt},
-    stream::{Stream, StreamExt, TryStreamExt},
-};
+use criterion::BenchmarkId;
+use criterion::Criterion;
+use criterion::Throughput;
+use futures::future;
+use futures::future::TryFutureExt;
+use futures::stream::Stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use phases::PhasesArc;
 use tokio::runtime::Handle;
 
-use bulkops::{Direction, PublicChangesetBulkFetch, MAX_FETCH_STEP};
+use bulkops::Direction;
+use bulkops::PublicChangesetBulkFetch;
+use bulkops::MAX_FETCH_STEP;
 use cmdlib::args;
 use context::CoreContext;
 
@@ -115,7 +120,7 @@ fn main(fb: fbinit::FacebookInit) {
     let logger = matches.logger();
     let runtime = matches.runtime();
     let ctx = CoreContext::new_with_logger(fb, logger.clone());
-    let blobrepo = args::open_repo::<BlobRepo>(fb, &logger, &matches);
+    let blobrepo = args::open_repo::<BlobRepo>(fb, logger, &matches);
 
     let setup = {
         |runtime: &Handle| {

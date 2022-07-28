@@ -14,7 +14,8 @@
 #include "eden/fs/inodes/CheckoutAction.h"
 #include "eden/fs/inodes/DirEntry.h"
 #include "eden/fs/inodes/InodeBase.h"
-#include "eden/fs/inodes/InodeOrTreeOrEntry.h"
+#include "eden/fs/inodes/VirtualInode.h"
+#include "eden/fs/service/gen-cpp2/StreamingEdenService.h"
 #include "eden/fs/utils/PathFuncs.h"
 
 namespace facebook::eden {
@@ -116,7 +117,7 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
   ImmediateFuture<struct stat> stat(ObjectFetchContext& context) override;
 
 #ifndef _WIN32
-  folly::Future<struct stat> setattr(
+  ImmediateFuture<struct stat> setattr(
       const DesiredMetadata& desired,
       ObjectFetchContext& fetchContext) override;
 
@@ -131,13 +132,33 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
    *
    * Implements getOrLoadChild if loadInodes is true. If loadInodes is false and
    * the Inode load is already-in-progress, this may NOT return the loading
-   * inode. Otherwise, the returned InodeOrTreeOrEntry may contain a ObjectStore
+   * inode. Otherwise, the returned VirtualInode may contain a ObjectStore
    * Tree or a DirEntry/TreeEntry representing the entry.
    */
-  ImmediateFuture<InodeOrTreeOrEntry> getOrFindChild(
+  ImmediateFuture<VirtualInode> getOrFindChild(
       PathComponentPiece name,
       ObjectFetchContext& context,
       bool loadInodes);
+
+  /**
+   * Retrieves VirtualInode for each of entry in this Tree, like
+   * getOrFindChild, but for all the children of a directory.
+   *
+   * Note that this is separated out from the readdir logic below. There are
+   * a few reasons for this. First. this method will not return information
+   * about the . or .. entries in a directory. It only returns the contained
+   * files and directories. Second, this method does not take an offset. Only
+   * the entire directory can be listed. The readdir logic is complicated by
+   * these two requirements, so we choose to use a much simpler implementation
+   * here.
+   *
+   * Implements getOrLoadChild if loadInodes is true. If loadInodes is false and
+   * the inode load is already-in-progress, this may NOT return the loading
+   * inode. Otherwise, the returned VirtualInode may contain a ObjectStore
+   * Tree or a DirEntry/TreeEntry representing the entry.
+   */
+  std::vector<std::pair<PathComponent, ImmediateFuture<VirtualInode>>>
+  getChildren(ObjectFetchContext& context, bool loadInodes);
 
   /**
    * Get the inode object for a child of this directory.
@@ -291,14 +312,14 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
    * @param isIgnored  Whether or not the current directory is ignored
    *     according to source control ignore rules.
    *
-   * @return Returns a Future that will be fulfilled when the diff operation
-   *     completes.  The caller must ensure that the DiffCallback parameter
-   *     remains valid until this Future completes.
+   * @return Returns an ImmediateFuture that will be fulfilled when the diff
+   *     operation completes. The caller must ensure that the DiffCallback
+   *     parameter remains valid until this Future completes.
    */
-  folly::Future<folly::Unit> diff(
+  ImmediateFuture<folly::Unit> diff(
       DiffContext* context,
       RelativePathPiece currentPath,
-      std::shared_ptr<const Tree> tree,
+      std::vector<std::shared_ptr<const Tree>> trees,
       const GitIgnoreStack* parentIgnore,
       bool isIgnored);
 
@@ -465,6 +486,12 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
 
   void forceMetadataUpdate() override;
 
+#ifndef _WIN32
+  ImmediateFuture<folly::Unit> ensureMaterialized(
+      ObjectFetchContext& fetchContext,
+      bool followSymlink) override;
+#endif
+
  private:
   class TreeRenameLocks;
   class IncompleteInodeLoad;
@@ -478,12 +505,6 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
    * the TreeInode object.
    */
   InodeMap* getInodeMap() const;
-
-  /**
-   * The ObjectStore is guaranteed to remain valid for at least the lifetime of
-   * the TreeInode object.  (The ObjectStore is owned by the EdenMount.)
-   */
-  ObjectStore* getStore() const;
 
   void registerInodeLoadComplete(
       folly::Future<std::unique_ptr<InodeBase>>& future,
@@ -587,7 +608,8 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
       PathComponentPiece name,
       mode_t mode,
       folly::ByteRange fileContents,
-      InvalidationRequired invalidate);
+      InvalidationRequired invalidate,
+      std::chrono::system_clock::time_point startTime);
 
   /**
    * removeImpl() is the actual implementation used for unlink() and rmdir().
@@ -651,8 +673,8 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
    * checkPreRemove() is called by tryRemoveChild() for file or directory
    * specific checks before unlinking an entry.  Returns an errno value or 0.
    */
-  FOLLY_NODISCARD static int checkPreRemove(const TreeInodePtr& child);
-  FOLLY_NODISCARD static int checkPreRemove(const FileInodePtr& child);
+  FOLLY_NODISCARD static int checkPreRemove(const TreeInode& child);
+  FOLLY_NODISCARD static int checkPreRemove(const FileInode& child);
 
   /**
    * This helper function starts loading a currently unloaded child inode.
@@ -671,11 +693,11 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
    * Load the .gitignore file for this directory, then call computeDiff() once
    * it is loaded.
    */
-  FOLLY_NODISCARD folly::Future<folly::Unit> loadGitIgnoreThenDiff(
+  FOLLY_NODISCARD ImmediateFuture<folly::Unit> loadGitIgnoreThenDiff(
       InodePtr gitignoreInode,
       DiffContext* context,
       RelativePathPiece currentPath,
-      std::shared_ptr<const Tree> tree,
+      std::vector<std::shared_ptr<const Tree>> trees,
       const GitIgnoreStack* parentIgnore,
       bool isIgnored);
 
@@ -687,11 +709,11 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
    * for the current directory and then invokes computeDiff() to perform the
    * diff once all .gitignore data is loaded.
    */
-  FOLLY_NODISCARD folly::Future<folly::Unit> computeDiff(
+  FOLLY_NODISCARD ImmediateFuture<folly::Unit> computeDiff(
       folly::Synchronized<TreeInodeState>::LockedPtr contentsLock,
       DiffContext* context,
       RelativePathPiece currentPath,
-      std::shared_ptr<const Tree> tree,
+      std::vector<std::shared_ptr<const Tree>> trees,
       std::unique_ptr<GitIgnoreStack> ignore,
       bool isIgnored);
 
@@ -773,6 +795,64 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
       TreeInodeState&,
       PathComponentPiece name,
       std::optional<InodeNumber> ino);
+
+  /**
+   * Attempts to find the child inode or other identifying information about
+   * the inode with out performing any write operations. `loadInodes` indicates
+   * that you would like to load the inodes if they are not yet loaded. If the
+   * inode is not loaded and `loadInodes` is set, a nullopt value will be
+   * returned and you can call wlockGetOrFindChild to load and return the inode.
+   *
+   * If the inode is already loaded this will return the inode.
+   * Otherwise, if loadInodes is set or the inode is materialized we will return
+   * nullopt because the inode must be loaded to inspect it and loading an inode
+   * is a write operation.
+   * If we fall into none of the above cases the TreeOrEntry representing the
+   * data for that inode will be returned.
+   */
+  std::optional<ImmediateFuture<VirtualInode>> rlockGetOrFindChild(
+      const TreeInodeState& contents,
+      PathComponentPiece name,
+      ObjectFetchContext& context,
+      bool loadInodes);
+
+  // We need to do some cleanup outside of the lock. So we return some promises
+  // and futures and things to fulfil after the lock is released.
+  struct LoadChildCleanUp {
+    // If we are responsible for loading the inode, but the load is not complete
+    // yet, then we need to register the inode load, so that someone will take
+    // care of the cleanup after loading the inode. This future will be valid if
+    // we are the ones responsible for the inode load.
+    folly::Future<std::unique_ptr<InodeBase>> inodeLoadFuture;
+
+    // If we are the ones responsible for the inode load and the load is
+    // complete, then these are the promises we need to notify.
+    std::vector<folly::Promise<InodePtr>> promises;
+
+    // The inode number of the child we are getting.
+    InodeNumber childNumber;
+
+    // If we are the ones responsible for the load and the load already
+    // completed here is the InodePointer.
+    InodePtr childInodePtr;
+  };
+
+  /**
+   * Loads and returns the inode for this child. Note this does not perform
+   * inode load cleanup. loadChildCleanup must be called after the lock has been
+   * released, any code between calling this and loadChildCleanUp should be no
+   * throw or call loadChildCleanUp despite exceptions.
+   */
+  std::pair<folly::SemiFuture<InodePtr>, LoadChildCleanUp> loadChild(
+      folly::Synchronized<TreeInodeState>::LockedPtr& contents,
+      PathComponentPiece name,
+      ObjectFetchContext& context);
+
+  /**
+   * Handles the inode loading related clean up for a wlockGetOrFindChild call.
+   * This should be called without the contents lock held!
+   */
+  void loadChildCleanUp(PathComponentPiece name, LoadChildCleanUp result);
 
   folly::Synchronized<TreeInodeState> contents_;
 

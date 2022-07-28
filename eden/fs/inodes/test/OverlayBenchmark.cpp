@@ -6,9 +6,11 @@
  */
 
 #include <folly/init/Init.h>
+#include <folly/portability/GFlags.h>
 #include <folly/stop_watch.h>
-#include <gflags/gflags.h>
 #include <stdlib.h>
+
+#include "eden/fs/config/EdenConfig.h"
 #include "eden/fs/inodes/DirEntry.h"
 #include "eden/fs/inodes/Overlay.h"
 #include "eden/fs/telemetry/NullStructuredLogger.h"
@@ -19,12 +21,6 @@ using namespace folly::string_piece_literals;
 DEFINE_string(overlayPath, "", "Directory where the test overlay is created");
 
 namespace {
-
-#ifndef _WIN32
-constexpr Overlay::OverlayType kOverlayType = Overlay::OverlayType::Legacy;
-#else
-constexpr Overlay::OverlayType kOverlayType = Overlay::OverlayType::Tree;
-#endif
 
 void benchmarkOverlayTreeWrites(AbsolutePathPiece overlayPath) {
   // A large mount will contain 500,000 trees. If they're all loaded, they
@@ -37,8 +33,9 @@ void benchmarkOverlayTreeWrites(AbsolutePathPiece overlayPath) {
   auto overlay = Overlay::create(
       overlayPath,
       kPathMapDefaultCaseSensitive,
-      kOverlayType,
-      std::make_shared<NullStructuredLogger>());
+      kDefaultOverlayType,
+      std::make_shared<NullStructuredLogger>(),
+      *EdenConfig::createTestEdenConfig());
   printf("Initalizing Overlay...\n");
 
   overlay->initialize().get();

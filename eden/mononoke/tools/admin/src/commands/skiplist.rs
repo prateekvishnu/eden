@@ -8,16 +8,19 @@
 mod build;
 mod read;
 
-use anyhow::{format_err, Result};
+use anyhow::format_err;
+use anyhow::Result;
 use bookmarks::Bookmarks;
 use build::SkiplistBuildArgs;
 use changeset_fetcher::ChangesetFetcher;
 use changesets::Changesets;
-use clap::{Parser, Subcommand};
+use clap::Parser;
+use clap::Subcommand;
 use metaconfig_types::RepoConfig;
 use mononoke_app::args::RepoArgs;
 use mononoke_app::MononokeApp;
 use phases::Phases;
+use read::SkiplistReadArgs;
 use repo_blobstore::RepoBlobstore;
 
 /// Build or read skiplist index for the repository
@@ -59,7 +62,7 @@ pub enum SkiplistSubcommand {
     /// Build the skiplist index and store it in blobstore
     Build(SkiplistBuildArgs),
     /// Read and display stored skiplist index
-    Read,
+    Read(SkiplistReadArgs),
 }
 
 fn get_blobstore_key(key_arg: Option<String>, config: RepoConfig) -> Result<String> {
@@ -86,7 +89,9 @@ pub async fn run(app: MononokeApp, args: CommandArgs) -> Result<()> {
         SkiplistSubcommand::Build(build_args) => {
             build::build_skiplist(&ctx, &repo, logger, key, build_args).await?
         }
-        SkiplistSubcommand::Read => read::read_skiplist(&ctx, &repo, logger, key).await?,
+        SkiplistSubcommand::Read(read_args) => {
+            read::read_skiplist(&ctx, &repo, logger, key, read_args).await?
+        }
     }
     Ok(())
 }

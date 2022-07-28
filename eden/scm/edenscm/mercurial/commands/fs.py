@@ -9,6 +9,7 @@ from __future__ import absolute_import
 
 import errno
 import subprocess
+from typing import Iterable, Optional
 
 from .. import cmdutil, error
 from ..i18n import _
@@ -16,7 +17,7 @@ from .cmdtable import command
 
 
 @command("fs", [], subonly=True, norepo=True)
-def fs(ui, **opts):
+def fs(ui, **opts) -> None:
     """control the edenfs daemon"""
 
 
@@ -30,7 +31,7 @@ subcmd = fs.subcommand(
 )
 
 
-def _calledenfsctl(ui, command, args=None, opts=None):
+def _calledenfsctl(ui, command, args: Optional[Iterable[str]] = None, opts=None) -> int:
     cmd = ["edenfsctl"] + command.split()
     if opts:
         commandopts = cmdutil.findsubcmd(command.split(), table)[3][1]
@@ -74,7 +75,7 @@ def _calledenfsctl(ui, command, args=None, opts=None):
     ]
     + cmdutil.dryrunopts,
 )
-def check(ui, repo, **opts):
+def check(ui, repo, **opts) -> int:
     """check the filesystem of a virtual checkout"""
     args = [repo.root]
     if ui.verbose:
@@ -87,7 +88,7 @@ def check(ui, repo, **opts):
 
 
 @subcmd("chown", [], "UID GID")
-def chown(ui, repo, uid, gid):
+def chown(ui, repo, uid, gid) -> int:
     """change the ownership of a virtual checkout
 
     Reassigns ownership of a virtual checkout to the specified user and group.
@@ -96,7 +97,7 @@ def chown(ui, repo, uid, gid):
 
 
 @subcmd("config", [], norepo=True)
-def config(ui):
+def config(ui) -> int:
     """show the edenfs daemon configuration"""
     return _calledenfsctl(ui, "config")
 
@@ -106,25 +107,25 @@ def config(ui):
     [("n", "dry-run", None, _("do not try to fix any issues, only report them"))],
     norepo=True,
 )
-def doctor(ui, **opts):
+def doctor(ui, **opts) -> int:
     """debug and fix issues with the edenfs daemon"""
     return _calledenfsctl(ui, "doctor", opts=opts)
 
 
 @subcmd("gc", [], norepo=True)
-def gc(ui, **opts):
+def gc(ui, **opts) -> int:
     """minimize disk and memory usage by freeing caches"""
     return _calledenfsctl(ui, "gc")
 
 
 @subcmd("info", [])
-def info(ui, repo, **opts):
+def info(ui, repo, **opts) -> int:
     """show details about the virtual checkout"""
     return _calledenfsctl(ui, "info", [repo.root])
 
 
 @subcmd("list", [("", "json", None, _("list checkouts in JSON format"))], norepo=True)
-def list_(ui, **opts):
+def list_(ui, **opts) -> int:
     """list available virtual checkouts"""
     return _calledenfsctl(ui, "list", opts=opts)
 
@@ -144,7 +145,7 @@ def list_(ui, **opts):
     ],
     _("[PATTERN]..."),
 )
-def prefetch(ui, repo, *patterns, **opts):
+def prefetch(ui, repo, *patterns, **opts) -> int:
     """prefetch content for files"""
     return _calledenfsctl(
         ui, "prefetch", ["--repo", repo.root] + list(patterns), opts=opts
@@ -162,7 +163,7 @@ def prefetch(ui, repo, *patterns, **opts):
         )
     ],
 )
-def remove(ui, repo, **opts):
+def remove(ui, repo, **opts) -> int:
     """remove a virtual checkout"""
     return _calledenfsctl(ui, "remove", [repo.root], opts=opts)
 
@@ -170,7 +171,7 @@ def remove(ui, repo, **opts):
 @subcmd(
     "restart", [("", "graceful", None, _("perform a graceful restart"))], norepo=True
 )
-def restart(ui, **opts):
+def restart(ui, **opts) -> int:
     """restart the edenfs daemon
 
     Run "@prog@ fs restart --graceful" to perform a graceful restart.  The
@@ -182,13 +183,13 @@ def restart(ui, **opts):
 
 
 @subcmd("start", norepo=True)
-def start(ui, **opts):
+def start(ui, **opts) -> int:
     """start the edenfs daemon"""
     return _calledenfsctl(ui, "start")
 
 
 @subcmd("stats", subonly=True, norepo=True)
-def stats(ui, **opts):
+def stats(ui, **opts) -> None:
     """print statistics for the edenfs daemon"""
 
 
@@ -198,7 +199,7 @@ statscmd = stats.subcommand()
 @statscmd(
     "io", [("A", "all", None, "show status for all the system calls")], norepo=True
 )
-def statsio(ui, **opts):
+def statsio(ui, **opts) -> int:
     """show information about the number of I/O calls"""
     return _calledenfsctl(ui, "stats io", opts=opts)
 
@@ -206,42 +207,42 @@ def statsio(ui, **opts):
 @statscmd(
     "latency", [("A", "all", None, "show status for all the system calls")], norepo=True
 )
-def statslatency(ui, **opts):
+def statslatency(ui, **opts) -> int:
     """show information about the latency of I/O calls"""
     return _calledenfsctl(ui, "stats latency", opts=opts)
 
 
 @statscmd("thrift", [], norepo=True)
-def statsthrift(ui, **opts):
+def statsthrift(ui, **opts) -> int:
     """show the number of received thrift calls"""
     return _calledenfsctl(ui, "stats thrift")
 
 
 @statscmd("thriftlatency|thrift-latency", [], norepo=True)
-def statsthriftlatency(ui, **opts):
+def statsthriftlatency(ui, **opts) -> int:
     """show the latency of received thrift calls"""
     return _calledenfsctl(ui, "stats thrift-latency")
 
 
 @subcmd("status", norepo=True)
-def status(ui, **opts):
+def status(ui, **opts) -> int:
     """check the health of the edenfs daemon"""
     return _calledenfsctl(ui, "status")
 
 
 @subcmd("stop", norepo=True)
-def stop(ui, **opts):
+def stop(ui, **opts) -> int:
     """stop the edenfs daemon"""
     return _calledenfsctl(ui, "stop")
 
 
 @subcmd("top", norepo=True)
-def top(ui, **opts):
+def top(ui, **opts) -> int:
     """monitor virtual checkout accesses by process"""
     return _calledenfsctl(ui, "top")
 
 
 @subcmd("version", norepo=True)
-def version(ui, **opts):
+def version(ui, **opts) -> int:
     """show version information for the edenfs daemon"""
     return _calledenfsctl(ui, "version")

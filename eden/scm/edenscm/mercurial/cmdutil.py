@@ -36,7 +36,6 @@ from . import (
     formatter,
     git,
     graphmod,
-    hintutil,
     json,
     match as matchmod,
     mdiff,
@@ -58,7 +57,7 @@ from . import (
 )
 from .i18n import _, _x
 from .node import hex, nullid, nullrev, short
-from .pycompat import ensurestr, ensureunicode, range
+from .pycompat import ensureunicode, range
 
 
 stringio = util.stringio
@@ -71,11 +70,6 @@ def _typedflags(flags):
 
 
 dryrunopts = [("n", "dry-run", None, _("do not perform actions, just print output"))]
-
-remoteopts = [
-    ("e", "ssh", "", _("specify ssh command to use"), _("CMD")),
-    ("", "remotecmd", "", _("specify hg command to run on the remote side"), _("CMD")),
-]
 
 walkopts = _typedflags(
     [
@@ -1027,7 +1021,7 @@ def makefilename(
         "H": lambda: hex(node),
         "R": lambda: "%d" % repo.changelog.rev(node),
         "h": lambda: short(node),
-        "m": lambda: re.sub("[^\w]", "_", desc or ""),
+        "m": lambda: re.sub(r"[^\w]", "_", desc or ""),
     }
     expander = {"%": lambda: "%", "b": lambda: os.path.basename(repo.root)}
 
@@ -1650,7 +1644,7 @@ def tryimportone(ui, repo, hunk, parents, opts, msgs, updatefunc):
                     editor = getcommiteditor(editform="import.bypass")
                 memctx = context.memctx(
                     repo,
-                    (p1.node(), p2.node()),
+                    (p1, p2),
                     message,
                     files=files,
                     filectxfn=store,
@@ -3696,7 +3690,7 @@ def amend(ui, repo, old, extra, pats, opts):
 
         new = context.memctx(
             repo,
-            parents=[base.node(), old.p2().node()],
+            parents=[base, old.p2()],
             text=message,
             files=files,
             filectxfn=filectxfn,
@@ -4153,6 +4147,7 @@ def revert(ui, repo, ctx, parents, *pats, **opts):
             (unknown, actions["unknown"], discard),
         )
 
+        quiet = ui.quiet
         for abs, (rel, exact) in sorted(names.items()):
             # target file to be touch on disk (relative to cwd)
             target = repo.wjoin(abs)
@@ -4190,7 +4185,7 @@ def revert(ui, repo, ctx, parents, *pats, **opts):
                         if not isinstance(msg, str):
                             msg = msg(abs)
                         ui.status(msg % rel)
-                elif exact:
+                elif exact and not quiet:
                     ui.warn(msg % rel)
                 break
 

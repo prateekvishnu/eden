@@ -10,15 +10,12 @@
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Error};
-use clap::{App, Arg, ArgGroup, ArgMatches};
+use anyhow::anyhow;
+use anyhow::Error;
 use fbinit::FacebookInit;
-use source_control::client::{make_SourceControlService, SourceControlService};
+use source_control::client::make_SourceControlService;
+use source_control::client::SourceControlService;
 use x2pclient::X2pClientBuilder;
-
-const ARG_TIER: &str = "TIER";
-const ARG_HOST_PORT: &str = "HOST:PORT";
-const ARG_CLIENT_ID: &str = "CLIENT_ID";
 
 const DEFAULT_TIER: &str = "mononoke-scs-server";
 
@@ -120,17 +117,28 @@ impl Connection {
             other_env => Err(anyhow!("{} not supported", other_env)),
         }
     }
+}
 
-    /// Build a connection from the specified arguments.
-    pub fn from_args(fb: FacebookInit, matches: &ArgMatches) -> Result<Self, Error> {
-        let client_id = matches
-            .value_of(ARG_CLIENT_ID)
-            .expect("client_id can't be null");
-        if let Some(host_port) = matches.value_of(ARG_HOST_PORT) {
-            Self::from_host_port(fb, host_port)
+#[derive(clap::Args)]
+pub(super) struct ConnectionArgs {
+    #[clap(long, default_value = "scsc-default-client")]
+    /// Name of the client for quota attribution and logging.
+    client_id: String,
+    #[clap(long, short, default_value = DEFAULT_TIER)]
+    /// Connect to SCS through given tier.
+    tier: String,
+    #[cfg(not(target_os = "windows"))]
+    #[clap(long, short, conflicts_with = "tier")]
+    /// Connect to SCS through a given host and port pair, format HOST:PORT.
+    host: Option<String>,
+}
+
+impl ConnectionArgs {
+    pub fn get_connection(&self, fb: FacebookInit) -> Result<Connection, Error> {
+        if let Some(host_port) = &self.host {
+            Connection::from_host_port(fb, host_port)
         } else {
-            let tier = matches.value_of(ARG_TIER).unwrap_or(DEFAULT_TIER);
-            Self::from_tier_name(fb, client_id.to_string(), tier)
+            Connection::from_tier_name(fb, self.client_id.clone(), &self.tier)
         }
     }
 }
@@ -139,40 +147,5 @@ impl std::ops::Deref for Connection {
     type Target = dyn SourceControlService + Sync;
     fn deref(&self) -> &Self::Target {
         &*self.client
-    }
-}
-
-/// Add args for setting up the connection.
-pub(crate) fn add_args<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
-    let app = app
-        .arg(
-            Arg::with_name(ARG_CLIENT_ID)
-                .long("client-id")
-                .global(true)
-                .help("Name of the client for quota attribution and logging")
-                .takes_value(true)
-                .default_value("scsc-default-client"),
-        )
-        .arg(
-            Arg::with_name(ARG_TIER)
-                .short("t")
-                .long("tier")
-                .global(true)
-                .help("Tier name to connect to")
-                .takes_value(true),
-        );
-
-    if cfg!(not(target_os = "windows")) {
-        app.arg(
-            Arg::with_name(ARG_HOST_PORT)
-                .short("h")
-                .long("host")
-                .global(true)
-                .help("Host to connect to")
-                .takes_value(true),
-        )
-        .group(ArgGroup::with_name("connection").args(&[ARG_TIER, ARG_HOST_PORT]))
-    } else {
-        app
     }
 }

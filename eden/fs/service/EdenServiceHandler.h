@@ -11,12 +11,17 @@
 #include <optional>
 #include "eden/fs/eden-config.h"
 #include "eden/fs/service/gen-cpp2/StreamingEdenService.h"
+#include "eden/fs/telemetry/TraceBus.h"
 #include "eden/fs/utils/PathFuncs.h"
 
 namespace folly {
 template <typename T>
 class Future;
 }
+
+namespace {
+class PrefetchFetchContext;
+} // namespace
 
 namespace facebook::eden {
 
@@ -27,6 +32,7 @@ class EdenServer;
 class TreeInode;
 class ObjectFetchContext;
 class EntryAttributes;
+struct EntryAttributeFlags;
 #ifdef EDEN_HAVE_USAGE_SERVICE
 class EdenFSSmartPlatformServiceEndpoint;
 #endif
@@ -34,6 +40,41 @@ template <typename T>
 class ImmediateFuture;
 
 extern const char* const kServiceName;
+
+struct ThriftRequestTraceEvent : TraceEventBase {
+  enum Type : unsigned char {
+    START,
+    FINISH,
+  };
+
+  ThriftRequestTraceEvent() = delete;
+
+  static ThriftRequestTraceEvent start(
+      uint64_t requestId,
+      folly::StringPiece method,
+      std::optional<pid_t> clientPid);
+
+  static ThriftRequestTraceEvent finish(
+      uint64_t requestId,
+      folly::StringPiece method,
+      std::optional<pid_t> clientPid);
+
+  ThriftRequestTraceEvent(
+      Type type,
+      uint64_t requestId,
+      folly::StringPiece method,
+      std::optional<pid_t> clientPid)
+      : type(type),
+        requestId(requestId),
+        method(method),
+        clientPid(clientPid) {}
+
+  Type type;
+  uint64_t requestId;
+  // Safe to use StringPiece because method names are string literals.
+  folly::StringPiece method;
+  std::optional<pid_t> clientPid;
+};
 
 /*
  * Handler for the EdenService thrift interface
@@ -84,13 +125,14 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
       std::unique_ptr<std::string> mountPoint,
       std::unique_ptr<std::string> repoPath) override;
 
-  void getSHA1(
-      std::vector<SHA1Result>& out,
+  folly::SemiFuture<std::unique_ptr<std::vector<SHA1Result>>>
+  semifuture_getSHA1(
       std::unique_ptr<std::string> mountPoint,
       std::unique_ptr<std::vector<std::string>> paths,
       std::unique_ptr<SyncBehavior> sync) override;
 
   ImmediateFuture<EntryAttributes> getEntryAttributesForPath(
+      EntryAttributeFlags reqBitmask,
       AbsolutePathPiece mountPoint,
       folly::StringPiece path,
       ObjectFetchContext& fetchContext);
@@ -133,10 +175,13 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
   semifuture_getAttributesFromFiles(
       std::unique_ptr<GetAttributesFromFilesParams> params) override;
 
-  folly::Future<std::unique_ptr<Glob>> future_globFiles(
+  folly::SemiFuture<std::unique_ptr<ReaddirResult>> semifuture_readdir(
+      std::unique_ptr<ReaddirParams> params) override;
+
+  folly::SemiFuture<std::unique_ptr<Glob>> semifuture_globFiles(
       std::unique_ptr<GlobParams> params) override;
 
-  folly::Future<std::unique_ptr<Glob>> future_predictiveGlobFiles(
+  folly::SemiFuture<std::unique_ptr<Glob>> semifuture_predictiveGlobFiles(
       std::unique_ptr<GlobParams> params) override;
 
   folly::Future<folly::Unit> future_chown(
@@ -151,16 +196,23 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
       std::unique_ptr<std::string> mountPoint,
       int64_t eventCategoryMask) override;
 
+  apache::thrift::ServerStream<ThriftRequestEvent> traceThriftRequestEvents()
+      override;
+
   apache::thrift::ServerStream<HgEvent> traceHgEvents(
       std::unique_ptr<std::string> mountPoint) override;
 
-  folly::Future<std::unique_ptr<GetScmStatusResult>> future_getScmStatusV2(
+  apache::thrift::ServerStream<InodeEvent> traceInodeEvents(
+      std::unique_ptr<std::string> mountPoint) override;
+
+  folly::SemiFuture<std::unique_ptr<GetScmStatusResult>>
+  semifuture_getScmStatusV2(
       std::unique_ptr<GetScmStatusParams> params) override;
 
   apache::thrift::ResponseAndServerStream<ChangesSinceResult, ChangedFileResult>
   streamChangesSince(std::unique_ptr<StreamChangesSinceParams> params) override;
 
-  folly::Future<std::unique_ptr<ScmStatus>> future_getScmStatus(
+  folly::SemiFuture<std::unique_ptr<ScmStatus>> semifuture_getScmStatus(
       std::unique_ptr<std::string> mountPoint,
       bool listIgnored,
       std::unique_ptr<std::string> commitHash) override;
@@ -207,6 +259,9 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
   void debugOutstandingPrjfsCalls(
       std::vector<PrjfsCall>& outstandingCalls,
       std::unique_ptr<std::string> mountPoint) override;
+
+  void debugOutstandingThriftRequests(
+      std::vector<ThriftRequestMetadata>& outstandingCalls) override;
 
   void debugStartRecordingActivity(
       ActivityRecorderResult& result,
@@ -261,6 +316,10 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
   void disableTracing() override;
   void getTracePoints(std::vector<TracePoint>& result) override;
 
+  void getRetroactiveInodeEvents(
+      GetRetroactiveInodeEventsResult& result,
+      std::unique_ptr<GetRetroactiveInodeEventsParams> params) override;
+
   void injectFault(std::unique_ptr<FaultDefinition> fault) override;
   bool removeFault(std::unique_ptr<RemoveFaultArg> fault) override;
   int64_t unblockFault(std::unique_ptr<UnblockFaultArg> info) override;
@@ -271,6 +330,9 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
 
   folly::SemiFuture<folly::Unit> semifuture_removeRecursively(
       std::unique_ptr<RemoveRecursivelyParams> params) override;
+
+  folly::SemiFuture<folly::Unit> semifuture_ensureMaterialized(
+      std::unique_ptr<EnsureMaterializedParams> params) override;
 
   void reloadConfig() override;
 
@@ -316,21 +378,23 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
 
  private:
   ImmediateFuture<Hash20> getSHA1ForPath(
-      AbsolutePathPiece mountPoint,
-      folly::StringPiece path,
+      const EdenMount& edenMount,
+      RelativePath path,
       ObjectFetchContext& fetchContext);
 
-  ImmediateFuture<Hash20> getSHA1ForPathDefensively(
-      AbsolutePathPiece mountPoint,
-      folly::StringPiece path,
-      ObjectFetchContext& fetchContext) noexcept;
-
+  folly::Synchronized<std::unordered_map<uint64_t, ThriftRequestTraceEvent>>
+      outstandingThriftRequests_;
 #ifdef EDEN_HAVE_USAGE_SERVICE
-  // an endpoint for the edenfs/edenfs_service smartservice used for predictive
-  // prefetch profiles
+  // an endpoint for the edenfs/edenfs_service smartservice used for
+  // predictive prefetch profiles
   std::unique_ptr<EdenFSSmartPlatformServiceEndpoint> spServiceEndpoint_;
 #endif
   const std::vector<std::string> originalCommandLine_;
   EdenServer* const server_;
+
+  std::vector<TraceSubscriptionHandle<ThriftRequestTraceEvent>>
+      thriftRequestTraceSubscriptionHandles_;
+
+  std::shared_ptr<TraceBus<ThriftRequestTraceEvent>> thriftRequestTraceBus_;
 };
 } // namespace facebook::eden

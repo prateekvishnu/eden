@@ -7,10 +7,14 @@
 
 use crate::BonsaiChangeset;
 use abomonation_derive::Abomonation;
-use anyhow::{bail, Error, Result};
+use anyhow::bail;
+use anyhow::Error;
+use anyhow::Result;
 use sql::mysql;
-use std::fmt::{self, Display};
-use std::str::{self, FromStr};
+use std::fmt;
+use std::fmt::Display;
+use std::str;
+use std::str::FromStr;
 
 // Changeset svnrev. Present only in some repos which were imported from SVN.
 #[derive(Abomonation, Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -40,7 +44,7 @@ impl Svnrev {
     pub fn from_bcs(bcs: &BonsaiChangeset) -> Result<Self> {
         match bcs.extra().find(|(key, _)| key == &"convert_revision") {
             Some((_, svnrev)) => {
-                let svnrev = Svnrev::parse_svnrev(str::from_utf8(&svnrev.to_vec())?)?;
+                let svnrev = Svnrev::parse_svnrev(str::from_utf8(svnrev)?)?;
                 Ok(Self::new(svnrev))
             }
             None => bail!("Bonsai cs {:?} without svnrev", bcs),

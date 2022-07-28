@@ -16,7 +16,6 @@ from .. import (
     bookmarks as bookmod,
     changelog2,
     clone,
-    error,
     extensions,
     hg,
     progress,
@@ -48,7 +47,7 @@ def debugrebuildchangelog(ui, repo, **opts):
 
     if opts.get("revlog"):
         commits = _readdrafts(repo) + shelved
-        _bakname = _backupcommits(repo, commits, ts)
+        _backupcommits(repo, commits, ts)
 
         tmprepopath = repo.svfs.join("changelog-rebuild")
         tmprepo = _clonetotmp(repo, tmprepopath)
@@ -84,7 +83,7 @@ def debugrebuildchangelog(ui, repo, **opts):
             ), repo.dirstate.parentchange():
                 # Backup non-master commits
                 commits = _readnonmasterdrafts(repo) + shelved
-                _bakname = _backupcommits(repo, commits, ts)
+                _backupcommits(repo, commits, ts)
 
                 allnodes = hgcommits.dagalgo().all()
 

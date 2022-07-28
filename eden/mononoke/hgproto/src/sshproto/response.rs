@@ -6,15 +6,20 @@
  */
 
 use std::fmt::Display;
-use std::io::{self, Write};
+use std::io;
+use std::io::Write;
 
-use bytes_old::{Bytes, BytesMut};
-use futures::{stream, Stream};
+use bytes_old::Bytes;
+use bytes_old::BytesMut;
+use futures::stream;
+use futures::Stream;
 use futures_ext::StreamExt;
 use itertools::Itertools;
 
+use crate::batch;
 use crate::handler::OutputStream;
-use crate::{batch, Response, SingleResponse};
+use crate::Response;
+use crate::SingleResponse;
 
 fn separated<I, W>(write: &mut W, iter: I, sep: &str) -> io::Result<()>
 where
@@ -148,7 +153,7 @@ fn encode_cmd(response: SingleResponse) -> Bytes {
                 bytes.extend_from_slice(&name);
                 bytes.extend_from_slice("\t".as_bytes());
                 bytes.extend_from_slice(key.as_ref());
-                bytes.extend_from_slice(&"\n".as_bytes());
+                bytes.extend_from_slice("\n".as_bytes());
             }
             bytes.freeze()
         }

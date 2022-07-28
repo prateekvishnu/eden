@@ -5,24 +5,33 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, bail, Error, Result};
+use anyhow::anyhow;
+use anyhow::bail;
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
+use blobstore::Blobstore;
+use blobstore::Storable;
 use cloned::cloned;
 use context::CoreContext;
-use futures::{
-    future::ready,
-    stream::{FuturesUnordered, TryStreamExt},
-};
-use manifest::derive_manifest;
-
-use blobstore::{Blobstore, Storable};
 use derived_data::impl_bonsai_derived_via_manager;
-use derived_data_manager::{dependencies, BonsaiDerivable, DerivationContext};
-use filestore::{self, FetchKey};
-use mononoke_types::{BonsaiChangeset, ChangesetId, MPath};
+use derived_data_manager::dependencies;
+use derived_data_manager::BonsaiDerivable;
+use derived_data_manager::DerivationContext;
+use filestore::FetchKey;
+use futures::future::ready;
+use futures::stream::FuturesUnordered;
+use futures::stream::TryStreamExt;
+use manifest::derive_manifest;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::ChangesetId;
+use mononoke_types::MPath;
 
 use crate::errors::ErrorKind;
-use crate::{BlobHandle, Tree, TreeBuilder, TreeHandle};
+use crate::BlobHandle;
+use crate::Tree;
+use crate::TreeBuilder;
+use crate::TreeHandle;
 
 use derived_data_service_if::types as thrift;
 
@@ -48,7 +57,7 @@ impl BonsaiDerivable for TreeHandle {
             bail!("Can't derive TreeHandle for snapshot")
         }
         let blobstore = derivation_ctx.blobstore().clone();
-        let changes = get_file_changes(&blobstore, &ctx, bonsai).await?;
+        let changes = get_file_changes(&blobstore, ctx, bonsai).await?;
         derive_git_manifest(ctx, blobstore, parents, changes).await
     }
 
@@ -135,7 +144,7 @@ async fn derive_git_manifest<B: Blobstore + Clone + 'static>(
             |leaf_info| {
                 let leaf = leaf_info
                     .leaf
-                    .ok_or(ErrorKind::TreeDerivationFailed.into())
+                    .ok_or_else(|| ErrorKind::TreeDerivationFailed.into())
                     .map(|l| ((), l));
                 ready(leaf)
             }
@@ -147,7 +156,7 @@ async fn derive_git_manifest<B: Blobstore + Clone + 'static>(
         Some(handle) => Ok(handle),
         None => {
             let tree: Tree = TreeBuilder::default().into();
-            tree.store(&ctx, &blobstore).await
+            tree.store(ctx, &blobstore).await
         }
     }
 }
@@ -191,7 +200,8 @@ mod test {
     use filestore::Alias;
     use fixtures::TestRepoFixture;
     use futures_util::stream::TryStreamExt;
-    use git2::{Oid, Repository};
+    use git2::Oid;
+    use git2::Repository;
     use manifest::ManifestOps;
     use std::fs::File;
     use std::io::Write;
@@ -235,7 +245,7 @@ mod test {
             let path = Path::new(&path);
             File::create(&root_path.join(&path))?.write_all(&blob)?;
 
-            index.add_path(&path)?;
+            index.add_path(path)?;
         }
 
         let git_oid = index.write_tree()?;

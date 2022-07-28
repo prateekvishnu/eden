@@ -12,7 +12,6 @@ from collections import defaultdict
 from bindings import mutationstore
 
 from . import error, node as nodemod, perftrace, phases, util
-from .i18n import _
 from .node import nullid
 
 
@@ -270,9 +269,7 @@ class obsoletecache(object):
             return True
         if self.complete[None] or node in self.notobsolete[None]:
             return False
-        unfi = repo
         clhasnode = getisvisiblefunc(repo)
-        clrev = unfi.changelog.rev
 
         for succ in allsuccessors(repo, [node], startdepth=1):
             # If any successor is already known to be obsolete, we can
@@ -318,7 +315,6 @@ class obsoletecache(object):
             # Note that "visible" here means "visible in a normal filtered repo",
             # even if the filter for this repo includes other commits.
             clhasnode = getisvisiblefunc(repo)
-            clrev = repo.changelog.rev
             obsolete = self.obsolete[None]
             for node in repo.nodes("not public()"):
                 if any(

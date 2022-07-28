@@ -16,7 +16,7 @@ namespace py3 scm.service.thrift
 struct DateTime {
   /// UNIX timestamp
   1: required i64 timestamp;
-  /// Time zone offsets in minutes
+  /// Time zone offsets in seconds
   2: required i32 tz;
 }
 
@@ -552,12 +552,33 @@ union SparseProfiles {
   2: AllSparseProfiles all_profiles;
 }
 
+struct SparseProfileAdded {
+  // positive size of added profile
+  1: i64 size;
+}
+
+struct SparseProfileRemoved {
+  // positive size of removed profile
+  1: i64 previous_size;
+}
+
+struct SparseProfileSizeChanged {
+  // signed change in size
+  1: i64 size_change;
+}
+
+union SparseProfileChangeElement {
+  1: SparseProfileAdded added;
+  2: SparseProfileRemoved removed;
+  3: SparseProfileSizeChanged changed;
+}
+
 struct SparseProfileSize {
   1: i64 size;
 }
 
 struct SparseProfileChange {
-  1: i64 size_change;
+  1: SparseProfileChangeElement change;
 }
 
 struct SparseProfileSizes {
@@ -708,6 +729,12 @@ struct RepoCreateCommitParamsCommitInfo {
 
   /// Extra metadata about the commit.
   4: map<string, binary> extra;
+
+  /// The identity that committed this commit, as opposed to wrote it
+  5: optional string committer;
+
+  /// The date the commit was committed
+  6: optional DateTime committer_date;
 }
 
 struct RepoCreateCommitParams {
@@ -794,6 +821,17 @@ struct RepoDeleteBookmarkParams {
   3: optional string service_identity;
 }
 
+enum CrossRepoPushSource {
+  NATIVE_TO_THIS_REPO = 0,
+  PUSH_REDIRECTED = 1,
+}
+
+enum BookmarkKindRestrictions {
+  ANY_KIND = 0,
+  ONLY_SCRATCH = 1,
+  ONLY_PUBLISHING = 2,
+}
+
 struct RepoLandStackParams {
   /// The name of the bookmark to land to.
   1: string bookmark;
@@ -821,6 +859,14 @@ struct RepoLandStackParams {
 
   /// Service identity to use for the bookmark move.
   6: optional string service_identity;
+
+  // TODO: Move to its own land service
+  /// INTERNAL USE ONLY: Override push source.  Leave as the default
+  /// if this is not an internal source control service.
+  101: CrossRepoPushSource __internal_only_push_source = CrossRepoPushSource.NATIVE_TO_THIS_REPO;
+
+  /// What kind of bookmark can be pushed
+  9: BookmarkKindRestrictions bookmark_restrictions = BookmarkKindRestrictions.ANY_KIND;
 }
 
 struct CommitLookupParams {
@@ -924,11 +970,23 @@ struct CommitFindFilesParams {
   /// start finding from the beginning).
   2: optional string after;
 
-  /// Return entries that have these basenames.
+  /// Return entries where the entry's basename is in this array. Note that if
+  /// basename_suffixes is provided, then entries are returned if an entry's
+  /// basename is in basenames or a suffix of the entry's basename is in
+  /// basename_suffixes. This means that if basename_suffixes is provided,
+  /// returned entries basenames' may not be in this array.
   3: optional list<string> basenames;
 
   /// Return entries that have these path prefixes.
   4: optional list<string> prefixes;
+
+  /// Return entries where a suffix of the entry's basename is in this array, if
+  /// this array is provided.
+  /// For example, if basename_suffixes is ['foo'], the basenames 'bar.foo',
+  /// 'foo', and '.foo' will all match. However, 'bar' would not match.
+  /// If the array is empty, nothing will match; however, basenames that are in
+  /// the array basenames will match.
+  5: optional list<string> basename_suffixes;
 }
 
 /// Parameters for the `commit_history` method.
@@ -1718,6 +1776,32 @@ union MegarepoAsynchronousRequestError {
   2: InternalErrorStruct internal_error;
 }
 
+struct PushrebaseConflict {
+  1: Path left;
+  2: Path right;
+}
+
+exception PushrebaseConflictsException {
+  1: string reason;
+  /// Always non-empty
+  2: list<PushrebaseConflict> conflicts;
+} (message = "reason")
+
+struct HookRejection {
+  /// The hook that rejected the output
+  1: string hook_name;
+  /// The changeset that was reject, in bonsai format.
+  2: binary cs_id;
+  /// Why the hook rejected the changeset.
+  3: HookOutcomeRejected reason;
+}
+
+exception HookRejectionsException {
+  1: string reason;
+  /// Always non-empty
+  2: list<HookRejection> rejections;
+} (message = "reason")
+
 /// Service Definition
 
 service SourceControlService extends fb303_core.BaseService {
@@ -1798,7 +1882,12 @@ service SourceControlService extends fb303_core.BaseService {
   RepoLandStackResponse repo_land_stack(
     1: RepoSpecifier repo,
     2: RepoLandStackParams params,
-  ) throws (1: RequestError request_error, 2: InternalError internal_error);
+  ) throws (
+    1: RequestError request_error,
+    2: InternalError internal_error,
+    3: PushrebaseConflictsException pushrebase_conflicts,
+    4: HookRejectionsException hook_rejections,
+  );
 
   /// Commit methods
   /// ==============
@@ -2003,7 +2092,7 @@ service SourceControlService extends fb303_core.BaseService {
     1: MegarepoAddConfigParams params,
   ) throws (1: RequestError request_error, 2: InternalError internal_error);
 
-  /// Add a new unused config version to the library of versions
+  /// Read the target config for a particular commit
   MegarepoReadConfigResponse megarepo_read_target_config(
     1: MegarepoReadConfigParams params,
   ) throws (1: RequestError request_error, 2: InternalError internal_error);

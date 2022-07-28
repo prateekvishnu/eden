@@ -15,6 +15,8 @@ use std::io::BufReader;
 use futures::future::BoxFuture;
 use futures::future::FutureExt;
 use futures::Future;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use types::RepoPath;
 
 #[derive(Default, Debug)]
@@ -126,9 +128,16 @@ impl Root {
                 let mut origins = Vec::new();
 
                 for (pat, src) in rules {
-                    for expanded_rule in sparse_pat_to_matcher_rule(pat)? {
-                        matcher_rules.push(expanded_rule);
-                        origins.push(src.clone());
+                    match sparse_pat_to_matcher_rule(&pat) {
+                        Err(err) => {
+                            tracing::error!(%err, ?pat, %src, "ignoring unsupported sparse pattern");
+                        }
+                        Ok(rules) => {
+                            for expanded_rule in rules {
+                                matcher_rules.push(expanded_rule);
+                                origins.push(src.clone());
+                            }
+                        }
                     }
                 }
 
@@ -450,12 +459,18 @@ static ALL_PATTERN_KINDS: &[&str] = &[
 
 // Convert a sparse profile pattern into what the tree matcher
 // expects. We only support "glob" and "path" pattern types.
-fn sparse_pat_to_matcher_rule(pat: Pattern) -> Result<Vec<String>, Error> {
+fn sparse_pat_to_matcher_rule(pat: &Pattern) -> Result<Vec<String>, Error> {
     static DEFAULT_TYPE: &str = "glob";
 
     let (pat_type, pat_text) = match pat.as_str().split_once(':') {
         Some((t, p)) => match t {
             "glob" | "path" => (t, p),
+            "re" => match convert_regex_to_glob(p) {
+                Some(globs) => {
+                    return Ok(globs);
+                }
+                None => return Err(Error::UnsupportedPattern(t.to_string())),
+            },
             _ => {
                 if ALL_PATTERN_KINDS.contains(&t) {
                     return Err(Error::UnsupportedPattern(t.to_string()));
@@ -472,16 +487,10 @@ fn sparse_pat_to_matcher_rule(pat: Pattern) -> Result<Vec<String>, Error> {
             .iter()
             .map(|s| pathmatcher::normalize_glob(s))
             .collect(),
-        "path" => vec![pathmatcher::plain_to_glob(pat_text)],
+        "path" => vec![pathmatcher::normalize_glob(
+            pathmatcher::plain_to_glob(pat_text).as_str(),
+        )],
         _ => unreachable!(),
-    };
-
-    let make_recursive = |p: String| -> String {
-        if p.is_empty() || p.ends_with('/') {
-            p + "**"
-        } else {
-            p + "/**"
-        }
     };
 
     Ok(pats
@@ -493,6 +502,59 @@ fn sparse_pat_to_matcher_rule(pat: Pattern) -> Result<Vec<String>, Error> {
             Pattern::Include(_) => p,
         })
         .collect())
+}
+
+fn make_recursive(p: impl Into<String>) -> String {
+    let p = p.into();
+    if p.is_empty() || p.ends_with('/') {
+        p + "**"
+    } else {
+        p + "/**"
+    }
+}
+
+// Match patterns like "foo/(?!bar/)" which mean "include foo/ except foo/bar/".
+static EXCLUDE_DIR_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\^?([\w._/]+)/\(\?!([\w._/]+)\)$").unwrap());
+
+// Match patterns like "foo/(?:.*/)?bar(?:/|$)".
+static ANY_DIR_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\^?([\w._/]+)/\(\?:\.\*/\)\?([\w._]+)(\(\?:/\|\$\))?$").unwrap());
+
+// Match patterns like "foo/\..*/ to match dotfiles.
+static DOT_FILES_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\^?([\w._/]+)/\\.\.\*$").unwrap());
+
+// Attempt to convert given regex pattern to glob(s). Only certain
+// cases are handled to give best effort support for checking out
+// older commits that still use regex patterns.
+fn convert_regex_to_glob(pat: &str) -> Option<Vec<String>> {
+    if let Some(caps) = EXCLUDE_DIR_RE.captures(pat) {
+        let prefix = caps.get(1).unwrap().as_str();
+        let excluded = caps.get(2).unwrap().as_str();
+        return Some(vec![
+            make_recursive(prefix),
+            make_recursive(format!("!{}/{}", prefix, excluded)),
+        ]);
+    }
+
+    if let Some(caps) = ANY_DIR_RE.captures(pat) {
+        let prefix = caps.get(1).unwrap().as_str();
+        let name = caps.get(2).unwrap().as_str();
+
+        // Turn trailing (?:/|$) into trailing "/**".
+        let end = match caps.get(3) {
+            Some(_) => "/**",
+            None => "",
+        };
+        return Some(vec![format!("{}/**/{}{}", prefix, name, end)]);
+    }
+
+    if let Some(caps) = DOT_FILES_RE.captures(pat) {
+        let prefix = caps.get(1).unwrap().as_str();
+        return Some(vec![format!("{}/.*/**", prefix)]);
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -665,28 +727,57 @@ title = grand_child
     #[test]
     fn test_sparse_pat_to_matcher_rule() {
         assert_eq!(
-            sparse_pat_to_matcher_rule(Pattern::Include("path:/foo/bar".to_string())).unwrap(),
+            sparse_pat_to_matcher_rule(&Pattern::Include("path:/foo/bar".to_string())).unwrap(),
             vec!["/foo/bar/**"]
         );
 
         assert_eq!(
-            sparse_pat_to_matcher_rule(Pattern::Include("/foo/*/bar{1,{2,3}}/".to_string()))
+            sparse_pat_to_matcher_rule(&Pattern::Include("path:/foo//bar".to_string())).unwrap(),
+            vec!["/foo/bar/**"]
+        );
+
+        assert_eq!(
+            sparse_pat_to_matcher_rule(&Pattern::Include("/foo/*/bar{1,{2,3}}/".to_string()))
                 .unwrap(),
             vec!["/foo/*/bar1/**", "/foo/*/bar2/**", "/foo/*/bar3/**"],
         );
 
         assert_eq!(
-            sparse_pat_to_matcher_rule(Pattern::Include("path:/foo/*/bar{1,{2,3}}/".to_string()))
+            sparse_pat_to_matcher_rule(&Pattern::Include("path:/foo/*/bar{1,{2,3}}/".to_string()))
                 .unwrap(),
             vec!["/foo/\\*/bar\\{1,\\{2,3\\}\\}/**"],
         );
 
         assert_eq!(
-            sparse_pat_to_matcher_rule(Pattern::Exclude("glob:**".to_string())).unwrap(),
+            sparse_pat_to_matcher_rule(&Pattern::Exclude("glob:**".to_string())).unwrap(),
             vec!["!**/**"],
         );
 
-        assert!(sparse_pat_to_matcher_rule(Pattern::Include("re:.*".to_string())).is_err());
+        assert!(sparse_pat_to_matcher_rule(&Pattern::Include("re:.*".to_string())).is_err());
+
+        assert_eq!(
+            sparse_pat_to_matcher_rule(&Pattern::Include(r"re:foo/\..*".to_string())).unwrap(),
+            vec![r"foo/.*/**"],
+        );
+
+        assert_eq!(
+            sparse_pat_to_matcher_rule(&Pattern::Include(r"re:foo/(?!bar/)".to_string())).unwrap(),
+            vec![r"foo/**", "!foo/bar/**"],
+        );
+
+        assert_eq!(
+            sparse_pat_to_matcher_rule(&Pattern::Include(
+                r"re:foo/(?:.*/)?baz.txt(?:/|$)".to_string()
+            ))
+            .unwrap(),
+            vec!["foo/**/baz.txt/**"],
+        );
+
+        // Don't unescape asterisks accidentally.
+        assert!(sparse_pat_to_matcher_rule(&Pattern::Include(r"re:\*".to_string())).is_err());
+
+        // Giver up on regex exclude patterns.
+        assert!(sparse_pat_to_matcher_rule(&Pattern::Exclude(r"re:foo".to_string())).is_err());
     }
 
     #[tokio::test]
@@ -815,6 +906,52 @@ foo
         // break if someone accidentally deletes an in-use sparse
         // profile.
         assert!(matcher.matches("foo".try_into()?)?);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_matcher_unsupported_patterns() -> anyhow::Result<()> {
+        let config = b"
+re:.*
+listfile0:/tmp/oops
+foo
+";
+
+        let prof = Root::from_bytes(config, "test".to_string()).unwrap();
+
+        // Can still get a matcher, skipping unsupported patterns.
+        let matcher = prof.matcher(|_| async { Ok(None) }).await?;
+
+        assert!(matcher.matches("foo".try_into()?)?);
+        assert!(!matcher.matches("bar".try_into()?)?);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_regex_patterns() -> anyhow::Result<()> {
+        let config = b"
+[metadata]
+version = 2
+
+[include]
+re:foo/\\..*
+re:^bar/(?!bad/)
+re:^bar/bad/(?:.*/)?IMPORTANT.ext(?:/|$)
+";
+
+        let prof = Root::from_bytes(b"%include foo", "test".to_string()).unwrap();
+        let matcher = prof
+            .matcher(|_| async { Ok(Some(config.to_vec())) })
+            .await?;
+
+        assert!(matcher.matches("foo/.blah".try_into()?)?);
+        assert!(!matcher.matches("foo/not-dot".try_into()?)?);
+
+        assert!(matcher.matches("bar/ok".try_into()?)?);
+        assert!(!matcher.matches("bar/bad/nono".try_into()?)?);
+        assert!(matcher.matches("bar/bad/well/jk/IMPORTANT.ext".try_into()?)?);
 
         Ok(())
     }

@@ -7,20 +7,45 @@
 
 #pragma once
 
-#include "eden/fs/model/Hash.h"
-#include "eden/fs/model/ObjectId.h"
-#include "eden/fs/utils/DirType.h"
-#include "eden/fs/utils/PathFuncs.h"
+#include <iosfwd>
+#include <optional>
 
 #include <folly/String.h>
 #include <folly/Try.h>
 #include <folly/io/Cursor.h>
 #include <folly/io/IOBuf.h>
-#include <iosfwd>
-#include <optional>
+
+#include "eden/common/utils/OptionSet.h"
+#include "eden/fs/model/Hash.h"
+#include "eden/fs/model/ObjectId.h"
+#include "eden/fs/service/gen-cpp2/eden_types.h"
+#include "eden/fs/utils/DirType.h"
+#include "eden/fs/utils/PathFuncs.h"
 
 namespace facebook::eden {
 class BlobMetadata;
+
+struct EntryAttributeFlags
+    : OptionSet<EntryAttributeFlags, std::underlying_type_t<FileAttributes>> {
+  constexpr static EntryAttributeFlags raw(FileAttributes raw) {
+    return OptionSet<
+        EntryAttributeFlags,
+        std::underlying_type_t<FileAttributes>>::raw(folly::to_underlying(raw));
+  }
+  constexpr static EntryAttributeFlags raw(
+      std::underlying_type_t<FileAttributes> raw) {
+    return OptionSet<
+        EntryAttributeFlags,
+        std::underlying_type_t<FileAttributes>>::raw(raw);
+  }
+};
+
+inline constexpr auto ENTRY_ATTRIBUTE_TYPE =
+    EntryAttributeFlags::raw(FileAttributes::SOURCE_CONTROL_TYPE);
+inline constexpr auto ENTRY_ATTRIBUTE_SIZE =
+    EntryAttributeFlags::raw(FileAttributes::FILE_SIZE);
+inline constexpr auto ENTRY_ATTRIBUTE_SHA1 =
+    EntryAttributeFlags::raw(FileAttributes::SHA1_HASH);
 
 /**
  * Represents the allowed types of entries in version control trees.
@@ -37,16 +62,24 @@ enum class TreeEntryType : uint8_t {
 class EntryAttributes {
  public:
   EntryAttributes(
-      folly::Try<Hash20> contentsHash,
-      folly::Try<uint64_t> fileLength,
-      folly::Try<TreeEntryType> fileType);
+      std::optional<folly::Try<Hash20>> contentsHash,
+      std::optional<folly::Try<uint64_t>> fileLength,
+      std::optional<folly::Try<TreeEntryType>> fileType);
 
-  EntryAttributes(BlobMetadata blobMetadata, TreeEntryType fileType);
-
-  folly::Try<Hash20> sha1;
-  folly::Try<uint64_t> size;
-  folly::Try<TreeEntryType> type;
+  std::optional<folly::Try<Hash20>> sha1;
+  std::optional<folly::Try<uint64_t>> size;
+  std::optional<folly::Try<TreeEntryType>> type;
 };
+
+/**
+ * Comparing two EntryAttributes or Try of EntryAttributes, exceptions of any
+ * kind are considered equal for simplicity.
+ */
+bool operator==(const EntryAttributes& lhs, const EntryAttributes& rhs);
+bool operator!=(const EntryAttributes& lhs, const EntryAttributes& rhs);
+bool operator==(
+    const folly::Try<EntryAttributes>& lhs,
+    const folly::Try<EntryAttributes>& rhs);
 
 /**
  * Computes an initial mode_t, including permission bits, from a FileType.
@@ -151,7 +184,5 @@ class TreeEntry {
 };
 
 std::ostream& operator<<(std::ostream& os, TreeEntryType type);
-bool operator==(const TreeEntry& entry1, const TreeEntry& entry2);
-bool operator!=(const TreeEntry& entry1, const TreeEntry& entry2);
 
 } // namespace facebook::eden

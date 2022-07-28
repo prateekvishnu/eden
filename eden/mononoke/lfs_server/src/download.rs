@@ -7,25 +7,34 @@
 
 use std::str::FromStr;
 
-use anyhow::{Context, Error};
-use futures::stream::{StreamExt, TryStreamExt};
-use gotham::state::{FromState, State};
-use gotham_derive::{StateData, StaticResponseExtender};
-use serde::Deserialize;
-
-use filestore::{self, Alias, FetchKey, Range};
-use gotham_ext::{
-    content_encoding::ContentEncoding,
-    error::HttpError,
-    middleware::{ClientIdentity, ScubaMiddlewareState},
-    response::{
-        CompressedResponseStream, ResponseStream, ResponseTryStreamExt, StreamBody, TryIntoResponse,
-    },
-};
-use http::header::{HeaderMap, RANGE};
-use mononoke_types::{hash::Sha256, ContentId};
+use anyhow::Context;
+use anyhow::Error;
+use filestore::Alias;
+use filestore::FetchKey;
+use filestore::Range;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use gotham::state::FromState;
+use gotham::state::State;
+use gotham_derive::StateData;
+use gotham_derive::StaticResponseExtender;
+use gotham_ext::content_encoding::ContentEncoding;
+use gotham_ext::error::HttpError;
+use gotham_ext::middleware::ClientIdentity;
+use gotham_ext::middleware::ScubaMiddlewareState;
+use gotham_ext::response::CompressedResponseStream;
+use gotham_ext::response::ResponseStream;
+use gotham_ext::response::ResponseTryStreamExt;
+use gotham_ext::response::StreamBody;
+use gotham_ext::response::TryIntoResponse;
+use http::header::HeaderMap;
+use http::header::RANGE;
+use mononoke_types::hash::Sha256;
+use mononoke_types::ContentId;
 use permission_checker::MononokeIdentitySet;
 use redactedblobstore::has_redaction_root_cause;
+use repo_blobstore::RepoBlobstoreRef;
+use serde::Deserialize;
 use stats::prelude::*;
 
 use crate::config::ServerConfig;
@@ -107,7 +116,7 @@ async fn fetch_by_key(
 ) -> Result<impl TryIntoResponse, HttpError> {
     // Query a stream out of the Filestore
     let fetched = filestore::fetch_range_with_size(
-        ctx.repo.get_blobstore(),
+        ctx.repo.repo_blobstore().clone(),
         ctx.ctx.clone(),
         &key,
         range.unwrap_or_else(Range::all),
@@ -123,7 +132,7 @@ async fn fetch_by_key(
 
     // Return a 404 if the stream doesn't exist.
     let (stream, size) = fetched
-        .ok_or_else(|| ErrorKind::ObjectDoesNotExist(key))
+        .ok_or(ErrorKind::ObjectDoesNotExist(key))
         .map_err(HttpError::e404)?;
 
     ScubaMiddlewareState::maybe_add(scuba, LfsScubaKey::DownloadContentSize, size);
@@ -162,16 +171,15 @@ async fn download_inner(
 
     let ctx = RepositoryRequestContext::instantiate(state, repository.clone(), method).await?;
 
-    let idents = ClientIdentity::try_borrow_from(&state)
-        .map(|ident| ident.identities().as_ref())
-        .flatten();
+    let idents =
+        ClientIdentity::try_borrow_from(state).and_then(|ident| ident.identities().as_ref());
 
     let disable_compression = should_disable_compression(&ctx.config, idents);
 
     let content_encoding = if disable_compression {
         ContentEncoding::Identity
     } else {
-        ContentEncoding::from_state(&state)
+        ContentEncoding::from_state(state)
     };
 
     let mut scuba = state.try_borrow_mut::<ScubaMiddlewareState>();
@@ -217,7 +225,8 @@ mod test {
     use mononoke_types::typed_hash::BlobstoreKey;
     use mononoke_types_mocks::contentid::ONES_CTID;
     use permission_checker::MononokeIdentity;
-    use redactedblobstore::{RedactedBlobs, RedactedMetadata};
+    use redactedblobstore::RedactedBlobs;
+    use redactedblobstore::RedactedMetadata;
     use std::sync::Arc;
     use test_repo_factory::TestRepoFactory;
 
@@ -263,8 +272,8 @@ mod test {
     #[test]
     fn test_should_disable_compression() -> Result<(), Error> {
         let mut config = ServerConfig::default();
-        let test_ident = MononokeIdentity::new("USER", "test")?;
-        let test_ident_2 = MononokeIdentity::new("USER", "test2")?;
+        let test_ident = MononokeIdentity::new("USER", "test");
+        let test_ident_2 = MononokeIdentity::new("USER", "test2");
         let mut client_idents = MononokeIdentitySet::new();
         client_idents.insert(test_ident.clone());
 

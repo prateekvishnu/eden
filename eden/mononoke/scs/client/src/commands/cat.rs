@@ -9,20 +9,21 @@
 
 use std::io::Write;
 
-use anyhow::Error;
-use clap::{App, AppSettings, ArgMatches, SubCommand};
-use futures::{future, stream, TryFutureExt};
-use futures_util::stream::StreamExt;
+use anyhow::Result;
+use clap::Parser;
+use futures::future;
+use futures::stream;
+use futures::stream::StreamExt;
+use futures::TryFutureExt;
 use serde_json::json;
 use source_control::types as thrift;
 
-use crate::args::commit_id::{add_commit_id_args, get_commit_id, resolve_commit_id};
-use crate::args::path::{add_path_args, get_path};
-use crate::args::repo::{add_repo_args, get_repo_specifier};
-use crate::connection::Connection;
-use crate::render::{Render, RenderStream};
-
-pub(super) const NAME: &str = "cat";
+use crate::args::commit_id::resolve_commit_id;
+use crate::args::commit_id::CommitIdArgs;
+use crate::args::path::PathArgs;
+use crate::args::repo::RepoArgs;
+use crate::render::Render;
+use crate::ScscApp;
 
 /// Chunk size for requests.
 const CHUNK_SIZE: i64 = source_control::FILE_CONTENT_CHUNK_RECOMMENDED_SIZE;
@@ -30,14 +31,15 @@ const CHUNK_SIZE: i64 = source_control::FILE_CONTENT_CHUNK_RECOMMENDED_SIZE;
 /// Number of concurrent fetches for very large files.
 const CONCURRENT_FETCHES: usize = 10;
 
-pub(super) fn make_subcommand<'a, 'b>() -> App<'a, 'b> {
-    let cmd = SubCommand::with_name(NAME)
-        .about("Fetch the contents of a file")
-        .setting(AppSettings::ColoredHelp);
-    let cmd = add_repo_args(cmd);
-    let cmd = add_commit_id_args(cmd);
-    let cmd = add_path_args(cmd);
-    cmd
+#[derive(Parser)]
+/// Fetch the contents of a file
+pub(super) struct CommandArgs {
+    #[clap(flatten)]
+    repo_args: RepoArgs,
+    #[clap(flatten)]
+    commit_id_args: CommitIdArgs,
+    #[clap(flatten)]
+    path_args: PathArgs,
 }
 
 struct CatOutput {
@@ -46,12 +48,14 @@ struct CatOutput {
 }
 
 impl Render for CatOutput {
-    fn render(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    type Args = CommandArgs;
+
+    fn render(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         w.write_all(self.data.as_slice())?;
         Ok(())
     }
 
-    fn render_json(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    fn render_json(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         let output = match std::str::from_utf8(self.data.as_slice()) {
             Ok(data) => json!({
                 "offset": self.offset,
@@ -66,19 +70,16 @@ impl Render for CatOutput {
     }
 }
 
-pub(super) async fn run(
-    matches: &ArgMatches<'_>,
-    connection: Connection,
-) -> Result<RenderStream, Error> {
-    let repo = get_repo_specifier(matches).expect("repository is required");
-    let commit_id = get_commit_id(matches)?;
-    let id = resolve_commit_id(&connection, &repo, &commit_id).await?;
+pub(super) async fn run(app: ScscApp, args: CommandArgs) -> Result<()> {
+    let repo = args.repo_args.clone().into_repo_specifier();
+    let commit_id = args.commit_id_args.clone().into_commit_id();
+    let id = resolve_commit_id(&app.connection, &repo, &commit_id).await?;
     let commit = thrift::CommitSpecifier {
         repo,
         id,
         ..Default::default()
     };
-    let path = get_path(matches).expect("path is required");
+    let path = args.path_args.path.clone();
     let file = thrift::FileSpecifier::by_commit_path(thrift::CommitPathSpecifier {
         commit,
         path,
@@ -91,14 +92,14 @@ pub(super) async fn run(
         size: CHUNK_SIZE,
         ..Default::default()
     };
-    let response = connection.file_content_chunk(&file, &params).await?;
-    let output = Box::new(CatOutput {
+    let response = app.connection.file_content_chunk(&file, &params).await?;
+    let output = CatOutput {
         offset: response.offset as u64,
         data: response.data,
-    });
+    };
 
     let file_size = response.file_size;
-    let stream = stream::once(async move { Ok(output as Box<dyn Render>) }).chain(
+    let stream = stream::once(future::ok(output)).chain(
         stream::iter((CHUNK_SIZE..file_size).step_by(CHUNK_SIZE as usize))
             .map(move |offset| {
                 let params = thrift::FileContentChunkParams {
@@ -106,20 +107,17 @@ pub(super) async fn run(
                     size: CHUNK_SIZE,
                     ..Default::default()
                 };
-                connection
+                app.connection
                     .file_content_chunk(&file, &params)
-                    .map_err(Error::from)
+                    .map_err(anyhow::Error::from)
             })
             .buffered(CONCURRENT_FETCHES)
             .then(|response| {
-                future::ready(response.map(|response| {
-                    let output = Box::new(CatOutput {
-                        offset: response.offset as u64,
-                        data: response.data,
-                    });
-                    output as Box<dyn Render>
+                future::ready(response.map(|response| CatOutput {
+                    offset: response.offset as u64,
+                    data: response.data,
                 }))
             }),
     );
-    Ok(stream.boxed())
+    app.target.render(&args, stream).await
 }

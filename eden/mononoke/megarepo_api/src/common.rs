@@ -5,41 +5,67 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Context, Error};
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Error;
 use async_trait::async_trait;
-use blobrepo::{save_bonsai_changesets, BlobRepo};
+use blobrepo::save_bonsai_changesets;
+use blobrepo::BlobRepo;
 use blobstore::Loadable;
-use bookmarks::{BookmarkName, BookmarkUpdateReason};
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
 use bytes::Bytes;
-use changesets::{Changesets, ChangesetsRef};
-use commit_transformation::{
-    create_directory_source_to_target_multi_mover, create_source_to_target_multi_mover,
-    DirectoryMultiMover, MultiMover,
-};
+use changesets::Changesets;
+use changesets::ChangesetsRef;
+use commit_transformation::create_directory_source_to_target_multi_mover;
+use commit_transformation::create_source_to_target_multi_mover;
+use commit_transformation::DirectoryMultiMover;
+use commit_transformation::MultiMover;
 use context::CoreContext;
 use derived_data::BonsaiDerived;
 use fsnodes::RootFsnodeId;
-use futures::{
-    future::{try_join, try_join_all},
-    stream, StreamExt, TryFutureExt, TryStreamExt,
-};
-use itertools::{EitherOrBoth, Itertools};
-use manifest::{bonsai_diff, BonsaiDiffFileChange, Entry, ManifestOps};
-use megarepo_config::{
-    MononokeMegarepoConfigs, Source, SourceRevision, SyncConfigVersion, SyncTargetConfig, Target,
-};
+use futures::future::try_join;
+use futures::future::try_join_all;
+use futures::stream;
+use futures::StreamExt;
+use futures::TryFutureExt;
+use futures::TryStreamExt;
+use itertools::EitherOrBoth;
+use itertools::Itertools;
+use manifest::bonsai_diff;
+use manifest::BonsaiDiffFileChange;
+use manifest::Entry;
+use manifest::ManifestOps;
+use megarepo_config::MononokeMegarepoConfigs;
+use megarepo_config::Source;
+use megarepo_config::SourceRevision;
+use megarepo_config::SyncConfigVersion;
+use megarepo_config::SyncTargetConfig;
+use megarepo_config::Target;
 use megarepo_error::MegarepoError;
-use megarepo_mapping::{CommitRemappingState, SourceName};
+use megarepo_mapping::CommitRemappingState;
+use megarepo_mapping::SourceName;
 use mercurial_derived_data::DeriveHgChangeset;
 use mercurial_types::HgFileNodeId;
-use mononoke_api::{ChangesetContext, Mononoke, MononokePath, RepoContext};
-use mononoke_types::{
-    BonsaiChangeset, BonsaiChangesetMut, ChangesetId, DateTime, FileChange, FileType, MPath,
-    RepositoryId,
-};
-use mutable_renames::{MutableRenameEntry, MutableRenames};
+use mononoke_api::ChangesetContext;
+use mononoke_api::Mononoke;
+use mononoke_api::MononokePath;
+use mononoke_api::RepoContext;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::BonsaiChangesetMut;
+use mononoke_types::ChangesetId;
+use mononoke_types::DateTime;
+use mononoke_types::FileChange;
+use mononoke_types::FileType;
+use mononoke_types::MPath;
+use mononoke_types::RepositoryId;
+use mutable_renames::MutableRenameEntry;
+use mutable_renames::MutableRenames;
+use repo_authorization::AuthorizationContext;
 use sorted_vector_map::SortedVectorMap;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tunables::tunables;
 use unodes::RootUnodeManifestId;
@@ -62,10 +88,14 @@ pub trait MegarepoOp {
         let target_repo_id = RepositoryId::new(repo_id.try_into().unwrap());
         let target_repo = self
             .mononoke()
-            .repo_by_id_bypass_acl_check(ctx.clone(), target_repo_id)
+            .repo_by_id(ctx.clone(), target_repo_id)
             .await
             .map_err(MegarepoError::internal)?
-            .ok_or_else(|| MegarepoError::request(anyhow!("repo not found {}", target_repo_id)))?;
+            .ok_or_else(|| MegarepoError::request(anyhow!("repo not found {}", target_repo_id)))?
+            .with_authorization_context(AuthorizationContext::new_bypass_access_control())
+            .build()
+            .await
+            .map_err(MegarepoError::internal)?;
         Ok(target_repo)
     }
 
@@ -131,7 +161,7 @@ pub trait MegarepoOp {
             None
         };
 
-        let p1 = maybe_deletion_commit.unwrap_or(old_target_cs.id());
+        let p1 = maybe_deletion_commit.unwrap_or_else(|| old_target_cs.id());
 
         let mut parents = vec![p1];
         // Verify that none of the files that will be merged in collides
@@ -147,7 +177,7 @@ pub trait MegarepoOp {
             parents,
             message
                 .clone()
-                .unwrap_or("target config change".to_string()),
+                .unwrap_or_else(|| "target config change".to_string()),
             Default::default(),
         );
         state
@@ -233,7 +263,7 @@ pub trait MegarepoOp {
             author_date: DateTime::now(),
             committer: None,
             committer_date: None,
-            message: message.unwrap_or("target config change".to_string()),
+            message: message.unwrap_or_else(|| "target config change".to_string()),
             extra: SortedVectorMap::new(),
             file_changes: file_changes.into_iter().collect(),
             is_snapshot: false,
@@ -260,9 +290,7 @@ pub trait MegarepoOp {
             Some(new_version) => {
                 format!("deletion commit for {}", new_version)
             }
-            None => {
-                format!("deletion commit")
-            }
+            None => "deletion commit".to_string(),
         };
 
         let old_target_with_removed_files =
@@ -370,7 +398,7 @@ pub trait MegarepoOp {
 
             // Check that path doesn't move to itself - in that case we don't need to
             // delete file
-            if moved.iter().find(|cur_path| cur_path == &&path).is_none() {
+            if !moved.iter().any(|cur_path| cur_path == &path) {
                 file_changes.push((path.clone(), FileChange::Deletion));
             }
 
@@ -589,7 +617,7 @@ pub trait MegarepoOp {
         for (source_name, moved) in &moved_commits {
             add_and_check_all_paths(
                 &mut all_files_in_target,
-                &source_name,
+                source_name,
                 moved
                     .moved
                     .file_changes()
@@ -677,7 +705,6 @@ pub trait MegarepoOp {
             SourceRevision::bookmark(_bookmark) => {
                 /* If the source is following a git repo branch we can't verify much as the bookmark
                 doesn't have to exist in the megarepo */
-                ()
             }
             SourceRevision::UnknownField(_) => {
                 return Err(MegarepoError::internal(anyhow!(
@@ -758,12 +785,8 @@ pub trait MegarepoOp {
         let linkfiles = stream::iter(links.into_iter())
             .map(Ok)
             .map_ok(|(path, content)| async {
-                let ((content_id, size), fut) = filestore::store_bytes(
-                    repo.blobstore(),
-                    repo.filestore_config(),
-                    &ctx,
-                    content,
-                );
+                let ((content_id, size), fut) =
+                    filestore::store_bytes(repo.blobstore(), repo.filestore_config(), ctx, content);
                 fut.await?;
 
                 let fc = FileChange::tracked(content_id, FileType::Symlink, size, None);
@@ -838,7 +861,7 @@ pub trait MegarepoOp {
                     message.clone(),
                     cur_parents,
                     sync_config_version.clone(),
-                    &source_name,
+                    source_name,
                 )?;
                 let merge = bcs.freeze()?;
                 cur_parents = vec![merge.get_changeset_id()];
@@ -849,7 +872,7 @@ pub trait MegarepoOp {
         let (last_source_name, last_moved_commit) = last_moved_commit;
         cur_parents.push(last_moved_commit.moved.get_changeset_id());
         let mut final_merge =
-            self.create_merge_commit(message, cur_parents, sync_config_version, &last_source_name)?;
+            self.create_merge_commit(message, cur_parents, sync_config_version, last_source_name)?;
         if let Some(state) = state {
             state.save_in_changeset(ctx, repo, &mut final_merge).await?;
         }
@@ -887,7 +910,7 @@ pub trait MegarepoOp {
         let mut txn = repo.bookmarks().create_transaction(ctx.clone());
         let bookmark = BookmarkName::new(bookmark).map_err(MegarepoError::request)?;
 
-        txn.create(&bookmark, cs_id, BookmarkUpdateReason::XRepoSync, None)?;
+        txn.create(&bookmark, cs_id, BookmarkUpdateReason::XRepoSync)?;
 
         let success = txn.commit().await.map_err(MegarepoError::internal)?;
         if !success {
@@ -912,7 +935,6 @@ pub trait MegarepoOp {
             to_cs_id,
             from_cs_id,
             BookmarkUpdateReason::XRepoSync,
-            None,
         )?;
 
         let success = txn.commit().await.map_err(MegarepoError::internal)?;
@@ -937,10 +959,10 @@ pub trait MegarepoOp {
 
         match maybe_book_value {
             Some(old) => {
-                txn.update(&bookmark, cs_id, old, BookmarkUpdateReason::XRepoSync, None)?;
+                txn.update(&bookmark, cs_id, old, BookmarkUpdateReason::XRepoSync)?;
             }
             None => {
-                txn.create(&bookmark, cs_id, BookmarkUpdateReason::XRepoSync, None)?;
+                txn.create(&bookmark, cs_id, BookmarkUpdateReason::XRepoSync)?;
             }
         }
 
@@ -1071,7 +1093,7 @@ pub async fn find_bookmark_and_value(
     repo: &RepoContext,
     bookmark_name: &str,
 ) -> Result<(BookmarkName, ChangesetId), MegarepoError> {
-    let bookmark = BookmarkName::new(bookmark_name.to_string()).map_err(MegarepoError::request)?;
+    let bookmark = BookmarkName::new(bookmark_name).map_err(MegarepoError::request)?;
 
     let cs_id = repo
         .blob_repo()

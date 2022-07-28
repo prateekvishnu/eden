@@ -35,6 +35,7 @@ from .. import (
     bundle2,
     changegroup,
     changelog2,
+    clone,
     cmdutil,
     color,
     context,
@@ -51,11 +52,9 @@ from .. import (
     fileset,
     formatter,
     git,
-    graphmod,
     hg,
     httpconnection,
     json,
-    localrepo,
     lock as lockmod,
     match as matchmod,
     merge as mergemod,
@@ -71,7 +70,6 @@ from .. import (
     scmutil,
     setdiscovery,
     simplemerge,
-    smallcommitmetadata,
     smartset,
     sslutil,
     streamclone,
@@ -349,11 +347,11 @@ def debugbuilddag(
                         return None
 
                     if len(ps) == 0 or ps[0] < 0:
-                        pars = [None, None]
+                        pars = []
                     elif len(ps) == 1:
-                        pars = [nodeids[ps[0]], None]
+                        pars = [repo[nodeids[ps[0]]]]
                     else:
-                        pars = [nodeids[p] for p in ps]
+                        pars = [repo[nodeids[p]] for p in ps]
                     cx = context.memctx(
                         repo,
                         pars,
@@ -545,18 +543,21 @@ def debugchangelog(ui, repo, migrate=None, unless=[], remove_backup=False):
       - Commit text won't be migrated. Revlog is still used to get commit text.
       - Cheap to migrate back to revlog backend.
       - Migration can take a few minutes for a large repo.
+      - Can migrate back to revlog.
 
     - hybrid
 
-      - Similar to 'doublewrite'.
+      - Similar to 'doublewrite'. On-disk file formats are the same.
       - Revlog is not used for fallback commit text reading. Instead, edenapi
         client is used.
+      - Can migrate back to revlog.
 
     - fullsegments
 
       - Segments backend for everything.
       - Commit text will be fully migrated. Revlog is no longer necessary.
       - Migration can take tens of minutes for a large repo.
+      - Usually used in tests.
 
     - lazytext
 
@@ -564,7 +565,9 @@ def debugchangelog(ui, repo, migrate=None, unless=[], remove_backup=False):
       - IdMap (commit hash) is not lazy.
       - Commit text is lazy.
       - Revlog is not used.
-      - Can only migrate to lazy backend.
+      - Can only migrate to lazy backend. Cannot migrate back to revlog.
+      - Usually used in repos without segmented-changelog capability provided
+        by the server.
 
     - lazy
 
@@ -575,6 +578,8 @@ def debugchangelog(ui, repo, migrate=None, unless=[], remove_backup=False):
       - Cannot migrate away to any other backends.
       - Migrating to this backend rebuilds the commit graph and invisible
         commits will be lost.
+      - Usually used in repos with segmented-changelog capability provided
+        by the server.
 
     Migration does not delete old data for easier rolling back or manual
     investigation.
@@ -1170,7 +1175,7 @@ def debugdiffdirs(ui, repo, *pats, **opts):
 
 @command(
     "debugdiscovery",
-    [("", "rev", [], "restrict discovery to this set of revs")] + cmdutil.remoteopts,
+    [("", "rev", [], "restrict discovery to this set of revs")],
     _("[--rev REV] [OTHER]"),
 )
 def debugdiscovery(ui, repo, remoteurl="default", **opts):
@@ -2247,7 +2252,6 @@ def debugobsolete(ui, repo, precursor=None, *successors, **opts):
                 else:
                     date = None
                 prec = parsenodeid(precursor)
-                parents = None
                 if succs:
                     mutation.createsyntheticentry(
                         repo,
@@ -2516,13 +2520,13 @@ def debugprocesstree(ui, *pids, **opts):
         parentchild.setdefault(ppid, []).append(pid)
 
     # Find out hg processes.
-    cmdre = util.re.compile("(^(.*[\\\\/])?(hg|chg)[ \.])|^chg\[worker")
+    cmdre = util.re.compile(r"(^(.*[\\/])?(hg|chg)[ \.])|^chg\[worker")
     if not pids:
         hgpids = {pid for pid, p in pidprocess.items() if cmdre.search(p["cmdline"])}
     else:
         hgpids = {pid for pid in pids if pid in pidprocess}
         # Extend selection so if "chg[worker/x]" is selected, also select "x"
-        chgpidre = util.re.compile("chg\[worker/(\d+)\]")
+        chgpidre = util.re.compile(r"chg\[worker/(\d+)\]")
         for pid in list(hgpids):
             match = chgpidre.match(pidprocess[pid]["cmdline"])
             if match:
@@ -3441,15 +3445,12 @@ def debugwalk(ui, repo, *pats, **opts):
 
 @command(
     "debugwireargs",
-    [("", "three", "", "three"), ("", "four", "", "four"), ("", "five", "", "five")]
-    + cmdutil.remoteopts,
+    [("", "three", "", "three"), ("", "four", "", "four"), ("", "five", "", "five")],
     _("REPO [OPTIONS]... [ONE [TWO]]"),
     norepo=True,
 )
 def debugwireargs(ui, repopath, *vals, **opts):
     repo = hg.peer(ui, opts, repopath)
-    for opt in cmdutil.remoteopts:
-        del opts[opt[1]]
     args = {}
     for k, v in pycompat.iteritems(opts):
         if v:
@@ -3472,7 +3473,7 @@ def debugwireargs(ui, repopath, *vals, **opts):
     ],
 )
 def debugdrawdag(ui, repo, **opts):
-    """read an ASCII graph from stdin and create changesets
+    r"""read an ASCII graph from stdin and create changesets
 
     The ASCII graph is like what :hg:`log -G` outputs, with each `o` replaced
     to the name of the node. The command will create dummy changesets and local
@@ -4024,3 +4025,11 @@ def debugscmstore(ui, repo, mode=None, path=None, python=False):
         repo.manifestlog.treescmstore.test_fetch(path)
     if mode == "file":
         repo.fileslog.filescmstore.test_fetch(path)
+
+
+@command("debugrevlogclone", [], _("source"))
+def debugrevlogclone(ui, repo, source):
+    """download revlog and bookmarks into a newly initialized repo"""
+    clone.revlogclone(source, repo)
+    changelog_format = ui.config("clone", "nonsegmented-changelog", "doublewrite")
+    changelog2.migrateto(repo, changelog_format)

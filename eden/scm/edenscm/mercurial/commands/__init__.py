@@ -67,7 +67,7 @@ from .. import (
     visibility,
 )
 from ..i18n import _
-from ..node import bin, hex, nullhex, nullid, short
+from ..node import bin, hex, nullid, short
 from ..pycompat import isint, range
 from . import cmdtable
 
@@ -91,6 +91,7 @@ with hgdemandimport.deactivated():
         doctor,
         eden,
         fs,
+        isl,
         purge,
         uncommit,
     )
@@ -175,7 +176,6 @@ globalopts = cmdutil._typedflags(
 )
 
 dryrunopts = cmdutil.dryrunopts
-remoteopts = cmdutil.remoteopts
 walkopts = cmdutil.walkopts
 commitopts = cmdutil.commitopts
 commitopts2 = cmdutil.commitopts2
@@ -699,6 +699,34 @@ def _makebackoutmessage(repo, message, node):
     return message + addmessage
 
 
+def _replayrenames(repo, node):
+    """Ensure that any renames from node are replayed in reverse on the current
+    working copy.
+    """
+    origctx = repo[node]
+    wctx = repo[None]
+    status = wctx.p1().status()
+
+    # For each file in the commit that's being backed out..
+    for origfile in origctx.files():
+        # ...if it wasn't a deletion...
+        if origfile in origctx:
+            origfilectx = origctx[origfile]
+            origrenamed = origfilectx.renamed()
+            # ...and it was a rename...
+            if origrenamed:  # In the negative case this can be None or False
+                precopypath = origrenamed[0]
+                # ...then if the working copy has the pre-rename file...
+                if precopypath in wctx:
+                    newfilectx = wctx[precopypath]
+                    newrenamed = newfilectx.renamed()
+                    # ...and it's not already marked renamed...
+                    # ...and the post-rename file is marked delete...
+                    if newrenamed is None and origfile in status.removed:
+                        # ...then reverse the rename.
+                        repo.dirstate.copy(origfile, precopypath)
+
+
 def _dobackout(ui, repo, node=None, rev=None, **opts):
     if opts.get("commit") and opts.get("no_commit"):
         raise error.Abort(_("cannot use --commit with --no-commit"))
@@ -750,6 +778,12 @@ def _dobackout(ui, repo, node=None, rev=None, **opts):
             ui.setconfig("ui", "forcemerge", opts.get("tool", ""), "backout")
             stats = mergemod.update(repo, parent, True, True, node, False)
             repo.setparents(op1, op2)
+
+            # Ensure reverse-renames are preserved during the backout. In theory
+            # merge.update() should handle this, but it's extremely complex, so
+            # let's just double check it here.
+            _replayrenames(repo, node)
+
             dsguard.close()
             hg._showstats(repo, stats)
             if stats[3]:
@@ -764,6 +798,10 @@ def _dobackout(ui, repo, node=None, rev=None, **opts):
         hg.clean(repo, node, show_stats=False)
         repo.dirstate.setbranch(branch)
         cmdutil.revert(ui, repo, rctx, repo.dirstate.parents(), forcecopytracing=True)
+        # Ensure reverse-renames are preserved during the backout. In theory
+        # cmdutil.revert() should handle this, but it's extremely complex, so
+        # let's just double check it here.
+        _replayrenames(repo, node)
 
     if opts.get("no_commit"):
         msg = _("changeset %s backed out, " "don't forget to commit.\n")
@@ -771,18 +809,12 @@ def _dobackout(ui, repo, node=None, rev=None, **opts):
         return 0
 
     def commitfunc(ui, repo, message, match, opts):
-        editform = "backout"
-        e = cmdutil.getcommiteditor(editform=editform, **opts)
-        if not message:
-            e = cmdutil.getcommiteditor(edit=True, editform=editform)
-
-        message = _makebackoutmessage(repo, message, node)
         return repo.commit(
-            message,
+            _makebackoutmessage(repo, message, node),
             opts.get("user"),
             opts.get("date"),
             match,
-            editor=e,
+            editor=cmdutil.getcommiteditor(editform="backout", **opts),
         )
 
     newnode = cmdutil.commit(ui, repo, commitfunc, [], opts)
@@ -1309,8 +1341,7 @@ def branch(ui, repo, label=None, **opts):
         ),
         ("a", "all", None, _("bundle all changesets in the repository")),
         ("t", "type", "bzip2", _("bundle compression type to use"), _("TYPE")),
-    ]
-    + remoteopts,
+    ],
     _("[-f] [-t BUNDLESPEC] [-a] [-r REV]... [--base REV]... FILE [DEST]"),
 )
 def bundle(ui, repo, fname, dest=None, **opts):
@@ -1512,8 +1543,7 @@ def cat(ui, repo, file1, *pats, **opts):
             _("use remotefilelog (only turn it off in legacy tests) (ADVANCED)"),
         ),
         ("", "git", False, _("use git protocol (EXPERIMENTAL)")),
-    ]
-    + remoteopts,
+    ],
     norepo=True,
 )
 def clone(ui, source, dest=None, **opts):
@@ -1542,7 +1572,7 @@ def clone(ui, source, dest=None, **opts):
             shallow=opts.get("shallow"),
         )
 
-    return r is None
+    return r
 
 
 @command(
@@ -1708,34 +1738,10 @@ def _docommit(ui, repo, *pats, **opts):
         ("g", "global", None, _("edit global config")),
     ]
     + formatteropts,
-    _("[-u] [NAME]..."),
     optionalrepo=True,
     cmdtype=readonly,
 )
 def config(ui, repo, *values, **opts):
-    """show config settings
-
-    With no arguments, print names and values of all config items.
-
-    With one argument of the form section.name, print just the value
-    of that config item.
-
-    With multiple arguments, print names and values of all config
-    items with matching section names.
-
-    With --edit, start an editor on the user-level config file. With
-    --global, edit the system-wide config file. With --local, edit the
-    repository-level config file.
-
-    With --debug, the source (filename and line number) is printed
-    for each config item.
-
-    See :hg:`help config` for more information about config files.
-
-    Returns 0 on success, 1 if NAME does not exist.
-
-    """
-
     if opts.get("edit") or opts.get("local") or opts.get("global"):
         if opts.get("local") and opts.get("global"):
             raise error.Abort(_("can't use --local and --global together"))
@@ -3324,7 +3330,6 @@ def histgrep(ui, repo, pattern, *pats, **opts):
         ("t", "tags", None, _("show tags (DEPRECATED)")),
         ("B", "bookmarks", None, _("show bookmarks")),
     ]
-    + remoteopts
     + formatteropts,
     _("[-nibtB] [-r REV] [SOURCE]"),
     optionalrepo=True,
@@ -3340,7 +3345,7 @@ def identify(
     branch=None,
     tags=None,
     bookmarks=None,
-    **opts
+    **opts,
 ):
     """identify the working directory or specified revision
 
@@ -3715,8 +3720,7 @@ def import_(ui, repo, patch1=None, *patches, **opts):
 
 @command(
     "init|ini",
-    remoteopts
-    + [
+    [
         ("", "git", False, _("use git as backend (EXPERIMENTAL)")),
     ],
     _("[-e CMD] [--remotecmd CMD] [DEST]"),
@@ -3738,11 +3742,13 @@ def init(ui, dest=".", **opts):
     destpath = ui.expandpath(dest)
     if opts.get("git"):
         git.clone(ui, "", destpath)
+    elif ui.configbool("format", "use-eager-repo"):
+        bindings.eagerepo.EagerRepo.open(destpath)
     else:
         if util.url(destpath).scheme == "bundle":
             hg.repository(ui, destpath, create=True)
         else:
-            bindings.repo.repo.initialize(destpath, ui._rcfg._rcfg)
+            bindings.repo.repo.initialize(destpath, ui._rcfg)
 
 
 @command(
@@ -4468,8 +4474,7 @@ def postincoming(ui, repo, modheads, optupdate, checkout, brev):
         ("f", "force", None, _("run even when remote repository is unrelated")),
         ("r", "rev", [], _("a remote commit to pull"), _("REV")),
         ("B", "bookmark", [], _("a bookmark to pull"), _("BOOKMARK")),
-    ]
-    + remoteopts,
+    ],
     _("[-u] [-f] [-r REV]... [-e CMD] [--remotecmd CMD] [SOURCE]"),
 )
 def pull(ui, repo, source="default", **opts):
@@ -4726,8 +4731,7 @@ def _newpull(ui, repo, source, **opts):
         ("B", "bookmark", [], _("bookmark to push"), _("BOOKMARK")),
         ("", "new-branch", False, _("allow pushing a new branch (DEPRECATED)")),
         ("", "pushvars", [], _("variables that can be sent to server (ADVANCED)")),
-    ]
-    + remoteopts,
+    ],
     _("[-f] [-r REV]... [-e CMD] [--remotecmd CMD] [DEST]"),
 )
 def push(ui, repo, dest=None, **opts):
@@ -6139,7 +6143,7 @@ def update(
     merge=None,
     tool=None,
     inactive=None,
-    **opts
+    **opts,
 ):
     """check out a specific commit
 

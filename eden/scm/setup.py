@@ -43,8 +43,10 @@ import zipfile
 if sys.version_info.major == 2:
     raise RuntimeError("This setup.py is Python 3 only!")
 
-
-PY_VERSION = "38"
+if os.name == "nt":
+    PY_VERSION = "39"
+else:
+    PY_VERSION = "38"
 
 
 def ensureenv():
@@ -791,7 +793,7 @@ class fetchbuilddeps(Command):
     pyassets += (
         [
             edenpythrift(
-                name="eden-rust-deps-feaebb9a88abc3af8dc071709ce7c691a7d3c709.zip"
+                name="eden-rust-deps-2f6da57cdd616a6f0e5d1b9fcd7f0349f4edcf47.zip"
             )
         ]
         if havefb
@@ -1666,15 +1668,6 @@ def ordinarypath(p):
     return p and p[0] != "." and p[-1] != "~"
 
 
-for root in ("mercurial/templates",):
-    for curdir, dirs, files in os.walk(os.path.join("edenscm", root)):
-        curdir = curdir.split(os.sep, 1)[1]
-        dirs[:] = filter(ordinarypath, dirs)
-        for f in filter(ordinarypath, files):
-            f = os.path.join(curdir, f)
-            packagedata["edenscm"].append(f)
-
-
 # distutils expects version to be str/unicode. Converting it to
 # unicode on Python 2 still works because it won't contain any
 # non-ascii bytes and will be implicitly converted back to bytes
@@ -1798,6 +1791,7 @@ rustextbinaries = [
         manifest="exec/hgmain/Cargo.toml",
         rename=hgname,
         features=hgmainfeatures,
+        cfgs=["Py_%s" % PY_VERSION],
     ),
     RustBinary("mkscratch", manifest="exec/scratch/Cargo.toml"),
     RustBinary("scm_daemon", manifest="exec/scm_daemon/Cargo.toml"),

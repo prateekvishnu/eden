@@ -12,9 +12,10 @@ pub(crate) mod commit;
 pub(crate) mod commit_id;
 pub(crate) mod diff;
 pub(crate) mod path_tree;
-pub(crate) mod progress;
 
-use chrono::{DateTime, FixedOffset, TimeZone};
+use chrono::DateTime;
+use chrono::FixedOffset;
+use chrono::TimeZone;
 use source_control as thrift;
 
 pub fn datetime(datetime: &thrift::DateTime) -> DateTime<FixedOffset> {

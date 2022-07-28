@@ -28,9 +28,11 @@ mod debug;
 
 commands! {
     mod clone;
+    mod config;
     mod root;
     mod status;
     mod version;
+    mod whereami;
 }
 
 pub use anyhow::Result;

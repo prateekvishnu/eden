@@ -8,51 +8,46 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use anyhow::{anyhow, bail, Error, Result};
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
-use futures::stream::{self, StreamExt};
+use anyhow::anyhow;
+use anyhow::bail;
+use anyhow::Result;
 use maplit::btreeset;
-use serde_derive::Serialize;
+use serde::Serialize;
 use source_control::types as thrift;
 
-use crate::args::commit_id::{
-    add_multiple_commit_id_args, add_scheme_args, get_commit_ids, get_request_schemes, get_schemes,
-    map_commit_id, map_commit_ids, resolve_commit_ids,
-};
-use crate::args::pushvars::{add_pushvar_args, get_pushvars};
-use crate::args::repo::{add_repo_args, get_repo_specifier};
-use crate::args::service_id::{add_service_id_args, get_service_id};
-use crate::connection::Connection;
+use crate::args::commit_id::map_commit_id;
+use crate::args::commit_id::map_commit_ids;
+use crate::args::commit_id::resolve_commit_ids;
+use crate::args::commit_id::CommitIdsArgs;
+use crate::args::commit_id::SchemeArgs;
+use crate::args::pushvars::PushvarArgs;
+use crate::args::repo::RepoArgs;
+use crate::args::service_id::ServiceIdArgs;
 use crate::lib::commit_id::render_commit_id;
-use crate::render::{Render, RenderStream};
+use crate::render::Render;
+use crate::ScscApp;
 
-pub(super) const NAME: &str = "land-stack";
+#[derive(clap::Parser)]
 
-const ARG_NAME: &str = "BOOKMARK_NAME";
-
-pub(super) fn make_subcommand<'a, 'b>() -> App<'a, 'b> {
-    let cmd = SubCommand::with_name(NAME)
-        .about("Land a stack of commits")
-        .long_about(concat!(
-            "Land a stack of commits\n\n",
-            "Provide two commits: the first is the head of a stack, and the second is ",
-            "public commit the stack is based on.  The stack of commits between these ",
-            "two commits will be landed onto the named bookmark via pushrebase.",
-        ))
-        .setting(AppSettings::ColoredHelp);
-    let cmd = add_repo_args(cmd);
-    let cmd = add_scheme_args(cmd);
-    let cmd = add_multiple_commit_id_args(cmd);
-    let cmd = add_service_id_args(cmd);
-    let cmd = add_pushvar_args(cmd);
-    cmd.arg(
-        Arg::with_name(ARG_NAME)
-            .short("n")
-            .long("name")
-            .takes_value(true)
-            .help("Name of the bookmark to land to")
-            .required(true),
-    )
+/// Land a stack of commits
+///
+/// Provide two commits: the first is the head of a stack, and the second is
+/// public commit the stack is based on.  The stack of commits between these
+/// two commits will be landed onto the named bookmark via pushrebase.
+pub(super) struct CommandArgs {
+    #[clap(flatten)]
+    repo_args: RepoArgs,
+    #[clap(flatten)]
+    scheme_args: SchemeArgs,
+    #[clap(flatten)]
+    commit_ids_args: CommitIdsArgs,
+    #[clap(flatten)]
+    service_id_args: ServiceIdArgs,
+    #[clap(flatten)]
+    pushvar_args: PushvarArgs,
+    #[clap(long, short)]
+    /// Name of the bookmark to land to
+    name: String,
 }
 
 #[derive(Serialize)]
@@ -71,8 +66,10 @@ struct PushrebaseOutcomeOutput {
 }
 
 impl Render for PushrebaseOutcomeOutput {
-    fn render(&self, matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
-        let schemes = get_schemes(matches);
+    type Args = SchemeArgs;
+
+    fn render(&self, args: &Self::Args, w: &mut dyn Write) -> Result<()> {
+        let schemes = args.scheme_string_set();
         write!(
             w,
             "In {} retries across distance {}\n",
@@ -96,21 +93,21 @@ impl Render for PushrebaseOutcomeOutput {
         Ok(())
     }
 
-    fn render_json(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    fn render_json(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         Ok(serde_json::to_writer(w, self)?)
     }
 }
 
-pub(super) async fn run(matches: &ArgMatches<'_>, connection: Connection) -> Result<RenderStream> {
-    let repo = get_repo_specifier(matches).expect("repository is required");
-    let commit_ids = get_commit_ids(matches)?;
+pub(super) async fn run(app: ScscApp, args: CommandArgs) -> Result<()> {
+    let repo = args.repo_args.into_repo_specifier();
+    let commit_ids = args.commit_ids_args.into_commit_ids();
     if commit_ids.len() != 2 {
         bail!("expected 2 commit_ids (got {})", commit_ids.len())
     }
-    let ids = resolve_commit_ids(&connection, &repo, &commit_ids).await?;
-    let bookmark: String = matches.value_of(ARG_NAME).expect("name is required").into();
-    let service_identity = get_service_id(matches).map(String::from);
-    let pushvars = get_pushvars(&matches)?;
+    let ids = resolve_commit_ids(&app.connection, &repo, &commit_ids).await?;
+    let bookmark = args.name;
+    let service_identity = args.service_id_args.service_id;
+    let pushvars = args.pushvar_args.into_pushvars();
 
     let (head, base) = match ids.as_slice() {
         [head_id, base_id] => (head_id.clone(), base_id.clone()),
@@ -121,13 +118,14 @@ pub(super) async fn run(matches: &ArgMatches<'_>, connection: Connection) -> Res
         bookmark: bookmark.clone(),
         head,
         base,
-        identity_schemes: get_request_schemes(&matches),
+        identity_schemes: args.scheme_args.clone().into_request_schemes(),
         old_identity_schemes: Some(btreeset! { thrift::CommitIdentityScheme::BONSAI }),
         service_identity,
         pushvars,
         ..Default::default()
     };
-    let outcome = connection
+    let outcome = app
+        .connection
         .repo_land_stack(&repo, &params)
         .await?
         .pushrebase_outcome;
@@ -151,12 +149,12 @@ pub(super) async fn run(matches: &ArgMatches<'_>, connection: Connection) -> Res
         })
         .collect::<Result<Vec<_>>>()?;
     rebased_commits.sort_unstable_by(|a, b| a.old_bonsai_id.cmp(&b.old_bonsai_id));
-    let output = Box::new(PushrebaseOutcomeOutput {
+    let output = PushrebaseOutcomeOutput {
         bookmark,
         head,
         rebased_commits,
         distance: outcome.pushrebase_distance,
         retries: outcome.retry_num,
-    });
-    Ok(stream::once(async move { Ok(output as Box<dyn Render>) }).boxed())
+    };
+    app.target.render_one(&args.scheme_args, output).await
 }

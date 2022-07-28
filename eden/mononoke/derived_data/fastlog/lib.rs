@@ -24,14 +24,13 @@
 /// that was created or modified in this commit.
 mod fastlog_impl;
 mod mapping;
-mod ops;
 mod thrift {
     pub use mononoke_types_thrift::*;
 }
 
-pub use fastlog_impl::{fetch_fastlog_batch_by_unode_id, unode_entry_to_fastlog_batch_key};
-pub use mapping::{ErrorKind, FastlogParent, RootFastlog};
-pub use ops::{
-    list_file_history, CsAndPath, FastlogError, FollowMutableFileHistory, HistoryAcrossDeletions,
-    NextChangeset, TraversalOrder, Visitor,
-};
+pub use fastlog_impl::fetch_fastlog_batch_by_unode_id;
+pub use fastlog_impl::fetch_flattened;
+pub use fastlog_impl::unode_entry_to_fastlog_batch_key;
+pub use mapping::ErrorKind;
+pub use mapping::FastlogParent;
+pub use mapping::RootFastlog;

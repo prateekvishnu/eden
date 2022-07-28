@@ -8,12 +8,10 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
-use std::fs::OpenOptions;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Write;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -24,6 +22,7 @@ use anyhow::bail;
 use anyhow::format_err;
 use anyhow::Context;
 use anyhow::Result;
+use async_runtime::try_block_unless_interrupted as block_on;
 use futures::stream;
 use futures::try_join;
 use futures::Stream;
@@ -37,6 +36,7 @@ use progress_model::ProgressBar;
 use progress_model::Registry;
 use storemodel::ReadFileContents;
 use tracing::debug;
+use tracing::instrument;
 use tracing::warn;
 use treestate::filestate::FileStateV2;
 use treestate::filestate::StateFlags;
@@ -177,18 +177,18 @@ impl CheckoutPlan {
         }
     }
 
-    pub fn add_progress(&mut self, path: PathBuf) -> Result<()> {
+    pub fn add_progress(&mut self, path: &Path) -> Result<()> {
         let vfs = &self.checkout.vfs;
         let progress = if path.exists() {
-            match CheckoutProgress::load(&path, vfs.clone()) {
+            match CheckoutProgress::load(path, vfs.clone()) {
                 Ok(p) => p,
                 Err(e) => {
                     debug!("Failed to load CheckoutProgress with {:?}", e);
-                    CheckoutProgress::new(&path, vfs.clone())?
+                    CheckoutProgress::new(path, vfs.clone())?
                 }
             }
         } else {
-            CheckoutProgress::new(&path, vfs.clone())?
+            CheckoutProgress::new(path, vfs.clone())?
         };
         self.filtered_update_content = progress.filter_already_written(&self.update_content);
         self.progress = Some(Mutex::new(progress));
@@ -272,6 +272,14 @@ impl CheckoutPlan {
         try_join!(update_content, update_meta)?;
 
         Ok(stats)
+    }
+
+    #[instrument(skip_all, err)]
+    pub fn blocking_apply_store(
+        &self,
+        store: &dyn ReadFileContents<Error = anyhow::Error>,
+    ) -> Result<CheckoutStats> {
+        block_on(self.apply_store(store))
     }
 
     pub async fn apply_store_dry_run(
@@ -555,7 +563,7 @@ impl CheckoutPlan {
 impl CheckoutProgress {
     pub fn new(path: &Path, vfs: VFS) -> Result<Self> {
         Ok(CheckoutProgress {
-            file: File::create(path)?,
+            file: util::file::create(path)?,
             vfs,
             state: HashMap::new(),
         })
@@ -570,7 +578,7 @@ impl CheckoutProgress {
     pub fn load(path: &Path, vfs: VFS) -> Result<Self> {
         let mut state: HashMap<RepoPathBuf, (HgId, u128, u64)> = HashMap::new();
 
-        let file = File::open(&path)?;
+        let file = util::file::open(path, "r")?;
         let mut reader = BufReader::new(file);
         let mut buffer = vec![];
         loop {
@@ -620,7 +628,7 @@ impl CheckoutProgress {
         }
 
         Ok(CheckoutProgress {
-            file: OpenOptions::new().create(true).append(true).open(path)?,
+            file: util::file::open(path, "ca")?,
             vfs,
             state,
         })

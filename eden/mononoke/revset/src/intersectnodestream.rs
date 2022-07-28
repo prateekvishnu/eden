@@ -11,10 +11,10 @@ use context::CoreContext;
 use futures_old::stream::Stream;
 use futures_old::Async;
 use futures_old::Poll;
-use mononoke_types::{ChangesetId, Generation};
+use mononoke_types::ChangesetId;
+use mononoke_types::Generation;
 use std::collections::hash_map::IntoIter;
 use std::collections::HashMap;
-use std::mem::replace;
 
 use crate::setcommon::*;
 use crate::BonsaiNodeStream;
@@ -124,7 +124,7 @@ impl Stream for IntersectNodeStream {
             // Return any errors
             {
                 if self.inputs.iter().any(|&(_, ref state)| state.is_err()) {
-                    let inputs = replace(&mut self.inputs, Vec::new());
+                    let inputs = std::mem::take(&mut self.inputs);
                     let (_, err) = inputs
                         .into_iter()
                         .find(|&(_, ref state)| state.is_err())
@@ -143,7 +143,7 @@ impl Stream for IntersectNodeStream {
                     if self.accumulator.is_empty() {
                         self.update_current_generation();
                     } else {
-                        let full_accumulator = replace(&mut self.accumulator, HashMap::new());
+                        let full_accumulator = std::mem::take(&mut self.accumulator);
                         self.drain = Some(full_accumulator.into_iter());
                     }
                 }
@@ -173,11 +173,13 @@ mod test {
     use context::CoreContext;
     use failure_ext::err_downcast;
     use fbinit::FacebookInit;
-    use futures::{compat::Stream01CompatExt, stream::StreamExt as _};
+    use futures::compat::Stream01CompatExt;
+    use futures::stream::StreamExt as _;
     use futures_ext::StreamExt;
     use futures_old::executor::spawn;
     use revset_test_helper::assert_changesets_sequence;
-    use revset_test_helper::{single_changeset_id, string_to_bonsai};
+    use revset_test_helper::single_changeset_id;
+    use revset_test_helper::string_to_bonsai;
     use std::sync::Arc;
 
     #[fbinit::test]
@@ -288,7 +290,7 @@ mod test {
         let hash2 = "3c15267ebf11807f3d772eb891272b911ec68759";
         let hash3 = "a9473beb2eb03ddb1cccc3fbaeb8a4820f9cd157";
 
-        let inputs = get_single_bonsai_streams(ctx.clone(), &repo, &vec![hash1, hash2]).await;
+        let inputs = get_single_bonsai_streams(ctx.clone(), &repo, &[hash1, hash2]).await;
         let nodestream =
             UnionNodeStream::new(ctx.clone(), &changeset_fetcher, inputs.into_iter()).boxify();
 

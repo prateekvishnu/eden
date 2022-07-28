@@ -7,8 +7,12 @@
 
 use std::collections::HashMap;
 
-use anyhow::{bail, Context, Error, Result};
-use byteorder::{BigEndian, ByteOrder};
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
+use byteorder::BigEndian;
+use byteorder::ByteOrder;
 use bytes_old::BytesMut;
 use tokio_io::codec::Decoder;
 
@@ -74,10 +78,10 @@ fn decode_stream_params(
         let mut key_val = header.splitn(2, |c| *c == b'=');
         let key = key_val
             .next()
-            .ok_or(ErrorKind::Bundle2Decode("bad stream level key".into()))?;
+            .ok_or_else(|| ErrorKind::Bundle2Decode("bad stream level key".into()))?;
         let val = key_val
             .next()
-            .ok_or(ErrorKind::Bundle2Decode("bad stream level val".into()))?;
+            .ok_or_else(|| ErrorKind::Bundle2Decode("bad stream level val".into()))?;
         let key_decoded = percent_encoding::percent_decode(key);
         let val_decoded = percent_encoding::percent_decode(val);
         let key_str = key_decoded.decode_utf8().with_context(|| {
@@ -87,7 +91,7 @@ fn decode_stream_params(
             ErrorKind::Bundle2Decode("stream level val is invalid UTF-8".into())
         })?;
         if is_mandatory_param(&key_str)
-            .with_context(|| ErrorKind::Bundle2Decode(format!("stream key is invalid")))?
+            .with_context(|| ErrorKind::Bundle2Decode("stream key is invalid".to_string()))?
         {
             m_stream_params.insert(key_str.to_lowercase(), val_str.into_owned());
         } else {

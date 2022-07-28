@@ -83,7 +83,7 @@ struct HgImportTraceEvent : TraceEventBase {
       ImportPriorityKind priority,
       ObjectFetchContext::Cause cause);
 
-  /// Simple accessor that hides the internal memory representation of paths.
+  // Simple accessor that hides the internal memory representation of paths.
   std::string getPath() const {
     return path.get();
   }
@@ -123,7 +123,8 @@ class HgQueuedBackingStore final : public BackingStore {
     return *traceBus_;
   }
 
-  bool hasBijectiveBlobIds() override;
+  ObjectComparison compareObjectsById(const ObjectId& one, const ObjectId& two)
+      override;
 
   RootId parseRootId(folly::StringPiece rootId) override;
   std::string renderRootId(const RootId& rootId) override;

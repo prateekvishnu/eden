@@ -12,8 +12,8 @@
 #include <folly/Expected.h>
 #include <folly/Range.h>
 #include <folly/logging/xlog.h>
-#include <gflags/gflags.h>
-#include <openssl/sha.h>
+#include <folly/portability/GFlags.h>
+#include <folly/portability/OpenSSL.h>
 
 #include "eden/fs/inodes/FileInode.h"
 #include "eden/fs/inodes/InodeError.h"

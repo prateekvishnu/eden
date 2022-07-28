@@ -53,9 +53,7 @@ else:
 
 
 class IntegrationTestCase(EdenTestCaseBase):
-    def setUp(self) -> None:
-        skip.skip_if_disabled(self)
-        super().setUp()
+    pass
 
 
 @unittest.skipIf(not edenclient.can_run_eden(), "unable to run edenfs")
@@ -93,8 +91,6 @@ class EdenTestCase(EdenTestCaseBase):
         self.last_event = now
 
     def setUp(self) -> None:
-        skip.skip_if_disabled(self)
-
         self.start = time.time()
         self.last_event = self.start
         self.system_hgrc: Optional[str] = None
@@ -135,23 +131,8 @@ class EdenTestCase(EdenTestCaseBase):
         os.mkdir(self.mounts_dir)
         self.report_time("temporary directory creation done")
 
-        logging_settings = self.edenfs_logging_settings()
-        extra_args = self.edenfs_extra_args()
-        if self.enable_fault_injection:
-            extra_args.append("--enable_fault_injection")
+        self.eden = self.init_eden_client()
 
-        if _build_flavor == "facebook" and not self.enable_logview:
-            # add option to disable logview
-            # we set `EDENFS_SUFFIX` when running our tests with OSS build
-            extra_args.append("--eden_logview=false")
-
-        storage_engine = self.select_storage_engine()
-        self.eden = edenclient.EdenFS(
-            base_dir=pathlib.Path(self.tmp_dir),
-            logging_settings=logging_settings,
-            extra_args=extra_args,
-            storage_engine=storage_engine,
-        )
         # Just to better reflect normal user environments, update $HOME
         # to point to our test home directory for the duration of the test.
         self.setenv("HOME", str(self.eden.home_dir))
@@ -165,10 +146,30 @@ class EdenTestCase(EdenTestCaseBase):
                         edenfsrc.write(f"{setting}\n")
 
         self.eden.start()
-        self.addCleanup(self.eden.cleanup)
+        # Store a lambda in case self.eden is replaced during the test.
+        self.addCleanup(lambda: self.eden.cleanup())
         self.report_time("eden daemon started")
 
         self.mount = os.path.join(self.mounts_dir, "main")
+
+    def init_eden_client(self):
+        logging_settings = self.edenfs_logging_settings()
+        extra_args = self.edenfs_extra_args()
+        if self.enable_fault_injection:
+            extra_args.append("--enable_fault_injection")
+
+        if _build_flavor == "facebook" and not self.enable_logview:
+            # add option to disable logview
+            # we set `EDENFS_SUFFIX` when running our tests with OSS build
+            extra_args.append("--eden_logview=false")
+
+        storage_engine = self.select_storage_engine()
+        return edenclient.EdenFS(
+            base_dir=pathlib.Path(self.tmp_dir),
+            logging_settings=logging_settings,
+            extra_args=extra_args,
+            storage_engine=storage_engine,
+        )
 
     @property
     def eden_dir(self) -> str:
@@ -287,6 +288,14 @@ class EdenTestCase(EdenTestCaseBase):
         with open(fullpath, "w") as f:
             f.write(contents)
         os.chmod(fullpath, mode)
+
+    def rename(self, from_path: str, to_path: str) -> None:
+        """Rename a file/directory at the specified paths relative to the
+        clone.
+        """
+        full_from = self.get_path(from_path)
+        full_to = self.get_path(to_path)
+        os.rename(full_from, full_to)
 
     def read_file(self, path: str) -> str:
         """Read the file with the specified path inside the eden repository,
@@ -454,6 +463,36 @@ def _replicate_test(
         new_class.__qualname__ = name
         new_class.__module__ = test_class.__module__
 
+        def strip_eden_integration_prefix(name: str) -> str:
+            prefix = "eden.integration."
+            if name.startswith(prefix):
+                name = name[len(prefix) :]
+            return name
+
+        module = strip_eden_integration_prefix(f"{new_class.__module__}")
+
+        # Allow skipping individual replicated classes, or whole classes.
+        class_names = [f"{module}.{name}", f"{module}.{test_class.__name__}"]
+
+        skippedClass = False
+        for class_name in class_names:
+            if skip.is_class_disabled(class_name):
+                skippedClass = True
+                break
+
+        if skippedClass:
+            # Do not register this class
+            continue
+
+        # We also want to be able to skip methods pre replication
+        for class_name in class_names:
+            for method in dir(new_class):
+                if method.startswith("test_"):
+                    if skip.is_method_disabled(class_name, method):
+                        # A None method will not be listed by unittest causing
+                        # the test to never be executed.
+                        setattr(new_class, method, None)
+
         # Add the class to our caller's scope
         caller_scope[name] = new_class
 
@@ -580,3 +619,15 @@ class GitRepoTestMixin:
 class NFSTestMixin:
     def use_nfs(self) -> bool:
         return True
+
+
+def _replicate_eden_test(
+    test_class: Type[unittest.TestCase],
+) -> Iterable[Tuple[str, Type[unittest.TestCase]]]:
+    class EdenTest(test_class):
+        pass
+
+    return [("Default", typing.cast(Type[unittest.TestCase], EdenTest))]
+
+
+eden_test = test_replicator(_replicate_eden_test)

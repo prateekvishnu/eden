@@ -5,8 +5,10 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{Context, Result};
-use ephemeral_blobstore::{BubbleId, RepoEphemeralStore};
+use anyhow::Context;
+use anyhow::Result;
+use ephemeral_blobstore::BubbleId;
+use ephemeral_blobstore::RepoEphemeralStore;
 use std::fmt;
 
 /// A changeset ID.  This is the canonical ID for a changeset.
@@ -156,8 +158,8 @@ impl From<mercurial_types::HgChangesetIdsResolvedFromPrefix>
         use ChangesetSpecifier::*;
         match resolved {
             Single(id) => Self::Single(Hg(id)),
-            Multiple(ids) => Self::Multiple(ids.into_iter().map(|id| Hg(id)).collect()),
-            TooMany(ids) => Self::TooMany(ids.into_iter().map(|id| Hg(id)).collect()),
+            Multiple(ids) => Self::Multiple(ids.into_iter().map(Hg).collect()),
+            TooMany(ids) => Self::TooMany(ids.into_iter().map(Hg).collect()),
             NoMatch => Self::NoMatch,
         }
     }
@@ -169,8 +171,8 @@ impl From<mononoke_types::ChangesetIdsResolvedFromPrefix> for ChangesetSpecifier
         use ChangesetSpecifier::*;
         match resolved {
             Single(id) => Self::Single(Bonsai(id)),
-            Multiple(ids) => Self::Multiple(ids.into_iter().map(|id| Bonsai(id)).collect()),
-            TooMany(ids) => Self::TooMany(ids.into_iter().map(|id| Bonsai(id)).collect()),
+            Multiple(ids) => Self::Multiple(ids.into_iter().map(Bonsai).collect()),
+            TooMany(ids) => Self::TooMany(ids.into_iter().map(Bonsai).collect()),
             NoMatch => Self::NoMatch,
         }
     }

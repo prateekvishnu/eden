@@ -1,8 +1,8 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This software may be used and distributed according to the terms of the
- * GNU General Public License version 2.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 //! Atomic `sync` support for multiple [`Log`]s.
@@ -24,9 +24,9 @@ use crate::errors::IoResultExt;
 use crate::errors::ResultExt;
 use crate::lock::ScopedDirLock;
 use crate::lock::READER_LOCK_OPTS;
+use crate::log;
 use crate::log::GenericPath;
 use crate::log::LogMetadata;
-use crate::log::{self};
 use crate::repair::OpenOptionsOutput;
 use crate::repair::OpenOptionsRepair;
 use crate::repair::RepairMessage;

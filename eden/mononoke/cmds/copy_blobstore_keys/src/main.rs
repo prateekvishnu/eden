@@ -13,26 +13,39 @@
 //! It's similar to manual_scrub tool, with the exception that manual_scrub preserves the repoid
 //! prefix for the blob, while this tool either strips it or ignores it.
 
-use anyhow::{anyhow, Context, Error};
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Error;
 use blobrepo::BlobRepo;
-use blobstore::{Blobstore, PutBehaviour};
+use blobstore::Blobstore;
+use blobstore::PutBehaviour;
 use clap::Arg;
-use cmdlib::{
-    args::{self, get_config_by_repoid, load_common_config, MononokeMatches},
-    helpers::{setup_repo_dir, CreateStorage},
-};
-use context::{CoreContext, SessionClass};
+use cmdlib::args;
+use cmdlib::args::get_config_by_repoid;
+use cmdlib::args::load_common_config;
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers::setup_repo_dir;
+use cmdlib::helpers::CreateStorage;
+use context::CoreContext;
+use context::SessionClass;
 use fbinit::FacebookInit;
-use futures::{future, stream, StreamExt, TryStreamExt};
-use metaconfig_types::{BlobConfig, BlobstoreId};
+use futures::future;
+use futures::stream;
+use futures::StreamExt;
+use futures::TryStreamExt;
+use metaconfig_types::BlobConfig;
+use metaconfig_types::BlobstoreId;
 use mononoke_types::RepositoryId;
 use repo_factory::RepoFactory;
-use slog::{debug, info, warn, Logger};
+use slog::debug;
+use slog::info;
+use slog::warn;
+use slog::Logger;
 use thiserror::Error;
-use tokio::{
-    fs::File,
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-};
+use tokio::fs::File;
+use tokio::io::AsyncBufReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader;
 use tokio_stream::wrappers::LinesStream;
 
 const ARG_CONCURRENCY: &str = "concurrency";
@@ -122,7 +135,7 @@ async fn run<'a>(fb: FacebookInit, matches: &'a MononokeMatches<'a>) -> Result<(
         ctx.logger(),
         source_repo_id,
         source_inner_blobstore_id,
-        &matches,
+        matches,
     );
 
     let target_repo_id = args::get_target_repo_id(matches.config_store(), matches)?;
@@ -132,7 +145,7 @@ async fn run<'a>(fb: FacebookInit, matches: &'a MononokeMatches<'a>) -> Result<(
         ctx.logger(),
         target_repo_id,
         target_inner_blobstore_id,
-        &matches,
+        matches,
     );
 
     let (source_repo, target_repo) = future::try_join(source_repo, target_repo).await?;
@@ -224,7 +237,7 @@ async fn open_repo<'a>(
     matches: &'a MononokeMatches<'a>,
 ) -> Result<BlobRepo, Error> {
     let config_store = matches.config_store();
-    let common_config = load_common_config(config_store, &matches)?;
+    let common_config = load_common_config(config_store, matches)?;
     let (reponame, mut config) = get_config_by_repoid(config_store, matches, repo_id)?;
     if let Some(inner_id) = maybe_inner_blobstore_id {
         override_blobconfig(&mut config.storage_config.blobstore, inner_id)?;

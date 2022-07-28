@@ -9,6 +9,7 @@
 
 #include <folly/executors/SequencedExecutor.h>
 #include "eden/fs/prjfs/PrjfsDispatcher.h"
+#include "eden/fs/service/gen-cpp2/eden_types.h"
 #include "eden/fs/utils/UnboundedQueueExecutor.h"
 
 namespace facebook::eden {

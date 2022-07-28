@@ -5,30 +5,39 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Error};
+use anyhow::format_err;
+use anyhow::Error;
 
-use super::{CommitSyncConfigVersion, CommitSyncOutcome, CommitSyncer};
-use crate::types::{Source, Target};
+use super::CommitSyncConfigVersion;
+use super::CommitSyncOutcome;
+use super::CommitSyncer;
+use crate::types::Source;
+use crate::types::Target;
 
 use blobrepo::BlobRepo;
 use bookmarks::BookmarkName;
 use context::CoreContext;
 use derived_data::BonsaiDerived;
 use fsnodes::RootFsnodeId;
-use futures::{
-    future::FutureExt,
-    stream::{self, StreamExt},
-    try_join, TryStreamExt,
-};
+use futures::future::FutureExt;
+use futures::stream;
+use futures::stream::StreamExt;
+use futures::try_join;
+use futures::TryStreamExt;
 use live_commit_sync_config::LiveCommitSyncConfig;
 use manifest::ManifestOps;
 use mercurial_types::FileType;
 use metaconfig_types::DefaultSmallToLargeCommitSyncPathAction;
-use mononoke_types::{ChangesetId, ContentId, MPath};
+use mononoke_types::ChangesetId;
+use mononoke_types::ContentId;
+use mononoke_types::MPath;
 use movers::Mover;
 use ref_cast::RefCast;
-use slog::{debug, error, info};
-use std::collections::{HashMap, HashSet};
+use slog::debug;
+use slog::error;
+use slog::info;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::Arc;
 use synced_commit_mapping::SyncedCommitMapping;
@@ -75,8 +84,7 @@ pub async fn verify_working_copy_fast_path<'a, M: SyncedCommitMapping + Clone + 
     let source_repo = commit_syncer.get_source_repo();
     let target_repo = commit_syncer.get_target_repo();
 
-    let (target_hash, version) =
-        get_synced_commit(ctx.clone(), &commit_syncer, source_hash).await?;
+    let (target_hash, version) = get_synced_commit(ctx.clone(), commit_syncer, source_hash).await?;
 
     info!(
         ctx.logger(),
@@ -84,7 +92,7 @@ pub async fn verify_working_copy_fast_path<'a, M: SyncedCommitMapping + Clone + 
     );
 
     let prefixes_to_visit = get_fast_path_prefixes(
-        &source_repo,
+        source_repo,
         commit_syncer,
         &version,
         live_commit_sync_config,
@@ -128,8 +136,8 @@ pub async fn verify_working_copy_with_version_fast_path<
         Target::ref_cast(target_repo),
         source_hash,
         target_hash,
-        &commit_syncer.get_mover_by_version(&version).await?,
-        &commit_syncer.get_reverse_mover_by_version(&version).await?,
+        &commit_syncer.get_mover_by_version(version).await?,
+        &commit_syncer.get_reverse_mover_by_version(version).await?,
         prefixes_to_visit,
     )
     .await
@@ -145,7 +153,7 @@ async fn get_fast_path_prefixes<'a, M: SyncedCommitMapping + Clone + 'static>(
 ) -> Result<PrefixesToVisit, Error> {
     let small_repo_id = commit_syncer.get_small_repo().get_repoid();
     let config = live_commit_sync_config
-        .get_commit_sync_config_by_version(source_repo.get_repoid(), &version)
+        .get_commit_sync_config_by_version(source_repo.get_repoid(), version)
         .await?;
 
     let small_repo_config = config.small_repos.get(&small_repo_id).ok_or_else(|| {
@@ -201,7 +209,7 @@ pub async fn verify_working_copy_inner<'a>(
 
     let moved_source_repo_entries = get_maybe_moved_contents_and_types(
         ctx,
-        &source_repo,
+        source_repo,
         *source_hash,
         if *source_hash != *target_hash {
             Some(GetMaybeMovedFilenodesPolicy::ActuallyMove(mover))
@@ -213,7 +221,7 @@ pub async fn verify_working_copy_inner<'a>(
     );
     let target_repo_entries = get_maybe_moved_contents_and_types(
         ctx,
-        &target_repo,
+        target_repo,
         *target_hash,
         Some(GetMaybeMovedFilenodesPolicy::CheckThatRewritesIntoSomeButDontMove(reverse_mover)),
         target_prefixes_to_visit,
@@ -266,7 +274,7 @@ async fn verify_type_content_mapping_equivalence<'a>(
 
     let mut extra_source_files_count = 0;
     for path in moved_source_repo_entries.0.keys() {
-        if target_repo_entries.0.get(&path).is_none() {
+        if target_repo_entries.0.get(path).is_none() {
             error!(
                 ctx.logger(),
                 "{:?} is present in {}, but not in {}",
@@ -290,7 +298,7 @@ async fn verify_type_content_mapping_equivalence<'a>(
     for path in target_repo_entries.0.keys() {
         // "path" is not present in the source, however that might be expected - we use
         // reverse_mover to check that.
-        if moved_source_repo_entries.0.get(&path).is_none() && reverse_mover(&path)?.is_some() {
+        if moved_source_repo_entries.0.get(path).is_none() && reverse_mover(path)?.is_some() {
             error!(
                 ctx.logger(),
                 "{:?} is present in {}, but not in {}",
@@ -382,13 +390,13 @@ pub async fn find_bookmark_diff<M: SyncedCommitMapping + Clone + 'static>(
             .await?;
 
         // Renames bookmarks and also maps large cs ids to small cs ids
-        rename_and_remap_bookmarks(ctx.clone(), &commit_syncer, source_bookmarks).await?
+        rename_and_remap_bookmarks(ctx.clone(), commit_syncer, source_bookmarks).await?
     };
 
     let reverse_bookmark_renamer = commit_syncer.get_reverse_bookmark_renamer().await?;
     let mut diff = vec![];
     for (target_book, target_cs_id) in &target_bookmarks {
-        if no_sync_outcome.contains(&target_book) {
+        if no_sync_outcome.contains(target_book) {
             diff.push(BookmarkDiff::NoSyncOutcome {
                 target_bookmark: target_book.clone(),
             });
@@ -440,7 +448,7 @@ async fn list_content_ids_and_types(
         repo.name(),
     );
 
-    let root_fsnode_id = RootFsnodeId::derive(&ctx, repo, cs_id).await?;
+    let root_fsnode_id = RootFsnodeId::derive(ctx, repo, cs_id).await?;
     let root_fsnode_id = root_fsnode_id.fsnode_id();
     let s = match prefixes {
         Some(prefixes) => root_fsnode_id
@@ -476,7 +484,7 @@ async fn compare_contents_and_types(
     let mut different_filetypes = HashSet::new();
     let mut exists_in_target_but_not_source = HashSet::new();
     for (path, (target_file_type, target_content_id)) in &target_types_and_content_ids.0 {
-        let maybe_source_type_and_content_id = &source_types_and_content_ids.0.get(&path);
+        let maybe_source_type_and_content_id = &source_types_and_content_ids.0.get(path);
         let (maybe_source_file_type, maybe_source_content_id) =
             match maybe_source_type_and_content_id {
                 Some((source_file_type, source_content_id)) => {
@@ -485,7 +493,7 @@ async fn compare_contents_and_types(
                 None => (None, None),
             };
 
-        if maybe_source_content_id != Some(&target_content_id) {
+        if maybe_source_content_id != Some(target_content_id) {
             match maybe_source_content_id {
                 Some(source_content_id) => {
                     different_content_ids.insert((
@@ -500,7 +508,7 @@ async fn compare_contents_and_types(
             }
         }
 
-        if maybe_source_file_type != Some(&target_file_type) {
+        if maybe_source_file_type != Some(target_file_type) {
             match maybe_source_file_type {
                 Some(source_file_type) => {
                     different_filetypes.insert((
@@ -516,7 +524,7 @@ async fn compare_contents_and_types(
         }
     }
 
-    if exists_in_target_but_not_source.len() > 0 {
+    if !exists_in_target_but_not_source.is_empty() {
         for path in &exists_in_target_but_not_source {
             debug!(
                 ctx.logger(),
@@ -602,7 +610,7 @@ pub fn report_different<
             target_thing
         );
 
-        while let Some((mpath, source_thing, target_thing)) = different_things.next() {
+        for (mpath, source_thing, target_thing) in different_things {
             debug!(
                 ctx.logger(),
                 "Different {} for path {:?}: {}: {:?} {}: {:?}",
@@ -634,7 +642,7 @@ pub fn move_all_paths<V: Clone>(
 ) -> Result<HashMap<MPath, V>, Error> {
     let mut moved_entries = HashMap::new();
     for (path, value) in path_to_values {
-        let moved_path = mover(&path)?;
+        let moved_path = mover(path)?;
         if let Some(moved_path) = moved_path {
             moved_entries.insert(moved_path, value.clone());
         }
@@ -650,7 +658,7 @@ fn keep_movable_paths<V: Clone>(
 ) -> Result<HashMap<MPath, V>, Error> {
     let mut res = HashMap::new();
     for (path, value) in path_to_values {
-        if mover(&path)?.is_some() {
+        if mover(path)?.is_some() {
             res.insert(path.clone(), value.clone());
         }
     }
@@ -664,16 +672,13 @@ async fn get_synced_commit<M: SyncedCommitMapping + Clone + 'static>(
     hash: ChangesetId,
 ) -> Result<(ChangesetId, CommitSyncConfigVersion), Error> {
     let maybe_sync_outcome = commit_syncer.get_commit_sync_outcome(&ctx, hash).await?;
-    let sync_outcome = maybe_sync_outcome.ok_or(format_err!(
-        "No sync outcome for {} in {:?}",
-        hash,
-        commit_syncer
-    ))?;
+    let sync_outcome = maybe_sync_outcome
+        .ok_or_else(|| format_err!("No sync outcome for {} in {:?}", hash, commit_syncer))?;
 
     use CommitSyncOutcome::*;
     match sync_outcome {
         NotSyncCandidate(_) => {
-            return Err(format_err!("{} does not remap in small repo", hash).into());
+            return Err(format_err!("{} does not remap in small repo", hash));
         }
         RewrittenAs(cs_id, mapping_version)
         | EquivalentWorkingCopyAncestor(cs_id, mapping_version) => Ok((cs_id, mapping_version)),
@@ -779,7 +784,8 @@ async fn rename_and_remap_bookmarks<M: SyncedCommitMapping + Clone + 'static>(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{CommitSyncDataProvider, CommitSyncRepos};
+    use crate::CommitSyncDataProvider;
+    use crate::CommitSyncRepos;
     use ascii::AsciiString;
     use bookmarks::BookmarkName;
     use fbinit::FacebookInit;
@@ -789,20 +795,25 @@ mod test {
     use futures_old::stream::Stream;
     use live_commit_sync_config::TestLiveCommitSyncConfig;
     use maplit::hashmap;
-    use metaconfig_types::{
-        CommitSyncConfig, CommitSyncConfigVersion, CommitSyncDirection, CommonCommitSyncConfig,
-        SmallRepoCommitSyncConfig, SmallRepoPermanentConfig,
-    };
-    use mononoke_types::{MPath, RepositoryId};
+    use metaconfig_types::CommitSyncConfig;
+    use metaconfig_types::CommitSyncConfigVersion;
+    use metaconfig_types::CommitSyncDirection;
+    use metaconfig_types::CommonCommitSyncConfig;
+    use metaconfig_types::SmallRepoCommitSyncConfig;
+    use metaconfig_types::SmallRepoPermanentConfig;
+    use mononoke_types::MPath;
+    use mononoke_types::RepositoryId;
     use revset::AncestorsNodeStream;
     use sql_construct::SqlConstruct;
     use std::str::FromStr;
     use std::sync::Arc;
     // To support async tests
     use cross_repo_sync_test_utils::get_live_commit_sync_config;
-    use synced_commit_mapping::{SqlSyncedCommitMapping, SyncedCommitMappingEntry};
+    use synced_commit_mapping::SqlSyncedCommitMapping;
+    use synced_commit_mapping::SyncedCommitMappingEntry;
     use test_repo_factory::TestRepoFactory;
-    use tests_utils::{bookmark, CreateCommitContext};
+    use tests_utils::bookmark;
+    use tests_utils::CreateCommitContext;
 
     #[fbinit::test]
     fn test_bookmark_diff_with_renamer(fb: FacebookInit) -> Result<(), Error> {

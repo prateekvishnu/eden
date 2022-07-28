@@ -5,30 +5,51 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::hash_map::{Entry, HashMap};
+use std::collections::hash_map::Entry;
+use std::collections::hash_map::HashMap;
 use std::collections::HashSet;
-use std::fmt::{self, Display};
+use std::fmt;
+use std::fmt::Display;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
+use std::io::BufReader;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use std::sync::RwLock;
 
-use anyhow::{format_err, Context, Error, Result};
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use futures::future;
 use futures::stream;
-use futures::{Async, IntoFuture, Poll, Stream};
-use futures_ext::{try_boxfuture, BoxFuture, BoxStream, FutureExt, StreamExt};
+use futures::Async;
+use futures::IntoFuture;
+use futures::Poll;
+use futures::Stream;
+use futures_ext::try_boxfuture;
+use futures_ext::BoxFuture;
+use futures_ext::BoxStream;
+use futures_ext::FutureExt;
+use futures_ext::StreamExt;
 
 use crate::stockbookmarks::StockBookmarks;
-use mercurial_types::{
-    blobs::RevlogChangeset, fncache_fsencode, simple_fsencode, HgChangesetId, HgManifestId,
-    HgNodeHash, MPath, MPathElement, RepoPath,
-};
+use mercurial_types::blobs::RevlogChangeset;
+use mercurial_types::fncache_fsencode;
+use mercurial_types::simple_fsencode;
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgManifestId;
+use mercurial_types::HgNodeHash;
+use mercurial_types::MPath;
+use mercurial_types::MPathElement;
+use mercurial_types::RepoPath;
 
 use crate::errors::ErrorKind;
 pub use crate::manifest::RevlogManifest;
-use crate::revlog::{RevIdx, Revlog, RevlogIter};
+use crate::revlog::RevIdx;
+use crate::revlog::Revlog;
+use crate::revlog::RevlogIter;
 
 const DEFAULT_LOGS_CAPACITY: usize = 1000000;
 
@@ -56,23 +77,23 @@ impl Display for Required {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         use self::Required::*;
 
-        let s = match self {
-            &Store => "store",
-            &Fncache => "fncache",
-            &Dotencode => "dotencode",
-            &Generaldelta => "generaldelta",
-            &Treemanifest => "treemanifest",
-            &Manifestv2 => "manifestv2",
-            &Usefncache => "usefncache",
-            &Revlogv1 => "revlogv1",
-            &Largefiles => "largefiles",
-            &Lz4revlog => "lz4revlog",
-            &StoreRequirements => "storerequirements",
-            &SqlDirstate => "sqldirstate",
-            &HgSql => "hgsql",
-            &TreeDirstate => "treedirstate",
-            &TreeState => "treestate",
-            &LFS => "lfs",
+        let s = match *self {
+            Store => "store",
+            Fncache => "fncache",
+            Dotencode => "dotencode",
+            Generaldelta => "generaldelta",
+            Treemanifest => "treemanifest",
+            Manifestv2 => "manifestv2",
+            Usefncache => "usefncache",
+            Revlogv1 => "revlogv1",
+            Largefiles => "largefiles",
+            Lz4revlog => "lz4revlog",
+            StoreRequirements => "storerequirements",
+            SqlDirstate => "sqldirstate",
+            HgSql => "hgsql",
+            TreeDirstate => "treedirstate",
+            TreeState => "treestate",
+            LFS => "lfs",
         };
         write!(fmt, "{}", s)
     }
@@ -120,9 +141,8 @@ impl FromStr for StoreRequired {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<StoreRequired> {
-        match s {
-            unk => Err(ErrorKind::UnknownReq(unk.into()).into()),
-        }
+        let unk = s;
+        Err(ErrorKind::UnknownReq(unk.into()).into())
     }
 }
 
@@ -208,7 +228,7 @@ impl RevlogRepo {
         }
 
         Ok(RevlogRepo {
-            basepath: base.into(),
+            basepath: base,
             requirements,
             store_requirements,
             changelog,
@@ -227,7 +247,7 @@ impl RevlogRepo {
     }
 
     pub fn get_bookmarks(&self) -> Result<StockBookmarks> {
-        Ok(StockBookmarks::read(self.basepath.clone())?)
+        StockBookmarks::read(self.basepath.clone())
     }
 
     pub fn get_bookmark_value(
@@ -255,7 +275,7 @@ impl RevlogRepo {
         self.changelog
             .get_idx_by_nodeid(nodeid)
             .and_then(|idx| self.changelog.get_rev(idx))
-            .and_then(|rev| RevlogChangeset::new(rev))
+            .and_then(RevlogChangeset::new)
             .into_future()
             .boxify()
     }

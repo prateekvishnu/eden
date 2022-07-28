@@ -8,10 +8,13 @@
 use std::fmt;
 
 use anyhow::format_err;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
+use bytes::BytesMut;
 use cloned::cloned;
 use context::CoreContext;
-use filestore::{self, get_metadata, FetchKey};
+use filestore;
+use filestore::get_metadata;
+use filestore::FetchKey;
 use futures::stream::TryStreamExt;
 use futures::try_join;
 use futures_lazy_shared::LazyShared;
@@ -86,7 +89,7 @@ impl FileContext {
 
     /// The context for this query.
     pub(crate) fn ctx(&self) -> &CoreContext {
-        &self.repo.ctx()
+        self.repo.ctx()
     }
 
     /// The `RepoContext` for this query.

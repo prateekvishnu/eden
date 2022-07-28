@@ -7,17 +7,22 @@
 
 use std::sync::Arc;
 
-use anyhow::{format_err, Context, Result};
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Result;
 use blobstore::Blobstore;
 use context::CoreContext;
-use mononoke_types::{ChangesetId, RepositoryId};
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
 use sql_ext::replication::ReplicaLagMonitor;
 
 use crate::iddag::IdDagSaveStore;
-use crate::idmap::{IdMap, SqlIdMap};
+use crate::idmap::IdMap;
+use crate::idmap::SqlIdMap;
 use crate::types::SegmentedChangelogVersion;
 use crate::version_store::SegmentedChangelogVersionStore;
-use crate::{InProcessIdDag, SegmentedChangelogSqlConnections};
+use crate::InProcessIdDag;
+use crate::SegmentedChangelogSqlConnections;
 
 pub async fn copy_segmented_changelog(
     ctx: &CoreContext,
@@ -30,7 +35,7 @@ pub async fn copy_segmented_changelog(
     let iddag_save_store = IdDagSaveStore::new(repo_id, blobstore);
     let sc_version_store = SegmentedChangelogVersionStore::new(connections.0.clone(), repo_id);
     let sc_version = sc_version_store
-        .get(&ctx)
+        .get(ctx)
         .await
         .with_context(|| {
             format!(
@@ -46,7 +51,7 @@ pub async fn copy_segmented_changelog(
         })?;
 
     let old_iddag = iddag_save_store
-        .load(&ctx, sc_version.iddag_version)
+        .load(ctx, sc_version.iddag_version)
         .await
         .with_context(|| format!("repo {}: failed to load iddag", repo_id))?;
 
@@ -74,13 +79,13 @@ pub async fn copy_segmented_changelog(
     new_iddag.build_segments(dag_limit, &get_parents)?;
 
     let iddag_version = iddag_save_store
-        .save(&ctx, &new_iddag)
+        .save(ctx, &new_iddag)
         .await
         .with_context(|| format!("repo {}: error saving iddag", repo_id))?;
 
     let sc_version = SegmentedChangelogVersion::new(iddag_version, new_idmap_version);
     sc_version_store
-        .set(&ctx, sc_version)
+        .set(ctx, sc_version)
         .await
         .with_context(|| {
             format!(

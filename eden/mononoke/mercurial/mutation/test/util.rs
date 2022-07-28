@@ -6,11 +6,13 @@
  */
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 use anyhow::Result;
 use context::CoreContext;
-use mercurial_mutation::{HgMutationEntry, HgMutationStore};
+use mercurial_mutation::HgMutationEntry;
+use mercurial_mutation::HgMutationStore;
 use mercurial_types::HgChangesetId;
 
 fn compare_entries(a: &HgMutationEntry, b: &HgMutationEntry) -> Ordering {
@@ -42,7 +44,7 @@ pub(crate) async fn check_entries(
     indexes: &[usize],
 ) -> Result<()> {
     let mut fetched_entries = store.all_predecessors(ctx, changeset_ids).await?;
-    let mut expected_entries = get_entries(&entries, indexes);
+    let mut expected_entries = get_entries(entries, indexes);
     fetched_entries.sort_unstable_by(compare_entries);
     expected_entries.sort_unstable_by(compare_entries);
     assert_eq!(

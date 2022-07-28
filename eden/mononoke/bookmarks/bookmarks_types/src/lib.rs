@@ -5,17 +5,24 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Error};
-use ascii::{AsciiChar, AsciiString};
-use quickcheck::{Arbitrary, Gen};
+use anyhow::format_err;
+use anyhow::Error;
+use ascii::AsciiChar;
+use ascii::AsciiString;
+use quickcheck::Arbitrary;
+use quickcheck::Gen;
 use quickcheck_arbitrary_derive::Arbitrary;
 use sql::mysql;
-use sql::mysql_async::{
-    prelude::{ConvIr, FromValue},
-    FromValueError, Value,
-};
+use sql::mysql_async::prelude::ConvIr;
+use sql::mysql_async::prelude::FromValue;
+use sql::mysql_async::FromValueError;
+use sql::mysql_async::Value;
 use std::fmt;
-use std::ops::{Bound, Range, RangeBounds, RangeFrom, RangeFull};
+use std::ops::Bound;
+use std::ops::Range;
+use std::ops::RangeBounds;
+use std::ops::RangeFrom;
+use std::ops::RangeFull;
 use std::str::FromStr;
 
 /// This enum represents how fresh you want results to be. MostRecent will go to the master, so you
@@ -82,7 +89,7 @@ pub struct BookmarkName {
 impl FromStr for BookmarkName {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(BookmarkName::new(s)?)
+        BookmarkName::new(s)
     }
 }
 
@@ -234,9 +241,9 @@ impl ConvIr<BookmarkKind> for BookmarkKind {
         use BookmarkKind::*;
 
         match v {
-            Value::Bytes(ref b) if b == &SCRATCH_KIND => Ok(Scratch),
-            Value::Bytes(ref b) if b == &PUBLISHING_KIND => Ok(Publishing),
-            Value::Bytes(ref b) if b == &PULL_DEFAULT_KIND => Ok(PullDefaultPublishing),
+            Value::Bytes(ref b) if b == SCRATCH_KIND => Ok(Scratch),
+            Value::Bytes(ref b) if b == PUBLISHING_KIND => Ok(Publishing),
+            Value::Bytes(ref b) if b == PULL_DEFAULT_KIND => Ok(PullDefaultPublishing),
             v => Err(FromValueError(v)),
         }
     }
@@ -349,9 +356,9 @@ impl RangeBounds<BookmarkName> for BookmarkPrefixRange {
             Range(r) => r.start_bound(),
             RangeFrom(r) => r.start_bound(),
             RangeFull(r) => r.start_bound(),
-            After(a) => Bound::Excluded(&a),
-            Between(s, _) => Bound::Excluded(&s),
-            Empty(n) => Bound::Included(&n),
+            After(a) => Bound::Excluded(a),
+            Between(s, _) => Bound::Excluded(s),
+            Empty(n) => Bound::Included(n),
         }
     }
 
@@ -362,8 +369,8 @@ impl RangeBounds<BookmarkName> for BookmarkPrefixRange {
             RangeFrom(r) => r.end_bound(),
             RangeFull(r) => r.end_bound(),
             After(_) => Bound::Unbounded,
-            Between(_, e) => Bound::Excluded(&e),
-            Empty(n) => Bound::Excluded(&n),
+            Between(_, e) => Bound::Excluded(e),
+            Empty(n) => Bound::Excluded(n),
         }
     }
 }

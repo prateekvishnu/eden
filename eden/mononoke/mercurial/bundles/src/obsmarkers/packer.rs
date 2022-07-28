@@ -10,8 +10,10 @@
 
 use super::MetadataEntry;
 use crate::chunk::Chunk;
-use anyhow::{Error, Result};
-use byteorder::{BigEndian, ByteOrder};
+use anyhow::Error;
+use anyhow::Result;
+use byteorder::BigEndian;
+use byteorder::ByteOrder;
 use bytes_old::BufMut;
 use futures_old::stream::iter_result;
 use futures_old::Stream;
@@ -74,8 +76,7 @@ fn prepare_obsmarker_chunk(
 
     let metadata_bytes: Vec<&[u8]> = metadata
         .iter()
-        .map(|entry| vec![entry.key.as_bytes(), entry.value.as_bytes()])
-        .flatten()
+        .flat_map(|entry| vec![entry.key.as_bytes(), entry.value.as_bytes()])
         .collect();
 
     // Metadata sizes, uint8 each
@@ -100,7 +101,9 @@ mod test {
     use super::*;
     use anyhow::Error;
     use futures_ext::StreamExt;
-    use futures_old::{stream, Async, Poll};
+    use futures_old::stream;
+    use futures_old::Async;
+    use futures_old::Poll;
     use mercurial_types_mocks::nodehash;
     use quickcheck::quickcheck;
 
@@ -167,8 +170,8 @@ mod test {
             && data[17] == 3
             && data[18] == (metadata.len() as u8)
             && HgChangesetId::from_bytes(&data[19..39]).expect("not a changeset") == *predecessor
-            && successors_match(&data[39..], &successors)
-            && metadata_matches(&data[(39 + 20 * successors.len())..], &metadata)
+            && successors_match(&data[39..], successors)
+            && metadata_matches(&data[(39 + 20 * successors.len())..], metadata)
     }
 
     quickcheck! {

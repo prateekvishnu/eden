@@ -4,6 +4,8 @@
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2.
 
+# pyre-unsafe
+
 import argparse
 import binascii
 import collections
@@ -66,6 +68,51 @@ from .util import format_cmd, format_mount, print_stderr, split_inodes_by_operat
 
 MB: int = 1024**2
 debug_cmd = subcmd_mod.Decorator()
+
+
+# This is backported from Python 3.9.
+#
+# TODO: Use argparse.BooleanOptionalAction when we
+# can expect Python 3.9 or later.
+class BooleanOptionalAction(argparse.Action):
+    def __init__(
+        self,
+        option_strings,
+        dest,
+        default=None,
+        type=None,
+        choices=None,
+        required=False,
+        help=None,
+        metavar=None,
+    ):
+
+        _option_strings = []
+        for option_string in option_strings:
+            _option_strings.append(option_string)
+
+            if option_string.startswith("--"):
+                option_string = "--no-" + option_string[2:]
+                _option_strings.append(option_string)
+
+        super().__init__(
+            option_strings=_option_strings,
+            dest=dest,
+            nargs=0,
+            default=default,
+            type=type,
+            choices=choices,
+            required=required,
+            help=help,
+            metavar=metavar,
+        )
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if option_string in self.option_strings:
+            setattr(namespace, self.dest, not option_string.startswith("--no-"))
+
+    def format_usage(self):
+        return " | ".join(self.option_strings)
 
 
 def escape_path(value: bytes) -> str:
@@ -150,8 +197,8 @@ class TreeCmd(Subcmd):
         parser.add_argument(
             "-L",
             "--load",
-            action="store_true",
-            default=False,
+            action=BooleanOptionalAction,
+            default=True,
             help="Load data from the backing store if necessary",
         )
         parser.add_argument("mount", help="The EdenFS mount point path.")
@@ -285,8 +332,8 @@ class BlobCmd(Subcmd):
         parser.add_argument(
             "-L",
             "--load",
-            action="store_true",
-            default=False,
+            action=BooleanOptionalAction,
+            default=True,
             help="Load data from the backing store if necessary",
         )
         parser.add_argument("mount", help="The EdenFS mount point path.")

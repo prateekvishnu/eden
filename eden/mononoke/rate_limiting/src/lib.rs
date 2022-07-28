@@ -6,14 +6,18 @@
  */
 
 use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::time::Duration;
 
-use anyhow::{anyhow, Error};
+use anyhow::anyhow;
+use anyhow::Error;
 use async_trait::async_trait;
 use cached_config::ConfigHandle;
 use fbinit::FacebookInit;
-use permission_checker::{MononokeIdentity, MononokeIdentitySet, MononokeIdentitySetExt};
+use permission_checker::MononokeIdentity;
+use permission_checker::MononokeIdentitySet;
+use permission_checker::MononokeIdentitySetExt;
 use stats::prelude::*;
 use thiserror::Error;
 
@@ -23,9 +27,13 @@ mod facebook;
 mod oss;
 
 #[cfg(fbcode_build)]
-pub use facebook::{create_rate_limiter, get_region_capacity};
+pub use facebook::create_rate_limiter;
+#[cfg(fbcode_build)]
+pub use facebook::get_region_capacity;
 #[cfg(not(fbcode_build))]
-pub use oss::{create_rate_limiter, get_region_capacity};
+pub use oss::create_rate_limiter;
+#[cfg(not(fbcode_build))]
+pub use oss::get_region_capacity;
 
 pub use rate_limiting_config::RateLimitStatus;
 
@@ -190,7 +198,7 @@ impl TryFrom<i32> for SlicePct {
     type Error = Error;
 
     fn try_from(value: i32) -> Result<Self, Self::Error> {
-        if value < 0 || value > 100 {
+        if !(0..=100).contains(&value) {
             return Err(anyhow!("Invalid percentage"));
         }
 
@@ -245,12 +253,12 @@ mod test {
 
     #[test]
     fn test_target_matches() {
-        let test_ident = MononokeIdentity::new("USER", "foo").unwrap();
-        let test2_ident = MononokeIdentity::new("USER", "bar").unwrap();
-        let test3_ident = MononokeIdentity::new("USER", "baz").unwrap();
+        let test_ident = MononokeIdentity::new("USER", "foo");
+        let test2_ident = MononokeIdentity::new("USER", "bar");
+        let test3_ident = MononokeIdentity::new("USER", "baz");
 
         let ident_target = Target::Identity(test_ident.clone());
-        let ident2_target = Target::Identity(test2_ident.clone());
+        let ident2_target = Target::Identity(test2_ident);
         let ident3_target = Target::Identity(test3_ident.clone());
         let empty_idents = Some(MononokeIdentitySet::new());
 
@@ -263,11 +271,11 @@ mod test {
 
         assert!(ident_target.matches_client(idents.as_ref()));
 
-        let and_target = Target::AndTarget(vec![ident_target.clone(), ident3_target.clone()]);
+        let and_target = Target::AndTarget(vec![ident_target.clone(), ident3_target]);
 
         assert!(and_target.matches_client(idents.as_ref()));
 
-        let or_target = Target::OrTarget(vec![ident_target.clone(), ident2_target.clone()]);
+        let or_target = Target::OrTarget(vec![ident_target, ident2_target.clone()]);
 
         assert!(or_target.matches_client(idents.as_ref()));
 
@@ -278,7 +286,7 @@ mod test {
     #[test]
     fn test_target_in_static_slice() {
         let mut identities = MononokeIdentitySet::new();
-        identities.insert(MononokeIdentity::new("MACHINE", "abc123.abc1.facebook.com").unwrap());
+        identities.insert(MononokeIdentity::new("MACHINE", "abc123.abc1.facebook.com"));
 
         assert!(!in_throttled_slice(None, 100.try_into().unwrap(), "abc"));
 

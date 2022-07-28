@@ -22,7 +22,6 @@ https://mercurial-scm.org/wiki/RebaseExtension
 from __future__ import absolute_import
 
 import errno
-import os
 
 from bindings import checkout as nativecheckout
 from edenscm.mercurial import (
@@ -41,13 +40,11 @@ from edenscm.mercurial import (
     merge as mergemod,
     mergeutil,
     mutation,
-    patch,
     perftrace,
     phases,
     progress,
     pycompat,
     registrar,
-    repair,
     revset,
     revsetlang,
     scmutil,
@@ -184,7 +181,6 @@ class rebaseruntime(object):
         self.state = {}
         self.activebookmark = None
         self.destmap = {}
-        self.predmap = {}
         self.skipped = set()
 
         self.collapsef = opts.get("collapse", False)
@@ -304,8 +300,6 @@ class rebaseruntime(object):
             raise error.Abort(_(".hg/rebasestate is incomplete"))
 
         # recompute the predecessor map
-        predmap = _definepredmap(repo, destmap.keys())
-
         skipped = set()
         # recompute the set of skipped revs
         if not collapse:
@@ -322,7 +316,6 @@ class rebaseruntime(object):
 
         self.originalwd = originalwd
         self.destmap = destmap
-        self.predmap = predmap
         self.state = state
         self.skipped = skipped
         self.collapsef = collapse
@@ -391,8 +384,6 @@ class rebaseruntime(object):
                 _("can't remove original changesets with" " unrebased descendants"),
                 hint=_("use --keep to keep original changesets"),
             )
-
-        self.predmap = _definepredmap(self.repo, rebaseset)
 
         result = buildstate(self.repo, destmap, self.collapsef)
 
@@ -496,13 +487,7 @@ class rebaseruntime(object):
 
     def _performrebasesubset(self, tr, subset, pos, prog):
         repo, ui = self.repo, self.ui
-        if mutation.enabled(repo):
-            # We must traverse mutation edges, too - topo sort is not enough.
-            sortedrevs = smartset.baseset(
-                mutation.toposortrevs(repo, subset, self.predmap), repo=repo
-            )
-        else:
-            sortedrevs = repo.revs("sort(%ld, -topo)", subset)
+        sortedrevs = repo.revs("sort(%ld, -topo)", subset)
         allowdivergence = self.ui.configbool(
             "experimental", "evolution.allowdivergence"
         )
@@ -708,7 +693,7 @@ class rebaseruntime(object):
 
             memctx = context.memctx(
                 repo,
-                parents=(p1, p2),
+                parents=(repo[p1], repo[p2]),
                 text=commitmsg,
                 files=sorted(removed + modified),
                 filectxfn=getfilectx,
@@ -1431,31 +1416,6 @@ def _definedestmap(
     return destmap
 
 
-def _definepredmap(repo, rebaseset):
-    """defines the predecessor map
-
-    Returns a map of {rev: [preds]}, where preds are the predecessors of the
-    rebased node that are also being rebased.
-    """
-    clnode = repo.changelog.node
-    clrev = repo.changelog.rev
-    if mutation.enabled(repo):
-        predmap = {
-            r: [
-                p
-                for p in map(
-                    clrev, mutation.predecessorsset(repo, clnode(r), closest=True)
-                )
-                if p in rebaseset and p != r
-            ]
-            for r in rebaseset
-        }
-    else:
-        # Mutation is not enabled - ignore predecessor information.
-        predmap = {r: [] for r in rebaseset}
-    return predmap
-
-
 def externalparent(repo, state, destancestors):
     """Return the revision that should be used as the second parent
     when the revisions in state is collapsed on top of destancestors.
@@ -1531,7 +1491,7 @@ def concludememorynode(
 
         memctx = wctx.tomemctx(
             commitmsg,
-            parents=(p1, p2),
+            parents=(repo[p1], repo[p2]),
             date=date,
             extra=extra,
             user=ctx.user(),
@@ -1638,7 +1598,7 @@ def rebasenode(repo, rev, p1, base, state, collapse, dest, wctx):
 
 
 def adjustdest(repo, rev, destmap, state, skipped):
-    """adjust rebase destination given the current rebase state
+    r"""adjust rebase destination given the current rebase state
 
     rev is what is being rebased. Return a list of two revs, which are the
     adjusted destinations for rev's p1 and p2, respectively. If a parent is

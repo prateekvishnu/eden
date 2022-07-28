@@ -6,15 +6,24 @@
  */
 
 use crate::error::SubcommandError;
-use anyhow::{format_err, Context, Error};
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
 
-use clap_old::{App, Arg, ArgMatches, SubCommand};
-use cmdlib::args::{self, MononokeMatches};
+use clap_old::App;
+use clap_old::Arg;
+use clap_old::ArgMatches;
+use clap_old::SubCommand;
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
 use context::CoreContext;
 use fbinit::FacebookInit;
 use mononoke_types::RepositoryId;
-use mutable_counters::{MutableCounters, SqlMutableCounters, SqlMutableCountersBuilder};
-use slog::{info, Logger};
+use mutable_counters::MutableCounters;
+use mutable_counters::SqlMutableCounters;
+use mutable_counters::SqlMutableCountersBuilder;
+use slog::info;
+use slog::Logger;
 
 pub const MUTABLE_COUNTERS: &str = "mutable-counters";
 const MUTABLE_COUNTERS_NAME: &str = "name";
@@ -69,7 +78,7 @@ pub async fn subcommand_mutable_counters<'a>(
 ) -> Result<(), SubcommandError> {
     let config_store = matches.config_store();
 
-    let repo_id = args::get_repo_id(config_store, &matches)?;
+    let repo_id = args::get_repo_id(config_store, matches)?;
 
     let ctx = CoreContext::new_with_logger(fb, logger.clone());
 

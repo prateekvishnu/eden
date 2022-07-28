@@ -8,31 +8,47 @@
 use anyhow::Error;
 use blobrepo::BlobRepo;
 use blobrepo_hg::BlobRepoHg;
-use blobstore::{Blobstore, Loadable};
+use blobstore::Blobstore;
+use blobstore::Loadable;
 use bookmarks::BookmarkName;
 use bytes::Bytes;
-use changesets::{deserialize_cs_entries, ChangesetEntry};
-use clap_old::{Arg, SubCommand};
-use cmdlib::{
-    args::{self, MononokeClapApp, MononokeMatches},
-    helpers::block_execute,
-};
+use changesets::deserialize_cs_entries;
+use changesets::ChangesetEntry;
+use clap_old::Arg;
+use clap_old::SubCommand;
+use cmdlib::args;
+use cmdlib::args::MononokeClapApp;
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers::block_execute;
 use context::CoreContext;
 use fbinit::FacebookInit;
 use futures::compat::Stream01CompatExt;
-use futures::stream::{self, Stream, StreamExt, TryStreamExt};
-use futures::{future::FutureExt, try_join};
-use futures_ext::{BoxStream, StreamExt as OldStreamExt};
-use manifest::{Diff, Entry, ManifestOps};
+use futures::future::FutureExt;
+use futures::stream;
+use futures::stream::Stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use futures::try_join;
+use futures_ext::BoxStream;
+use futures_ext::StreamExt as OldStreamExt;
+use manifest::Diff;
+use manifest::Entry;
+use manifest::ManifestOps;
 use mercurial_derived_data::DeriveHgChangeset;
-use mercurial_types::{FileBytes, HgChangesetId, HgFileNodeId, HgManifestId};
-use mononoke_types::{FileType, RepositoryId};
+use mercurial_types::FileBytes;
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::HgManifestId;
+use mononoke_types::FileType;
+use mononoke_types::RepositoryId;
 use scuba_ext::MononokeScubaSampleBuilder;
-use slog::{info, Logger};
+use slog::info;
+use slog::Logger;
 use stats::prelude::*;
 use std::collections::HashMap;
 use std::fs;
-use std::ops::{Add, Sub};
+use std::ops::Add;
+use std::ops::Sub;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -131,7 +147,7 @@ pub async fn number_of_lines(
     bytes_stream
         .map_ok(|bytes| {
             bytes.into_iter().fold(0, |num_lines, byte| {
-                if byte == '\n' as u8 {
+                if byte == b'\n' {
                     num_lines + 1
                 } else {
                     num_lines
@@ -264,7 +280,7 @@ pub fn log_statistics(
     ctx: &CoreContext,
     mut scuba_logger: MononokeScubaSampleBuilder,
     cs_timestamp: i64,
-    repo_name: &String,
+    repo_name: &str,
     hg_cs_id: &HgChangesetId,
     statistics: &RepoStatistics,
 ) {
@@ -278,7 +294,7 @@ pub fn log_statistics(
         statistics.num_lines
     );
     scuba_logger
-        .add("repo_name", repo_name.clone())
+        .add("repo_name", repo_name.to_owned())
         .add("num_files", statistics.num_files)
         .add("total_file_size", statistics.total_file_size)
         .add("num_lines", statistics.num_lines)
@@ -393,7 +409,7 @@ pub async fn generate_statistics_from_file<P: AsRef<Path>>(
                 println!(
                     "{},{},{},{},{},{}",
                     repo_id.id(),
-                    hg_cs_id.to_hex().to_string(),
+                    hg_cs_id.to_hex(),
                     cs_timestamp,
                     statistics.num_files,
                     statistics.total_file_size,
@@ -421,21 +437,21 @@ async fn run_statistics<'a>(
     repo_name: String,
     bookmark: BookmarkName,
 ) -> Result<(), Error> {
-    let repo = args::open_repo(fb, &logger, &matches).await?;
+    let repo = args::open_repo(fb, logger, matches).await?;
 
     if let (SUBCOMMAND_STATISTICS_FROM_FILE, Some(sub_m)) = matches.subcommand() {
         // Both arguments are set to be required
         let in_filename = sub_m
             .value_of(ARG_IN_FILENAME)
             .expect("missing required argument");
-        return Ok(generate_statistics_from_file(&ctx, &repo, &in_filename).await?);
+        return generate_statistics_from_file(&ctx, &repo, &in_filename).await;
     }
 
     let blobstore = Arc::new(repo.get_blobstore());
     let mut changeset = repo
         .get_bookmark(ctx.clone(), &bookmark)
         .await?
-        .ok_or(Error::msg("cannot load bookmark"))?;
+        .ok_or_else(|| Error::msg("cannot load bookmark"))?;
 
     // initialize the loop
 
@@ -460,7 +476,7 @@ async fn run_statistics<'a>(
         changeset = repo
             .get_bookmark(ctx.clone(), &bookmark)
             .await?
-            .ok_or(Error::msg("cannot load bookmark"))?;
+            .ok_or_else(|| Error::msg("cannot load bookmark"))?;
 
         if prev_changeset == changeset {
             let duration = Duration::from_millis(1000);
@@ -525,7 +541,7 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
         Some(name) => name.to_string(),
         None => String::from("master"),
     };
-    let bookmark = BookmarkName::new(bookmark.clone())?;
+    let bookmark = BookmarkName::new(bookmark)?;
     let repo_name = args::get_repo_name(config_store, &matches)?;
     let scuba_logger = if matches.is_present("log-to-scuba") {
         MononokeScubaSampleBuilder::new(fb, SCUBA_DATASET_NAME)
@@ -550,10 +566,12 @@ mod tests {
     use bytes::Bytes;
     use fixtures::Linear;
     use fixtures::TestRepoFixture;
-    use futures::{future, stream};
+    use futures::future;
+    use futures::stream;
     use maplit::btreemap;
     use std::str::FromStr;
-    use tests_utils::{create_commit, store_files};
+    use tests_utils::create_commit;
+    use tests_utils::store_files;
     use tokio::runtime::Runtime;
 
     #[test]

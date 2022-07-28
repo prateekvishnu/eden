@@ -40,11 +40,9 @@ Configs:
 from __future__ import absolute_import
 
 import errno
-import json
 import mmap
 import os
 import tempfile
-import time
 
 from edenscm.mercurial import (
     bundle2,
@@ -57,13 +55,11 @@ from edenscm.mercurial import (
     exchange,
     extensions,
     hg,
-    lock,
     manifest,
     mutation,
     obsolete,
     perftrace,
     phases as phasesmod,
-    pushkey,
     pycompat,
     registrar,
     revsetlang,
@@ -296,7 +292,6 @@ def unbundle(orig, repo, cg, heads, source, url, replaydata=None, respondlightly
                 repo.manifestlog[bin(mfnode)].read()
 
     try:
-        starttime = time.time()
         result = orig(
             repo,
             cg,
@@ -307,11 +302,7 @@ def unbundle(orig, repo, cg, heads, source, url, replaydata=None, respondlightly
             respondlightly=respondlightly,
         )
         return result
-    except error.HookAbort as ex:
-        if ex.reason:
-            errmsg = "%s reason: %s" % (ex, ex.reason)
-        else:
-            errmsg = "%s" % ex
+    except error.HookAbort:
         raise
 
 
@@ -1145,7 +1136,7 @@ def _graft(op, rev, mapping, lastdestnode, getcommitdate):
 
     return _commit(
         repo,
-        [newp1, newp2],
+        [repo[newp1], repo[newp2]],
         rev.description(),
         files,
         getfilectx,

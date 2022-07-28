@@ -8,16 +8,27 @@
 use crate::state_ext::StateExt;
 use cats::try_get_cats_idents;
 use fbinit::FacebookInit;
-use futures::{future, Future, FutureExt};
-use gotham::state::{client_addr, FromState, State};
+use futures::future;
+use futures::Future;
+use futures::FutureExt;
+use gotham::state::client_addr;
+use gotham::state::FromState;
+use gotham::state::State;
 use gotham_derive::StateData;
 use hyper::header::HeaderMap;
-use hyper::{Body, Response, StatusCode};
+use hyper::Body;
+use hyper::Response;
+use hyper::StatusCode;
 use lazy_static::lazy_static;
+use metaconfig_types::Identity;
 use percent_encoding::percent_decode;
-use permission_checker::{MononokeIdentity, MononokeIdentitySet, MononokeIdentitySetExt};
-use slog::{error, Logger};
-use std::net::{IpAddr, SocketAddr};
+use permission_checker::MononokeIdentity;
+use permission_checker::MononokeIdentitySet;
+use permission_checker::MononokeIdentitySetExt;
+use slog::error;
+use slog::Logger;
+use std::net::IpAddr;
+use std::net::SocketAddr;
 use trust_dns_resolver::TokioAsyncResolver;
 
 use super::Middleware;
@@ -30,8 +41,7 @@ const CLIENT_CORRELATOR: &str = "x-client-correlator";
 
 lazy_static! {
     static ref PROXYGEN_ORIGIN_IDENTITY: MononokeIdentity =
-        MononokeIdentity::new("SERVICE_IDENTITY", "proxygen-origin")
-            .expect("SERVICE_IDENTITY is not a valid identity type");
+        MononokeIdentity::new("SERVICE_IDENTITY", "proxygen-origin");
 }
 
 #[derive(StateData, Default)]
@@ -55,8 +65,7 @@ impl ClientIdentity {
         if let Some(client_hostname) = self
             .identities
             .as_ref()
-            .map(|id| id.hostname().map(|h| h.to_string()))
-            .flatten()
+            .and_then(|id| id.hostname().map(|h| h.to_string()))
         {
             return future::ready(Some(client_hostname)).left_future();
         }
@@ -103,11 +112,16 @@ impl ClientIdentity {
 pub struct ClientIdentityMiddleware {
     fb: FacebookInit,
     logger: Logger,
+    internal_identity: Identity,
 }
 
 impl ClientIdentityMiddleware {
-    pub fn new(fb: FacebookInit, logger: Logger) -> Self {
-        Self { fb, logger }
+    pub fn new(fb: FacebookInit, logger: Logger, internal_identity: Identity) -> Self {
+        Self {
+            fb,
+            logger,
+            internal_identity,
+        }
     }
 
     fn extract_client_identities(
@@ -116,7 +130,7 @@ impl ClientIdentityMiddleware {
         headers: &HeaderMap,
     ) -> Option<MononokeIdentitySet> {
         match tls_certificate_identities {
-            TlsCertificateIdentities::TrustedProxy => request_identities_from_headers(&headers),
+            TlsCertificateIdentities::TrustedProxy => request_identities_from_headers(headers),
             TlsCertificateIdentities::Authenticated(idents) => Some(idents),
         }
     }
@@ -149,40 +163,50 @@ impl Middleware for ClientIdentityMiddleware {
         let mut client_identity = ClientIdentity::default();
         let cert_idents = TlsCertificateIdentities::try_take_from(state);
 
-        if let Some(headers) = HeaderMap::try_borrow_from(&state) {
-            client_identity.address = request_ip_from_headers(&headers);
-            client_identity.client_correlator = request_client_correlator_from_headers(&headers);
+        if let Some(headers) = HeaderMap::try_borrow_from(state) {
+            client_identity.address = request_ip_from_headers(headers);
+            client_identity.client_correlator = request_client_correlator_from_headers(headers);
 
             client_identity.identities = {
-                let maybe_idents = match try_get_cats_idents(self.fb, headers) {
-                    Err(e) => {
-                        let msg = format!("Error extracting CATs identities: {}.", &e,);
-                        error!(self.logger, "{}", &msg,);
-                        let response = Response::builder()
-                            .status(StatusCode::UNAUTHORIZED)
-                            .body(
-                                format!(
-                                    "{{\"message:\"{}\", \"request_id\":\"{}\"}}",
-                                    msg,
-                                    state.short_request_id()
+                let maybe_cat_idents =
+                    match try_get_cats_idents(self.fb, headers, &self.internal_identity) {
+                        Err(e) => {
+                            let msg = format!("Error extracting CATs identities: {}.", &e,);
+                            error!(self.logger, "{}", &msg,);
+                            let response = Response::builder()
+                                .status(StatusCode::UNAUTHORIZED)
+                                .body(
+                                    format!(
+                                        "{{\"message:\"{}\", \"request_id\":\"{}\"}}",
+                                        msg,
+                                        state.short_request_id()
+                                    )
+                                    .into(),
                                 )
-                                .into(),
-                            )
-                            .expect("Couldn't build http response");
+                                .expect("Couldn't build http response");
 
-                        return Some(response);
+                            return Some(response);
+                        }
+                        Ok(maybe_cats) => maybe_cats,
+                    };
+
+                let maybe_tls_or_proxied_idents: Option<MononokeIdentitySet> =
+                    cert_idents.and_then(|x| self.extract_client_identities(x, headers));
+
+                match (maybe_cat_idents, maybe_tls_or_proxied_idents) {
+                    (None, None) => None,
+                    (Some(cat_idents), Some(tls_or_proxied_idents)) => {
+                        Some(cat_idents.union(&tls_or_proxied_idents).cloned().collect())
                     }
-                    Ok(maybe_cats) => maybe_cats,
-                };
-                maybe_idents.or_else(|| {
-                    cert_idents.and_then(|x| self.extract_client_identities(x, headers))
-                })
+                    (Some(cat_idents), None) => Some(cat_idents),
+                    (None, Some(tls_or_proxied_idents)) => Some(tls_or_proxied_idents),
+                }
             };
         }
 
         // For the IP, we can fallback to the peer IP
         if client_identity.address.is_none() {
-            client_identity.address = client_addr(&state).as_ref().map(SocketAddr::ip);
+            client_identity.address = client_addr(state).as_ref().map(SocketAddr::ip);
         }
 
         state.put(client_identity);

@@ -61,11 +61,7 @@ def reposetup(ui, repo):
 
     # Ensure there is a Watchman client associated with the repo that
     # state_update() can use later.
-    try:
-        watchmanclient.createclientforrepo(repo)
-    except Exception as ex:
-        ui.log("hgevents", "Watchman exception: %s\n", ex)
-        return
+    watchmanclient.createclientforrepo(repo)
 
     class hgeventsrepo(repo.__class__):
         def wlocknostateupdate(self, *args, **kwargs):
@@ -118,7 +114,7 @@ def wrapupdate(
     labels=None,
     matcher=None,
     wc=None,
-    **kwargs
+    **kwargs,
 ):
     if wc and wc.isinmemory():
         # If the working context isn't on disk, there's no need to invoke
@@ -133,7 +129,7 @@ def wrapupdate(
             labels,
             matcher,
             wc=wc,
-            **kwargs
+            **kwargs,
         )
     distance = 0
     partial = True
@@ -161,7 +157,7 @@ def wrapupdate(
             mergeancestor,
             labels,
             matcher,
-            **kwargs
+            **kwargs,
         )
 
 

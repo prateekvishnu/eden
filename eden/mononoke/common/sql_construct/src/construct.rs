@@ -8,8 +8,13 @@
 use std::path::Path;
 
 use anyhow::Result;
-use sql::{Connection, SqlConnections, SqlConnectionsWithSchema, SqlShardedConnections};
-use sql_ext::{open_existing_sqlite_path, open_sqlite_in_memory, open_sqlite_path};
+use sql::Connection;
+use sql::SqlConnections;
+use sql::SqlConnectionsWithSchema;
+use sql::SqlShardedConnections;
+use sql_ext::open_existing_sqlite_path;
+use sql_ext::open_sqlite_in_memory;
+use sql_ext::open_sqlite_path;
 
 /// Construct a SQL data manager backed by a database
 ///
@@ -52,7 +57,7 @@ pub trait SqlConstruct: Sized + Send + Sync + 'static {
             write_connection: if readonly {
                 read_connection.clone()
             } else {
-                write_connection.clone()
+                write_connection
             },
             read_master_connection: read_connection.clone(),
             read_connection,

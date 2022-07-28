@@ -5,7 +5,8 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -18,33 +19,36 @@ use context::CoreContext;
 use futures_stats::TimedFutureExt;
 use git_mapping_pushrebase_hook::GitMappingPushrebaseHook;
 use globalrev_pushrebase_hook::GlobalrevPushrebaseHook;
-use hooks::{CrossRepoPushSource, HookManager};
-use metaconfig_types::{
-    BookmarkAttrs, InfinitepushParams, PushrebaseParams, SourceControlServiceParams,
-};
+use hooks::CrossRepoPushSource;
+use hooks::HookManager;
+use metaconfig_types::InfinitepushParams;
+use metaconfig_types::PushrebaseParams;
 use mononoke_types::BonsaiChangeset;
 use pushrebase_hook::PushrebaseHook;
 use pushrebase_mutation_mapping::PushrebaseMutationMappingRef;
 use reachabilityindex::LeastCommonAncestorsHint;
+use repo_authorization::AuthorizationContext;
+use repo_authorization::RepoWriteOperation;
+use repo_bookmark_attrs::RepoBookmarkAttrsRef;
 use repo_identity::RepoIdentityRef;
-use repo_read_write_status::RepoReadWriteFetcher;
 
-use crate::affected_changesets::{AdditionalChangesets, AffectedChangesets};
-use crate::repo_lock::{check_repo_lock, RepoLockPushrebaseHook};
-use crate::restrictions::{
-    check_bookmark_sync_config, BookmarkKindRestrictions, BookmarkMoveAuthorization,
-};
-use crate::{BookmarkMovementError, Repo};
+use crate::affected_changesets::AdditionalChangesets;
+use crate::affected_changesets::AffectedChangesets;
+use crate::repo_lock::check_repo_lock;
+use crate::repo_lock::RepoLockPushrebaseHook;
+use crate::restrictions::check_bookmark_sync_config;
+use crate::restrictions::BookmarkKindRestrictions;
+use crate::BookmarkMovementError;
+use crate::Repo;
 
 #[must_use = "PushrebaseOntoBookmarkOp must be run to have an effect"]
 pub struct PushrebaseOntoBookmarkOp<'op> {
     bookmark: &'op BookmarkName,
     affected_changesets: AffectedChangesets,
-    auth: BookmarkMoveAuthorization<'op>,
-    kind_restrictions: BookmarkKindRestrictions,
+    bookmark_restrictions: BookmarkKindRestrictions,
     cross_repo_push_source: CrossRepoPushSource,
     pushvars: Option<&'op HashMap<String, Bytes>>,
-    hg_replay: Option<&'op pushrebase::HgReplayData>,
+    only_log_acl_checks: bool,
 }
 
 impl<'op> PushrebaseOntoBookmarkOp<'op> {
@@ -55,32 +59,28 @@ impl<'op> PushrebaseOntoBookmarkOp<'op> {
         PushrebaseOntoBookmarkOp {
             bookmark,
             affected_changesets: AffectedChangesets::with_source_changesets(changesets),
-            auth: BookmarkMoveAuthorization::User,
-            kind_restrictions: BookmarkKindRestrictions::AnyKind,
+            bookmark_restrictions: BookmarkKindRestrictions::AnyKind,
             cross_repo_push_source: CrossRepoPushSource::NativeToThisRepo,
             pushvars: None,
-            hg_replay: None,
+            only_log_acl_checks: false,
         }
     }
 
-    /// This bookmark change is for an authenticated named service.  The change
-    /// will be checked against the service's write restrictions.
-    pub fn for_service(
-        mut self,
-        service_name: impl Into<String>,
-        params: &'op SourceControlServiceParams,
-    ) -> Self {
-        self.auth = BookmarkMoveAuthorization::Service(service_name.into(), params);
-        self
-    }
-
     pub fn only_if_scratch(mut self) -> Self {
-        self.kind_restrictions = BookmarkKindRestrictions::OnlyScratch;
+        self.bookmark_restrictions = BookmarkKindRestrictions::OnlyScratch;
         self
     }
 
     pub fn only_if_public(mut self) -> Self {
-        self.kind_restrictions = BookmarkKindRestrictions::OnlyPublishing;
+        self.bookmark_restrictions = BookmarkKindRestrictions::OnlyPublishing;
+        self
+    }
+
+    pub fn with_bookmark_restrictions(
+        mut self,
+        bookmark_restrictions: BookmarkKindRestrictions,
+    ) -> Self {
+        self.bookmark_restrictions = bookmark_restrictions;
         self
     }
 
@@ -89,33 +89,48 @@ impl<'op> PushrebaseOntoBookmarkOp<'op> {
         self
     }
 
-    pub fn with_hg_replay_data(mut self, hg_replay: Option<&'op pushrebase::HgReplayData>) -> Self {
-        self.hg_replay = hg_replay;
+    pub fn with_push_source(mut self, cross_repo_push_source: CrossRepoPushSource) -> Self {
+        self.cross_repo_push_source = cross_repo_push_source;
         self
     }
 
-    pub fn with_push_source(mut self, cross_repo_push_source: CrossRepoPushSource) -> Self {
-        self.cross_repo_push_source = cross_repo_push_source;
+    pub fn only_log_acl_checks(mut self, only_log: bool) -> Self {
+        self.only_log_acl_checks = only_log;
         self
     }
 
     pub async fn run(
         mut self,
         ctx: &'op CoreContext,
+        authz: &'op AuthorizationContext,
         repo: &'op impl Repo,
         lca_hint: &'op Arc<dyn LeastCommonAncestorsHint>,
         infinitepush_params: &'op InfinitepushParams,
         pushrebase_params: &'op PushrebaseParams,
-        bookmark_attrs: &'op BookmarkAttrs,
         hook_manager: &'op HookManager,
-        repo_read_write_fetcher: &'op RepoReadWriteFetcher,
     ) -> Result<pushrebase::PushrebaseOutcome, BookmarkMovementError> {
         let kind = self
-            .kind_restrictions
+            .bookmark_restrictions
             .check_kind(infinitepush_params, self.bookmark)?;
 
-        self.auth
-            .check_authorized(ctx, bookmark_attrs, self.bookmark)
+        if self.only_log_acl_checks {
+            if authz
+                .check_repo_write(ctx, repo, RepoWriteOperation::LandStack(kind))
+                .await?
+                .is_denied()
+            {
+                ctx.scuba().clone().log_with_msg(
+                    "Repo write ACL check would fail for bookmark pushrebase",
+                    None,
+                );
+            }
+        } else {
+            authz
+                .require_repo_write(ctx, repo, RepoWriteOperation::LandStack(kind))
+                .await?;
+        }
+        authz
+            .require_bookmark_modify(ctx, repo, self.bookmark)
             .await?;
 
         check_bookmark_sync_config(repo, self.bookmark, kind)?;
@@ -139,39 +154,31 @@ impl<'op> PushrebaseOntoBookmarkOp<'op> {
         self.affected_changesets
             .check_restrictions(
                 ctx,
+                authz,
                 repo,
                 lca_hint,
                 pushrebase_params,
-                bookmark_attrs,
                 hook_manager,
                 self.bookmark,
                 self.pushvars,
                 BookmarkUpdateReason::Pushrebase,
                 kind,
-                &self.auth,
                 AdditionalChangesets::None,
                 self.cross_repo_push_source,
             )
             .await?;
 
         let mut pushrebase_hooks =
-            get_pushrebase_hooks(ctx, repo, &self.bookmark, bookmark_attrs, pushrebase_params)?;
+            get_pushrebase_hooks(ctx, repo, self.bookmark, pushrebase_params)?;
 
         // For pushrebase, we check the repo lock once at the beginning of the
         // pushrebase operation, and then once more as part of the pushrebase
         // bookmark update transaction, to check if the repo got locked while
         // we were peforming the pushrebase.
-        check_repo_lock(
-            repo_read_write_fetcher,
-            kind,
-            self.pushvars,
-            repo.repo_permission_checker(),
-            ctx.metadata().identities(),
-        )
-        .await?;
+        check_repo_lock(repo, kind, self.pushvars, ctx.metadata().identities()).await?;
 
         if let Some(hook) = RepoLockPushrebaseHook::new(
-            repo_read_write_fetcher,
+            repo.repo_identity().id(),
             kind,
             self.pushvars,
             repo.repo_permission_checker(),
@@ -183,7 +190,10 @@ impl<'op> PushrebaseOntoBookmarkOp<'op> {
         }
 
         let mut flags = pushrebase_params.flags.clone();
-        if let Some(rewritedates) = bookmark_attrs.should_rewrite_dates(self.bookmark) {
+        if let Some(rewritedates) = repo
+            .repo_bookmark_attrs()
+            .should_rewrite_dates(self.bookmark)
+        {
             // Bookmark config overrides repo flags.rewritedates config
             flags.rewritedates = rewritedates;
         }
@@ -198,7 +208,6 @@ impl<'op> PushrebaseOntoBookmarkOp<'op> {
             &flags,
             self.bookmark,
             self.affected_changesets.source_changesets(),
-            self.hg_replay,
             pushrebase_hooks.as_slice(),
         )
         .timed()
@@ -228,10 +237,10 @@ pub fn get_pushrebase_hooks(
          impl BonsaiGitMappingArc
          + BonsaiGlobalrevMappingArc
          + PushrebaseMutationMappingRef
+         + RepoBookmarkAttrsRef
          + RepoIdentityRef
      ),
     bookmark: &BookmarkName,
-    bookmark_attrs: &BookmarkAttrs,
     params: &PushrebaseParams,
 ) -> Result<Vec<Box<dyn PushrebaseHook>>, BookmarkMovementError> {
     let mut pushrebase_hooks = Vec::new();
@@ -256,7 +265,7 @@ pub fn get_pushrebase_hooks(
         }
     };
 
-    for attr in bookmark_attrs.select(bookmark) {
+    for attr in repo.repo_bookmark_attrs().select(bookmark) {
         if let Some(descendant_bookmark) = &attr.params().ensure_ancestor_of {
             return Err(
                 BookmarkMovementError::PushrebaseNotAllowedRequiresAncestorsOf {

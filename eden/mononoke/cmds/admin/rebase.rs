@@ -5,23 +5,28 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Error};
+use anyhow::anyhow;
+use anyhow::Error;
 use blobstore::Loadable;
-use clap_old::{App, Arg, ArgMatches, SubCommand};
+use clap_old::App;
+use clap_old::Arg;
+use clap_old::ArgMatches;
+use clap_old::SubCommand;
 use fbinit::FacebookInit;
-use futures::{
-    compat::Stream01CompatExt,
-    future::{try_join, try_join3},
-    TryStreamExt,
-};
+use futures::compat::Stream01CompatExt;
+use futures::future::try_join;
+use futures::future::try_join3;
+use futures::TryStreamExt;
 
-use blobrepo::{save_bonsai_changesets, BlobRepo};
-use cmdlib::{
-    args::{self, MononokeMatches},
-    helpers,
-};
+use blobrepo::save_bonsai_changesets;
+use blobrepo::BlobRepo;
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers;
 use context::CoreContext;
-use mononoke_types::{BonsaiChangesetMut, ChangesetId, FileChange};
+use mononoke_types::BonsaiChangesetMut;
+use mononoke_types::ChangesetId;
+use mononoke_types::FileChange;
 use slog::Logger;
 
 use crate::error::SubcommandError;
@@ -104,7 +109,7 @@ pub async fn subcommand_rebase<'a>(
     }
 
     let ctx = CoreContext::new_with_logger(fb, logger.clone());
-    let repo: BlobRepo = args::open_repo(fb, &logger, &matches).await?;
+    let repo: BlobRepo = args::open_repo(fb, &logger, matches).await?;
 
     let dest = sub_matches
         .value_of(ARG_DEST)
@@ -171,7 +176,7 @@ async fn rebase_single_changeset(
     dest: ChangesetId,
 ) -> Result<ChangesetId, Error> {
     let bcs = cs_id
-        .load(&ctx, repo.blobstore())
+        .load(ctx, repo.blobstore())
         .await
         .map_err(Error::from)?;
     let mut rebased = bcs.into_mut();

@@ -6,18 +6,23 @@
  */
 
 use anyhow::Error;
-use std::cmp::{self, Ordering};
+use std::cmp;
+use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::fmt::{self, Display};
-use std::io::{self, Write};
+use std::fmt;
+use std::fmt::Display;
+use std::io;
+use std::io::Write;
 
 use ::manifest::Entry;
-use mononoke_types::{hash::RichGitSha1, MPathElement};
+use mononoke_types::hash::RichGitSha1;
+use mononoke_types::MPathElement;
 
 use crate::errors::ErrorKind;
 use crate::mode;
 use crate::thrift;
-use crate::{BlobHandle, ObjectKind};
+use crate::BlobHandle;
+use crate::ObjectKind;
 
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
 pub struct TreeHandle {
@@ -273,7 +278,7 @@ fn git_path_cmp(
     e2: &TreeMember,
 ) -> Ordering {
     const NULL: u8 = 0;
-    const SLASH: u8 = '/' as u8;
+    const SLASH: u8 = b'/';
 
     let p1 = p1.as_ref();
     let p2 = p2.as_ref();

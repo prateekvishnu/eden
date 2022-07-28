@@ -5,37 +5,52 @@
  * GNU General Public License version 2.
  */
 
-use crate::{
-    derive_hg_manifest::{derive_hg_manifest, derive_simple_hg_manifest_stack_without_copy_info},
-    mapping::{HgChangesetDeriveOptions, MappedHgChangesetId},
-};
-use anyhow::{anyhow, bail, Error};
+use crate::derive_hg_manifest::derive_hg_manifest;
+use crate::derive_hg_manifest::derive_simple_hg_manifest_stack_without_copy_info;
+use crate::mapping::HgChangesetDeriveOptions;
+use crate::mapping::MappedHgChangesetId;
+use anyhow::anyhow;
+use anyhow::bail;
+use anyhow::Error;
 use async_trait::async_trait;
 use blobrepo_common::changed_files::compute_changed_files;
-use blobstore::{Blobstore, Loadable};
+use blobstore::Blobstore;
+use blobstore::Loadable;
 use borrowed::borrowed;
 use cloned::cloned;
 use context::CoreContext;
 use derived_data_manager::DerivationError;
-use futures::{
-    future::{self, try_join, try_join_all},
-    stream, FutureExt, TryStreamExt,
-};
-use manifest::{ManifestChanges, ManifestOps};
-use mercurial_types::{
-    blobs::{
-        ChangesetMetadata, ContentBlobMeta, File, HgBlobChangeset, HgChangesetContent,
-        UploadHgFileContents, UploadHgFileEntry, UploadHgNodeHash,
-    },
-    HgChangesetId, HgFileNodeId, HgManifestId, HgParents,
-};
-use mononoke_types::{
-    BonsaiChangeset, ChangesetId, FileChange, FileType, MPath, TrackedFileChange,
-};
+use futures::future;
+use futures::future::try_join;
+use futures::future::try_join_all;
+use futures::stream;
+use futures::FutureExt;
+use futures::TryStreamExt;
+use manifest::ManifestChanges;
+use manifest::ManifestOps;
+use mercurial_types::blobs::ChangesetMetadata;
+use mercurial_types::blobs::ContentBlobMeta;
+use mercurial_types::blobs::File;
+use mercurial_types::blobs::HgBlobChangeset;
+use mercurial_types::blobs::HgChangesetContent;
+use mercurial_types::blobs::UploadHgFileContents;
+use mercurial_types::blobs::UploadHgFileEntry;
+use mercurial_types::blobs::UploadHgNodeHash;
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::HgManifestId;
+use mercurial_types::HgParents;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::ChangesetId;
+use mononoke_types::FileChange;
+use mononoke_types::FileType;
+use mononoke_types::MPath;
+use mononoke_types::TrackedFileChange;
 use repo_derived_data::RepoDerivedDataRef;
 use stats::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::{collections::HashMap, time::Instant};
+use std::time::Instant;
 
 define_stats! {
     prefix = "mononoke.blobrepo";
@@ -52,7 +67,7 @@ async fn can_reuse_filenode(
     parent: HgFileNodeId,
     change: &TrackedFileChange,
 ) -> Result<Option<HgFileNodeId>, Error> {
-    let parent_envelope = parent.load(&ctx, blobstore).await?;
+    let parent_envelope = parent.load(ctx, blobstore).await?;
     let parent_copyfrom_path = File::extract_copied_from(parent_envelope.metadata())?.map(|t| t.0);
     let parent_content_id = parent_envelope.content_id();
 
@@ -149,7 +164,7 @@ pub(crate) async fn store_file_change<'a>(
                 p2,
             };
 
-            upload_entry.upload(ctx, blobstore, Some(&path)).await?
+            upload_entry.upload(ctx, blobstore, Some(path)).await?
         }
     };
 
@@ -247,7 +262,7 @@ pub async fn get_manifest_from_bonsai(
 
     let file_changes: Vec<_> = file_changes
         .into_iter()
-        .map(|(path, file_change)| Ok::<_, Error>((path.clone(), file_change.clone())))
+        .map(|(path, file_change)| Ok::<_, Error>((path, file_change)))
         .collect();
     let changes: Vec<_> = stream::iter(file_changes)
         .map_ok({
@@ -387,7 +402,7 @@ pub async fn derive_simple_hg_changeset_stack_without_copy_info(
             )
         })?;
         let (hg_changeset_id, hg_cs) =
-            generate_hg_changeset(&ctx, &blobstore, bonsai, *mf_id, parents, options).await?;
+            generate_hg_changeset(ctx, blobstore, bonsai, *mf_id, parents, options).await?;
         res.insert(cs_id, MappedHgChangesetId::new(hg_changeset_id));
         parents = vec![hg_cs];
     }

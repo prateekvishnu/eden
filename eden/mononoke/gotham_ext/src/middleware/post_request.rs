@@ -6,20 +6,26 @@
  */
 
 use std::panic::RefUnwindSafe;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Error;
 use async_trait::async_trait;
 use cached_config::ConfigHandle;
 use futures::prelude::*;
-use gotham::state::{FromState, State};
+use gotham::state::FromState;
+use gotham::state::State;
 use gotham_derive::StateData;
-use hyper::{body::Body, Response};
+use hyper::body::Body;
+use hyper::Response;
 use tokio::task;
 
-use crate::response::{PendingResponseMeta, ResponseMeta};
+use crate::response::PendingResponseMeta;
+use crate::response::ResponseMeta;
 
-use super::{ClientIdentity, Middleware, RequestStartTime};
+use super::ClientIdentity;
+use super::Middleware;
+use super::RequestStartTime;
 
 type Callback = Box<dyn FnOnce(&PostResponseInfo) + Send + 'static>;
 
@@ -38,8 +44,7 @@ impl PostResponseInfo {
     pub fn error_count(&self) -> u64 {
         self.meta
             .as_ref()
-            .map(|m| m.body().error_meta.error_count())
-            .unwrap_or(0)
+            .map_or(0, |m| m.body().error_meta.error_count())
     }
 }
 
@@ -90,8 +95,8 @@ impl<C: PostResponseConfig> Middleware for PostResponseMiddleware<C> {
 
     async fn outbound(&self, state: &mut State, _response: &mut Response<Body>) {
         let config = self.config.clone();
-        let start_time = RequestStartTime::try_borrow_from(&state).map(|t| t.0);
-        let hostname_future = ClientIdentity::try_borrow_from(&state).map(|id| id.hostname());
+        let start_time = RequestStartTime::try_borrow_from(state).map(|t| t.0);
+        let hostname_future = ClientIdentity::try_borrow_from(state).map(|id| id.hostname());
         let meta = PendingResponseMeta::try_take_from(state);
 
         if let Some(callbacks) = state.try_take::<PostResponseCallbacks>() {

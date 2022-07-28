@@ -9,23 +9,30 @@ use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::panic::RefUnwindSafe;
 
-use gotham::state::{FromState, State};
+use gotham::state::FromState;
+use gotham::state::State;
 use gotham_derive::StateData;
-use hyper::{
-    header::{self, AsHeaderName, HeaderMap},
-    Method, StatusCode, Uri,
-};
-use hyper::{Body, Response};
-use scuba_ext::{MononokeScubaSampleBuilder, ScubaValue};
+use hyper::header;
+use hyper::header::AsHeaderName;
+use hyper::header::HeaderMap;
+use hyper::Body;
+use hyper::Method;
+use hyper::Response;
+use hyper::StatusCode;
+use hyper::Uri;
+use scuba_ext::MononokeScubaSampleBuilder;
+use scuba_ext::ScubaValue;
 use time_ext::DurationExt;
 
-use crate::{
-    middleware::{ClientIdentity, Middleware, PostResponseCallbacks, PostResponseInfo},
-    response::HeadersMeta,
-    state_ext::StateExt,
-};
+use crate::middleware::ClientIdentity;
+use crate::middleware::Middleware;
+use crate::middleware::PostResponseCallbacks;
+use crate::middleware::PostResponseInfo;
+use crate::response::HeadersMeta;
+use crate::state_ext::StateExt;
 
-use super::{HeadersDuration, RequestLoad};
+use super::HeadersDuration;
+use super::RequestLoad;
 
 /// Common HTTP-related Scuba columns that the middlware will set automatically.
 /// Applications using the middleware are encouraged to follow a similar pattern
@@ -161,7 +168,9 @@ where
 {
     if let Some(header_val) = headers.get(header) {
         if let Ok(header_val) = header_val.to_str() {
-            scuba.entry(scuba_key).or_insert(convert(header_val).into());
+            scuba
+                .entry(scuba_key)
+                .or_insert_with(|| convert(header_val).into());
             return Some(header_val);
         }
     }
@@ -174,18 +183,18 @@ fn log_stats<H: ScubaHandler>(state: &mut State, status_code: &StatusCode) -> Op
 
     scuba.add(HttpScubaKey::HttpStatus, status_code.as_u16());
 
-    if let Some(uri) = Uri::try_borrow_from(&state) {
+    if let Some(uri) = Uri::try_borrow_from(state) {
         scuba.add(HttpScubaKey::HttpPath, uri.path());
         if let Some(query) = uri.query() {
             scuba.add(HttpScubaKey::HttpQuery, query);
         }
     }
 
-    if let Some(method) = Method::try_borrow_from(&state) {
+    if let Some(method) = Method::try_borrow_from(state) {
         scuba.add(HttpScubaKey::HttpMethod, method.to_string());
     }
 
-    if let Some(headers) = HeaderMap::try_borrow_from(&state) {
+    if let Some(headers) = HeaderMap::try_borrow_from(state) {
         add_header(
             &mut scuba,
             headers,
@@ -211,7 +220,7 @@ fn log_stats<H: ScubaHandler>(state: &mut State, status_code: &StatusCode) -> Op
         );
     }
 
-    if let Some(identity) = ClientIdentity::try_borrow_from(&state) {
+    if let Some(identity) = ClientIdentity::try_borrow_from(state) {
         if let Some(ref address) = identity.address() {
             scuba.add(HttpScubaKey::ClientIp, address.to_string());
         }
@@ -225,18 +234,18 @@ fn log_stats<H: ScubaHandler>(state: &mut State, status_code: &StatusCode) -> Op
 
         if let Some(ref identities) = identity.identities() {
             scuba.sample_for_identities(identities);
-            let identities: Vec<_> = identities.into_iter().map(|i| i.to_string()).collect();
+            let identities: Vec<_> = identities.iter().map(|i| i.to_string()).collect();
             scuba.add(HttpScubaKey::ClientIdentities, identities);
         }
     }
 
-    if let Some(request_load) = RequestLoad::try_borrow_from(&state) {
+    if let Some(request_load) = RequestLoad::try_borrow_from(state) {
         scuba.add(HttpScubaKey::RequestLoad, request_load.0);
     }
 
     scuba.add(HttpScubaKey::RequestId, state.short_request_id());
 
-    if let Some(HeadersDuration(duration)) = HeadersDuration::try_borrow_from(&state) {
+    if let Some(HeadersDuration(duration)) = HeadersDuration::try_borrow_from(state) {
         scuba.add(
             HttpScubaKey::HeadersDurationMs,
             duration.as_millis_unchecked(),
@@ -337,7 +346,7 @@ impl<H: ScubaHandler> Middleware for ScubaMiddleware<H> {
     }
 
     async fn outbound(&self, state: &mut State, response: &mut Response<Body>) {
-        if let Some(uri) = Uri::try_borrow_from(&state) {
+        if let Some(uri) = Uri::try_borrow_from(state) {
             if uri.path() == "/health_check" {
                 return;
             }

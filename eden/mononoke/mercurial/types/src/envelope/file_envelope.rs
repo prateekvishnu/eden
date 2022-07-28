@@ -9,16 +9,21 @@
 
 use std::fmt;
 
-use anyhow::{Context, Error, Result};
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use bytes::Bytes;
 use fbthrift::compact_protocol;
-use quickcheck::{empty_shrinker, Arbitrary, Gen};
+use quickcheck::empty_shrinker;
+use quickcheck::Arbitrary;
+use quickcheck::Gen;
 
 use mononoke_types::ContentId;
 
 use super::HgEnvelopeBlob;
 use crate::errors::*;
-use crate::nodehash::{HgFileNodeId, HgNodeHash};
+use crate::nodehash::HgFileNodeId;
+use crate::nodehash::HgNodeHash;
 use crate::thrift;
 use crate::HgParents;
 
@@ -86,9 +91,9 @@ impl HgFileEnvelope {
             })
         };
 
-        Ok(catch_block().with_context(|| {
+        catch_block().with_context(|| {
             ErrorKind::InvalidThrift("HgFileEnvelope".into(), "Invalid file envelope".into())
-        })?)
+        })
     }
 
     pub fn from_blob(blob: HgEnvelopeBlob) -> Result<Self> {
@@ -218,7 +223,7 @@ mod test {
             // a content ID must be present
             content_id: None,
             content_size: 42,
-            metadata: Some(vec![].into()),
+            metadata: Some(vec![]),
         };
 
         HgFileEnvelope::from_thrift(thrift_fe.clone())

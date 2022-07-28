@@ -5,15 +5,24 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{Context, Error, Result};
-use blobstore::{Blobstore, BlobstoreBytes};
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
+use blobstore::Blobstore;
+use blobstore::BlobstoreBytes;
 use bonsai_hg_mapping::BonsaiHgMapping;
 use context::CoreContext;
-use futures::stream::{self, StreamExt, TryStreamExt};
+use futures::stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use mercurial_types::HgChangesetId;
-use mononoke_types::{hash, ChangesetId, RepositoryId};
-use serde_derive::{Deserialize, Serialize};
-use slog::{debug, info};
+use mononoke_types::hash;
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
+use serde_derive::Deserialize;
+use serde_derive::Serialize;
+use slog::debug;
+use slog::info;
 use sql::queries;
 use sql_ext::SqlConnections;
 use std::collections::HashMap;
@@ -138,7 +147,7 @@ impl CloneHints {
         let existing_hints = self.fetch(ctx, idmap_version).await?;
         let new_ids: Vec<_> = ids
             .into_iter()
-            .filter(|id| !existing_hints.contains_key(&id))
+            .filter(|id| !existing_hints.contains_key(id))
             .collect();
 
         if new_ids.len() < HINTS_PER_CHUNK {
@@ -167,7 +176,7 @@ impl CloneHints {
             .await
             .context("error retrieving mappings for dag universal ids")?;
 
-        let csids: Vec<_> = idmap_entries.values().map(|&id| id).collect();
+        let csids: Vec<_> = idmap_entries.values().copied().collect();
         let hg_mapping: HashMap<_, _> = bonsai_hg_mapping
             .get(ctx, csids.into())
             .await
@@ -180,7 +189,7 @@ impl CloneHints {
             .into_iter()
             .filter_map(|dag_id| {
                 let cs_id = idmap_entries.get(&dag_id)?;
-                let hgcs_id = hg_mapping.get(&cs_id)?;
+                let hgcs_id = hg_mapping.get(cs_id)?;
                 let dag_id = dag_id.0;
                 let cs_id = cs_id.blake2().into_inner();
                 let hgcs_id = hgcs_id.as_bytes().try_into().ok()?;
@@ -196,7 +205,7 @@ impl CloneHints {
 
         let hint_blob_keys: Vec<_> = stream::iter(new_hints.chunks_exact(HINTS_PER_CHUNK).map(
             |chunk| async move {
-                let chunk: Vec<_> = chunk.into_iter().collect();
+                let chunk: Vec<_> = chunk.iter().collect();
                 let chunk = mincode::serialize(&chunk)?;
                 let chunk_hash = {
                     let mut context = hash::Context::new(b"segmented_clone");

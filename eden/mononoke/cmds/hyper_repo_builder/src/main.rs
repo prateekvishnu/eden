@@ -19,27 +19,28 @@
 //! 1) Non-forward bookmark moves are not supported
 //! 2) Syncing merges is not supported
 
-use anyhow::{anyhow, Error};
+use anyhow::anyhow;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use bookmarks::BookmarkName;
-use clap_old::{Arg, ArgMatches, SubCommand};
-use cmdlib::{
-    args::{self, MononokeMatches},
-    helpers,
-};
+use clap_old::Arg;
+use clap_old::ArgMatches;
+use clap_old::SubCommand;
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers;
 use context::CoreContext;
-use cross_repo_sync::{
-    types::{Source, Target},
-    validation::verify_working_copy_inner,
-};
+use cross_repo_sync::types::Source;
+use cross_repo_sync::types::Target;
+use cross_repo_sync::validation::verify_working_copy_inner;
 use fbinit::FacebookInit;
 use futures::future::try_join;
 use slog::info;
 use std::time::Duration;
 
-use crate::common::{
-    find_source_repos, find_source_repos_and_latest_synced_cs_ids, get_mover_and_reverse_mover,
-};
+use crate::common::find_source_repos;
+use crate::common::find_source_repos_and_latest_synced_cs_ids;
+use crate::common::get_mover_and_reverse_mover;
 use crate::tail::tail_once;
 
 const ARG_CHANGESET: &str = "changeset";
@@ -65,7 +66,7 @@ async fn subcommand_tail<'a>(
     let logger = matches.logger();
     let ctx = CoreContext::new_with_logger(fb, logger.clone());
 
-    let hyper_repo: BlobRepo = args::open_repo(ctx.fb, ctx.logger(), &matches).await?;
+    let hyper_repo: BlobRepo = args::open_repo(ctx.fb, ctx.logger(), matches).await?;
 
     let (source_bookmark, hyper_repo_bookmark) = parse_bookmarks(matches)?;
 
@@ -80,7 +81,7 @@ async fn subcommand_tail<'a>(
     // config should be present. If it's present then something might be wrong, and we
     // might be accidentally syncing data to a prod repo.
     let config_store = matches.config_store();
-    let (_, config) = args::get_config(&config_store, matches)?;
+    let (_, config) = args::get_config(config_store, matches)?;
     if config.backup_repo_config.is_some() {
         return Err(anyhow!(
             "hyper repo unexpectedly has a backup repo. \
@@ -117,14 +118,10 @@ async fn subcommand_add_source_repo<'a>(
     let source_repo_name = sub_m
         .value_of(ARG_SOURCE_REPO)
         .ok_or_else(|| anyhow!("source repo is not set"))?;
-    let source_repo = args::open_repo_with_repo_name(
-        ctx.fb,
-        &ctx.logger(),
-        source_repo_name.to_string(),
-        matches,
-    );
+    let source_repo =
+        args::open_repo_with_repo_name(ctx.fb, ctx.logger(), source_repo_name.to_string(), matches);
 
-    let hyper_repo = args::open_repo(ctx.fb, ctx.logger(), &matches);
+    let hyper_repo = args::open_repo(ctx.fb, ctx.logger(), matches);
 
     let (source_repo, hyper_repo): (BlobRepo, BlobRepo) = try_join(source_repo, hyper_repo).await?;
 
@@ -155,7 +152,7 @@ async fn subcommand_validate<'a>(
     let logger = matches.logger();
     let ctx = CoreContext::new_with_logger(fb, logger.clone());
 
-    let hyper_repo: BlobRepo = args::open_repo(ctx.fb, ctx.logger(), &matches).await?;
+    let hyper_repo: BlobRepo = args::open_repo(ctx.fb, ctx.logger(), matches).await?;
 
     let hyper_cs_id = sub_m
         .value_of(ARG_CHANGESET)
@@ -188,10 +185,10 @@ async fn subcommand_validate<'a>(
 async fn run<'a>(fb: FacebookInit, matches: &'a MononokeMatches<'_>) -> Result<(), Error> {
     match matches.subcommand() {
         (SUBCOMMAND_ADD_SOURCE_REPO, Some(sub_m)) => {
-            subcommand_add_source_repo(fb, &matches, &sub_m).await
+            subcommand_add_source_repo(fb, matches, sub_m).await
         }
-        (SUBCOMMAND_TAIL, Some(sub_m)) => subcommand_tail(fb, &matches, &sub_m).await,
-        (SUBCOMMAND_VALIDATE, Some(sub_m)) => subcommand_validate(fb, &matches, &sub_m).await,
+        (SUBCOMMAND_TAIL, Some(sub_m)) => subcommand_tail(fb, matches, sub_m).await,
+        (SUBCOMMAND_VALIDATE, Some(sub_m)) => subcommand_validate(fb, matches, sub_m).await,
         (subcommand, _) => Err(anyhow!("unknown subcommand {}!", subcommand)),
     }
 }

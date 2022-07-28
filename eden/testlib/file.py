@@ -4,10 +4,18 @@
 # GNU General Public License version 2.
 
 # pyre-strict
+from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, IO, Union
+from typing import Any, IO, List, TYPE_CHECKING, Union
+
+from .errors import MissingCommitError
+
+if TYPE_CHECKING:
+    from .commit import Commit
+    from .repo import Repo
+    from .types import PathLike
 
 
 def create_dirs(root: str, path: str) -> None:
@@ -15,6 +23,7 @@ def create_dirs(root: str, path: str) -> None:
     full_path.parent.mkdir(parents=True, exist_ok=True)
 
 
+# Represents a file in the working copy.
 class File:
     root: str
     path: str
@@ -35,19 +44,24 @@ class File:
     def abspath(self) -> str:
         return self._abspath
 
+    def basename(self) -> str:
+        return Path(self.path).name
+
     # pyre-ignore[3] - pyre doesn't like that this can return str and bytes
     def open(self, mode: str = "r") -> IO[Any]:
-        if "w" in mode:
+        if "w" in mode or "a" in mode:
             # Create the directories if they don't already exist.
             create_dirs(self.root, self.path)
 
         return open(self._abspath, mode=mode)
 
     def content(self) -> str:
-        return self.open().read()
+        with self.open() as f:
+            return f.read()
 
     def binary(self) -> bytes:
-        return self.open("rb").read()
+        with self.open("rb") as f:
+            return f.read()
 
     def remove(self) -> None:
         os.remove(self._abspath)
@@ -78,3 +92,26 @@ class File:
 
     def exists(self) -> bool:
         return os.path.lexists(self._abspath)
+
+
+# Represents a file at a particular commit in the repository.
+class ScmFile:
+    repo: Repo
+    path: str
+    commit: Commit
+
+    def __init__(self, commit: Commit, path: PathLike) -> None:
+        self.repo = commit.repo
+        self.path = str(path)
+        self.commit = commit
+
+    def history(self) -> List[Commit]:
+        output = self.repo.hg.log(
+            self.path, follow=True, rev=self.commit, template="{node}\n"
+        ).stdout
+        lines = output.split("\n")[:-1]
+        if len(lines) == 0:
+            raise MissingCommitError(f"no history for {self.path} @ {self.commit}")
+        from .commit import Commit
+
+        return [Commit(self.repo, hash) for hash in lines]

@@ -9,19 +9,27 @@
 //! [`EdenFsClient`]).
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::anyhow;
+use anyhow::Context;
 
 use edenfs_config::EdenFsConfig;
-use edenfs_error::{EdenFsError, Result, ResultExt};
+use edenfs_error::EdenFsError;
+use edenfs_error::Result;
+use edenfs_error::ResultExt;
+#[cfg(windows)]
+use edenfs_utils::strip_unc_prefix;
 use fbthrift_socket::SocketTransport;
-use thrift_types::edenfs::{client::EdenService, types::DaemonInfo};
+use thrift_types::edenfs::client::EdenService;
+use thrift_types::edenfs::types::DaemonInfo;
 use thrift_types::fb303_core::types::fb303_status;
 use thrift_types::fbthrift::binary_protocol::BinaryProtocol;
 use tokio_uds_compat::UnixStream;
-use tracing::{event, Level};
+use tracing::event;
+use tracing::Level;
 
 use crate::utils::get_executable;
 use crate::EdenFsClient;
@@ -58,6 +66,22 @@ impl EdenFsInstance {
             &self.etc_eden_dir,
             self.home_dir.as_ref().map(|x| x.as_ref()),
         )
+    }
+
+    pub fn get_user_home_dir(&self) -> Option<&PathBuf> {
+        self.home_dir.as_ref()
+    }
+
+    pub fn should_prefetch_profiles(&self) -> bool {
+        self.get_config()
+            .ok()
+            .map_or(false, |config| config.prefetch_profiles.prefetching_enabled)
+    }
+
+    pub fn should_prefetch_predictive_profiles(&self) -> bool {
+        self.get_config().ok().map_or(false, |config| {
+            config.prefetch_profiles.predictive_prefetching_enabled
+        })
     }
 
     async fn _connect(&self, socket_path: &PathBuf) -> Result<EdenFsClient> {
@@ -182,6 +206,32 @@ impl EdenFsInstance {
 
     pub fn storage_dir(&self) -> PathBuf {
         self.config_dir.join("storage")
+    }
+
+    pub fn client_name(&self, path: &Path) -> Result<String> {
+        // Resolve symlinks and get absolute path
+        let path = path.canonicalize().from_err()?;
+        #[cfg(windows)]
+        let path = strip_unc_prefix(path);
+
+        // Find `checkout_path` that `path` is a sub path of
+        let all_checkouts = self.get_configured_mounts_map()?;
+        if let Some(item) = all_checkouts
+            .iter()
+            .find(|&(checkout_path, _)| path.starts_with(checkout_path))
+        {
+            let (_, checkout_name) = item;
+            Ok(checkout_name.clone())
+        } else {
+            Err(EdenFsError::Other(anyhow!(
+                "Checkout path {} is not handled by EdenFS",
+                path.display()
+            )))
+        }
+    }
+
+    pub fn config_directory(&self, client_name: &str) -> PathBuf {
+        self.clients_dir().join(client_name)
     }
 }
 

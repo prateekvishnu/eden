@@ -6,22 +6,30 @@
  */
 
 use crate::run_post_resolve_action;
-use crate::{
-    UnbundleBookmarkOnlyPushRebaseResponse, UnbundleInfinitePushResponse,
-    UnbundlePushRebaseResponse, UnbundlePushResponse, UnbundleResponse,
-};
+use crate::UnbundleBookmarkOnlyPushRebaseResponse;
+use crate::UnbundleInfinitePushResponse;
+use crate::UnbundlePushRebaseResponse;
+use crate::UnbundlePushResponse;
+use crate::UnbundleResponse;
 
 use crate::hook_running::HookRejectionRemapper;
 use crate::resolver::HgHookRejection;
+use crate::BundleResolverError;
 use crate::InfiniteBookmarkPush;
 use crate::PlainBookmarkPush;
+use crate::PostResolveAction;
+use crate::PostResolveBookmarkOnlyPushRebase;
+use crate::PostResolveInfinitePush;
+use crate::PostResolvePush;
+use crate::PostResolvePushRebase;
 use crate::PushrebaseBookmarkSpec;
-use crate::{
-    BundleResolverError, PostResolveAction, PostResolveBookmarkOnlyPushRebase,
-    PostResolveInfinitePush, PostResolvePush, PostResolvePushRebase, UploadedBonsais,
-};
-use anyhow::{format_err, Context, Error};
-use backsyncer::{backsync_latest, BacksyncLimit, TargetRepoDbs};
+use crate::UploadedBonsais;
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
+use backsyncer::backsync_latest;
+use backsyncer::BacksyncLimit;
+use backsyncer::TargetRepoDbs;
 use blobrepo::BlobRepo;
 use blobstore::Loadable;
 use bookmarks::BookmarkName;
@@ -30,21 +38,31 @@ use cloned::cloned;
 use context::CoreContext;
 use cross_repo_sync::create_commit_syncers;
 use cross_repo_sync::types::Target;
-use cross_repo_sync::{CandidateSelectionHint, CommitSyncContext, CommitSyncOutcome, CommitSyncer};
-use futures::{
-    future::{try_join_all, FutureExt},
-    try_join,
-};
-use hooks::{CrossRepoPushSource, HookRejection};
+use cross_repo_sync::CandidateSelectionHint;
+use cross_repo_sync::CommitSyncContext;
+use cross_repo_sync::CommitSyncOutcome;
+use cross_repo_sync::CommitSyncer;
+use futures::future::try_join_all;
+use futures::future::FutureExt;
+use futures::try_join;
+use hooks::CrossRepoPushSource;
+use hooks::HookRejection;
 use live_commit_sync_config::LiveCommitSyncConfig;
 use mercurial_derived_data::DeriveHgChangeset;
-use mononoke_repo::MononokeRepo;
-use mononoke_types::{BonsaiChangeset, ChangesetId};
+use metaconfig_types::RepoConfigRef;
+use mononoke_api::Repo;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::ChangesetId;
 use pushrebase::PushrebaseChangesetPair;
+use reachabilityindex::LeastCommonAncestorsHint;
+use skiplist::SkiplistIndexArc;
 use slog::debug;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use synced_commit_mapping::{SqlSyncedCommitMapping, SyncedCommitMapping};
+use synced_commit_mapping::SqlSyncedCommitMapping;
+use synced_commit_mapping::SyncedCommitMapping;
 use topo_sort::sort_topological;
 
 /// An auxillary struct, which contains nearly
@@ -54,7 +72,7 @@ use topo_sort::sort_topological;
 /// request.
 #[derive(Clone)]
 pub struct PushRedirectorArgs {
-    target_repo: MononokeRepo,
+    target_repo: Arc<Repo>,
     source_blobrepo: BlobRepo,
     synced_commit_mapping: SqlSyncedCommitMapping,
     target_repo_dbs: TargetRepoDbs,
@@ -62,7 +80,7 @@ pub struct PushRedirectorArgs {
 
 impl PushRedirectorArgs {
     pub fn new(
-        target_repo: MononokeRepo,
+        target_repo: Arc<Repo>,
         source_blobrepo: BlobRepo,
         synced_commit_mapping: SqlSyncedCommitMapping,
         target_repo_dbs: TargetRepoDbs,
@@ -94,7 +112,7 @@ impl PushRedirectorArgs {
         } = self;
 
         let small_repo = source_blobrepo;
-        let large_repo = target_repo.blobrepo().clone();
+        let large_repo = target_repo.blob_repo().clone();
         let mapping: Arc<dyn SyncedCommitMapping> = Arc::new(synced_commit_mapping);
         let syncers = create_commit_syncers(
             ctx,
@@ -124,7 +142,7 @@ impl PushRedirectorArgs {
 /// to be presented as if the pushes were processed by the small repo
 pub struct PushRedirector {
     // target (large) repo to sync into
-    pub repo: MononokeRepo,
+    pub repo: Arc<Repo>,
     // `CommitSyncer` struct to do push redirecion
     pub small_to_large_commit_syncer: CommitSyncer<Arc<dyn SyncedCommitMapping>>,
     // `CommitSyncer` struct for the backsyncer
@@ -147,31 +165,28 @@ impl PushRedirector {
         action: PostResolveAction,
     ) -> Result<UnbundleResponse, BundleResolverError> {
         let large_repo = self.repo.inner_repo();
-        let bookmark_attrs = self.repo.bookmark_attrs();
-        let lca_hint = self.repo.lca_hint();
-        let infinitepush_params = self.repo.infinitepush().clone();
-        let puhsrebase_params = self.repo.pushrebase_params().clone();
-        let push_params = self.repo.push_params().clone();
+        let lca_hint: Arc<dyn LeastCommonAncestorsHint> = large_repo.skiplist_index_arc();
+        let infinitepush_params = large_repo.repo_config().infinitepush.clone();
+        let pushrebase_params = large_repo.repo_config().pushrebase.clone();
+        let push_params = large_repo.repo_config().push.clone();
 
         let large_repo_action = self
-            .convert_post_resolve_action(&ctx, action)
+            .convert_post_resolve_action(ctx, action)
             .await
             .map_err(BundleResolverError::from)?;
         let large_repo_response = run_post_resolve_action(
-            &ctx,
+            ctx,
             large_repo,
-            &bookmark_attrs,
             &lca_hint,
             &infinitepush_params,
-            &puhsrebase_params,
+            &pushrebase_params,
             &push_params,
             self.repo.hook_manager().as_ref(),
-            self.repo.readonly_fetcher(),
             large_repo_action,
             CrossRepoPushSource::PushRedirected,
         )
         .await?;
-        self.convert_unbundle_response(&ctx, large_repo_response)
+        self.convert_unbundle_response(ctx, large_repo_response)
             .await
             .map_err(BundleResolverError::from)
     }
@@ -273,7 +288,6 @@ impl PushRedirector {
             changegroup_id,
             bookmark_pushes,
             mutations: _,
-            maybe_raw_bundle2_id,
             maybe_pushvars,
             non_fast_forward_policy,
             uploaded_bonsais,
@@ -301,10 +315,9 @@ impl PushRedirector {
             changegroup_id,
             bookmark_pushes,
             mutations: Default::default(),
-            maybe_raw_bundle2_id,
             maybe_pushvars,
             non_fast_forward_policy,
-            uploaded_bonsais: uploaded_bonsais.values().cloned().map(|bcs| bcs).collect(),
+            uploaded_bonsais: uploaded_bonsais.values().cloned().collect(),
             uploaded_hg_changeset_ids: Default::default(),
             hook_rejection_remapper,
         })
@@ -327,7 +340,6 @@ impl PushRedirector {
         let PostResolvePushRebase {
             bookmark_push_part_id,
             bookmark_spec,
-            maybe_hg_replay_data,
             maybe_pushvars,
             commonheads,
             uploaded_bonsais,
@@ -349,50 +361,19 @@ impl PushRedirector {
             .convert_pushrebase_bookmark_spec(ctx, bookmark_spec)
             .await?;
 
-        let source_repo = self.small_to_large_commit_syncer.get_source_repo().clone();
-        // Pushrebase happens in the large repo, but we'd like to have hg replay data relative
-        // to the small repo. In order to do that we need to need to make sure we are using
-        // small hg changeset ids for the timestamps instead of large hg changeset ids.
-        // In order to do that let's convert large cs id to small cs id and create hg changeset
-        // for it.
-
         let large_to_small = uploaded_bonsais
             .iter()
             .map(|(small_cs_id, large_bcs)| (large_bcs.get_changeset_id(), *small_cs_id))
             .collect::<HashMap<_, _>>();
-
-        let maybe_hg_replay_data = maybe_hg_replay_data.map({
-            cloned!(ctx);
-            |mut hg_replay_data| {
-                hg_replay_data.override_convertor(Arc::new({
-                    cloned!(large_to_small);
-                    move |large_cs_id| {
-                        cloned!(ctx, source_repo, large_to_small);
-                        async move {
-                            let small_cs_id = large_to_small.get(&large_cs_id).ok_or_else(|| {
-                                format_err!("{} doesn't remap in small repo", large_cs_id)
-                            });
-                            match small_cs_id {
-                                Err(err) => Err(err),
-                                Ok(id) => source_repo.derive_hg_changeset(&ctx, *id).await,
-                            }
-                        }
-                        .boxed()
-                    }
-                }));
-                hg_replay_data
-            }
-        });
 
         let hook_rejection_remapper = self.make_hook_rejection_remapper(ctx, large_to_small);
 
         let action = PostResolvePushRebase {
             bookmark_push_part_id,
             bookmark_spec,
-            maybe_hg_replay_data,
             maybe_pushvars,
             commonheads,
-            uploaded_bonsais: uploaded_bonsais.values().cloned().map(|bcs| bcs).collect(),
+            uploaded_bonsais: uploaded_bonsais.values().cloned().collect(),
             hook_rejection_remapper,
         };
 
@@ -411,7 +392,6 @@ impl PushRedirector {
             changegroup_id,
             maybe_bookmark_push,
             mutations: _,
-            maybe_raw_bundle2_id,
             uploaded_bonsais,
             uploaded_hg_changeset_ids: _,
         } = orig;
@@ -431,8 +411,7 @@ impl PushRedirector {
             changegroup_id,
             maybe_bookmark_push,
             mutations: Default::default(),
-            maybe_raw_bundle2_id,
-            uploaded_bonsais: uploaded_bonsais.values().cloned().map(|bcs| bcs).collect(),
+            uploaded_bonsais: uploaded_bonsais.values().cloned().collect(),
             uploaded_hg_changeset_ids: Default::default(),
         })
     }
@@ -446,7 +425,6 @@ impl PushRedirector {
     ) -> Result<PostResolveBookmarkOnlyPushRebase, Error> {
         let PostResolveBookmarkOnlyPushRebase {
             bookmark_push,
-            maybe_raw_bundle2_id,
             maybe_pushvars,
             non_fast_forward_policy,
             hook_rejection_remapper: _,
@@ -461,7 +439,6 @@ impl PushRedirector {
 
         Ok(PostResolveBookmarkOnlyPushRebase {
             bookmark_push,
-            maybe_raw_bundle2_id,
             maybe_pushvars,
             non_fast_forward_policy,
             hook_rejection_remapper,
@@ -523,6 +500,7 @@ impl PushRedirector {
             self.large_to_small_commit_syncer.clone(),
             self.target_repo_dbs.clone(),
             BacksyncLimit::NoLimit,
+            Arc::new(AtomicBool::new(false)),
         )
         .await?;
 
@@ -578,6 +556,7 @@ impl PushRedirector {
             self.large_to_small_commit_syncer.clone(),
             self.target_repo_dbs.clone(),
             BacksyncLimit::NoLimit,
+            Arc::new(AtomicBool::new(false)),
         )
         .await?;
 
@@ -600,6 +579,7 @@ impl PushRedirector {
             self.large_to_small_commit_syncer.clone(),
             self.target_repo_dbs.clone(),
             BacksyncLimit::NoLimit,
+            Arc::new(AtomicBool::new(false)),
         )
         .await?;
 
@@ -872,7 +852,7 @@ impl PushRedirector {
             Some(bookmark) => CandidateSelectionHint::OnlyOrAncestorOfBookmark(
                 Target(bookmark.clone()),
                 Target(self.small_to_large_commit_syncer.get_target_repo().clone()),
-                Target(self.repo.lca_hint().clone()),
+                Target(self.repo.inner_repo().skiplist_index_arc()),
             ),
             None => CandidateSelectionHint::Only,
         };

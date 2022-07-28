@@ -10,25 +10,35 @@ mod mem;
 mod shared_traits;
 mod sql;
 
-pub use self::cache::{CacheHandlers, CachedIdMap};
-pub use self::mem::{ConcurrentMemIdMap, MemIdMap};
-pub use self::shared_traits::{cs_id_from_vertex_name, vertex_name_from_cs_id, IdMapWrapper};
+pub use self::cache::CacheHandlers;
+pub use self::cache::CachedIdMap;
+pub use self::mem::ConcurrentMemIdMap;
+pub use self::mem::MemIdMap;
+pub use self::shared_traits::cs_id_from_vertex_name;
+pub use self::shared_traits::vertex_name_from_cs_id;
+pub use self::shared_traits::IdMapWrapper;
 pub use self::sql::SqlIdMap;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{bail, format_err, Context, Result};
+use anyhow::bail;
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Result;
 use async_trait::async_trait;
 
 use sql_ext::replication::ReplicaLagMonitor;
 use sql_ext::SqlConnections;
 
 use context::CoreContext;
-use mononoke_types::{ChangesetId, RepositoryId};
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
 
 use crate::types::IdMapVersion;
-use crate::{DagId, DagIdSet, InProcessIdDag};
+use crate::DagId;
+use crate::DagIdSet;
+use crate::InProcessIdDag;
 
 #[async_trait]
 #[auto_impl::auto_impl(&, Arc)]
@@ -213,7 +223,7 @@ impl IdMap for OverlayIdMap {
         }
         let to_get_shared = cs_ids
             .into_iter()
-            .filter(|cs_id| !result.contains_key(&cs_id))
+            .filter(|cs_id| !result.contains_key(cs_id))
             .collect();
         let from_shared = self.shared.find_many_dag_ids(ctx, to_get_shared).await?;
         for (cs, v) in from_shared {
@@ -245,7 +255,7 @@ impl IdMap for OverlayIdMap {
         }
         let to_get_shared = cs_ids
             .into_iter()
-            .filter(|cs_id| !result.contains_key(&cs_id))
+            .filter(|cs_id| !result.contains_key(cs_id))
             .collect();
         let from_shared = self
             .shared
@@ -360,9 +370,11 @@ mod tests {
 
     use fbinit::FacebookInit;
 
-    use mononoke_types_mocks::changesetid::{
-        AS_CSID, FOURS_CSID, ONES_CSID, THREES_CSID, TWOS_CSID,
-    };
+    use mononoke_types_mocks::changesetid::AS_CSID;
+    use mononoke_types_mocks::changesetid::FOURS_CSID;
+    use mononoke_types_mocks::changesetid::ONES_CSID;
+    use mononoke_types_mocks::changesetid::THREES_CSID;
+    use mononoke_types_mocks::changesetid::TWOS_CSID;
 
     fn cutoff(n: u64) -> DagIdSet {
         if n == 0 {

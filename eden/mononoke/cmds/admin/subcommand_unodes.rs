@@ -7,24 +7,33 @@
 
 use crate::error::SubcommandError;
 
-use anyhow::{bail, Error};
+use anyhow::bail;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use blobstore::Loadable;
-use clap_old::{App, Arg, ArgMatches, SubCommand};
-use cmdlib::{
-    args::{self, MononokeMatches},
-    helpers,
-};
+use clap_old::App;
+use clap_old::Arg;
+use clap_old::ArgMatches;
+use clap_old::SubCommand;
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers;
 use context::CoreContext;
 use derived_data::BonsaiDerived;
 use fbinit::FacebookInit;
-use futures::{compat::Stream01CompatExt, StreamExt, TryStreamExt};
-use manifest::{Entry, ManifestOps, PathOrPrefix};
+use futures::compat::Stream01CompatExt;
+use futures::StreamExt;
+use futures::TryStreamExt;
+use manifest::Entry;
+use manifest::ManifestOps;
+use manifest::PathOrPrefix;
 use mercurial_derived_data::DeriveHgChangeset;
 
-use mononoke_types::{ChangesetId, MPath};
+use mononoke_types::ChangesetId;
+use mononoke_types::MPath;
 use revset::AncestorsNodeStream;
-use slog::{info, Logger};
+use slog::info;
+use slog::Logger;
 use std::collections::BTreeSet;
 use unodes::RootUnodeManifestId;
 
@@ -80,7 +89,7 @@ pub async fn subcommand_unodes<'a>(
     matches: &'a MononokeMatches<'_>,
     sub_matches: &'a ArgMatches<'_>,
 ) -> Result<(), SubcommandError> {
-    let repo: BlobRepo = args::open_repo(fb, &logger, &matches).await?;
+    let repo: BlobRepo = args::open_repo(fb, &logger, matches).await?;
     let ctx = CoreContext::new_with_logger(fb, logger);
 
     let res = match sub_matches.subcommand() {
@@ -148,7 +157,7 @@ async fn subcommand_verify(
     AncestorsNodeStream::new(ctx.clone(), &repo.get_changeset_fetcher(), csid)
         .compat()
         .take(limit as usize)
-        .try_for_each(|csid| single_verify(&ctx, &repo, csid))
+        .try_for_each(|csid| single_verify(ctx, &repo, csid))
         .await
 }
 

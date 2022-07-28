@@ -7,20 +7,32 @@
 
 //! Root manifest, tree nodes
 
-use anyhow::{bail, ensure, Context, Error, Result};
+use anyhow::bail;
+use anyhow::ensure;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
-use blobstore::{Blobstore, Loadable, LoadableError};
+use blobstore::Blobstore;
+use blobstore::Loadable;
+use blobstore::LoadableError;
 use context::CoreContext;
-use manifest::{Entry, Manifest};
+use manifest::Entry;
+use manifest::Manifest;
 use sorted_vector_map::SortedVectorMap;
 use std::str;
 
 use super::errors::ErrorKind;
-use crate::{
-    nodehash::{HgNodeHash, NULL_HASH},
-    FileType, HgBlob, HgFileNodeId, HgManifestEnvelope, HgManifestId, HgParents, MPathElement,
-    Type,
-};
+use crate::nodehash::HgNodeHash;
+use crate::nodehash::NULL_HASH;
+use crate::FileType;
+use crate::HgBlob;
+use crate::HgFileNodeId;
+use crate::HgManifestEnvelope;
+use crate::HgManifestId;
+use crate::HgParents;
+use crate::MPathElement;
+use crate::Type;
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ManifestContent {
@@ -256,7 +268,7 @@ fn parse_hg_entry(data: &[u8]) -> Result<Entry<HgManifestId, (FileType, HgFileNo
 
     let (hash, flags) = data.split_at(40);
     let hash = str::from_utf8(hash)
-        .map_err(|err| Error::from(err))
+        .map_err(Error::from)
         .and_then(|hash| hash.parse::<HgNodeHash>())
         .with_context(|| format!("malformed hash: {:?}", hash))?;
     ensure!(flags.len() <= 1, "More than 1 flag: {:?}", flags);

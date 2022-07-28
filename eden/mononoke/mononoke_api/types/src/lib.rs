@@ -6,11 +6,13 @@
  */
 
 use acl_regions::AclRegions;
-use blobrepo::{AsBlobRepo, BlobRepo};
+use blobrepo::AsBlobRepo;
+use blobrepo::BlobRepo;
 use bonsai_git_mapping::BonsaiGitMapping;
 use bonsai_globalrev_mapping::BonsaiGlobalrevMapping;
 use bonsai_hg_mapping::BonsaiHgMapping;
-use bookmarks::{BookmarkUpdateLog, Bookmarks};
+use bookmarks::BookmarkUpdateLog;
+use bookmarks::Bookmarks;
 use changeset_fetcher::ChangesetFetcher;
 use changesets::Changesets;
 use ephemeral_blobstore::RepoEphemeralStore;
@@ -21,12 +23,16 @@ use mutable_renames::MutableRenames;
 use phases::Phases;
 use pushrebase_mutation_mapping::PushrebaseMutationMapping;
 use repo_blobstore::RepoBlobstore;
+use repo_bookmark_attrs::RepoBookmarkAttrs;
 use repo_cross_repo::RepoCrossRepo;
 use repo_derived_data::RepoDerivedData;
 use repo_identity::RepoIdentity;
+use repo_lock::RepoLock;
 use repo_permission_checker::RepoPermissionChecker;
+use repo_sparse_profiles::RepoSparseProfiles;
 use segmented_changelog_types::SegmentedChangelog;
 use skiplist::SkiplistIndex;
+use streaming_clone::StreamingClone;
 
 // Eventually everything inside Repo should really be here
 // The fields of BlobRepo that are not used in e.g. LFS server should also be moved here
@@ -36,6 +42,7 @@ use skiplist::SkiplistIndex;
 pub struct InnerRepo {
     #[delegate(
         RepoBlobstore,
+        RepoBookmarkAttrs,
         RepoDerivedData,
         RepoIdentity,
         dyn BonsaiGitMapping,
@@ -50,6 +57,7 @@ pub struct InnerRepo {
         dyn HgMutationStore,
         dyn MutableCounters,
         dyn RepoPermissionChecker,
+        dyn RepoLock,
     )]
     pub blob_repo: BlobRepo,
 
@@ -73,6 +81,12 @@ pub struct InnerRepo {
 
     #[facet]
     pub acl_regions: dyn AclRegions,
+
+    #[facet]
+    pub sparse_profiles: RepoSparseProfiles,
+
+    #[facet]
+    pub streaming_clone: StreamingClone,
 }
 
 impl AsBlobRepo for InnerRepo {

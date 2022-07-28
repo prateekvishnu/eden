@@ -10,12 +10,13 @@ license = "GPLv2+"
 [dependencies]
 anyhow = "1.0.56"
 arg_extensions = { version = "0.1.0", path = "../extensions" }
+base_app = { version = "0.1.0", path = "../base_app" }
 blobstore = { version = "0.1.0", path = "../../blobstore" }
 blobstore_factory = { version = "0.1.0", path = "../../blobstore/factory" }
 bonsai_hg_mapping = { version = "0.1.0", path = "../../bonsai_hg_mapping" }
 bookmarks = { version = "0.1.0", path = "../../bookmarks" }
 cached_config = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
-clap = { version = "=3.1.8", features = ["derive", "regex", "unicode", "wrap_help"] }
+clap = { version = "3.2.10", features = ["derive", "regex", "unicode", "wrap_help"] }
 cmdlib_caching = { version = "0.1.0", path = "../caching" }
 cmdlib_logging = { version = "0.1.0", path = "../log" }
 context = { version = "0.1.0", path = "../../server/context" }
@@ -24,13 +25,13 @@ environment = { version = "0.1.0", path = "../environment" }
 facet = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 fbinit = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 futures = { version = "0.3.13", features = ["async-await", "compat"] }
-heck = "0.3.1"
 megarepo_config = { version = "0.1.0", path = "../../megarepo_api/megarepo_config" }
 mercurial_types = { version = "0.1.0", path = "../../mercurial/types" }
 metaconfig_parser = { version = "0.1.0", path = "../../metaconfig/parser" }
 metaconfig_types = { version = "0.1.0", path = "../../metaconfig/types" }
 mononoke_types = { version = "0.1.0", path = "../../mononoke_types" }
 observability = { version = "0.1.0", path = "../../observability" }
+permission_checker = { version = "0.1.0", path = "../../permission_checker" }
 prefixblob = { version = "0.1.0", path = "../../blobstore/prefixblob" }
 redactedblobstore = { version = "0.1.0", path = "../../blobstore/redactedblobstore" }
 rendezvous = { version = "0.1.0", path = "../../common/rendezvous" }

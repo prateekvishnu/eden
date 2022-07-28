@@ -7,17 +7,28 @@
 
 use std::sync::Arc;
 
-use anyhow::{format_err, Error, Result};
-use clap_old::{App, Arg, ArgMatches, SubCommand};
+use anyhow::format_err;
+use anyhow::Error;
+use anyhow::Result;
+use clap_old::App;
+use clap_old::Arg;
+use clap_old::ArgMatches;
+use clap_old::SubCommand;
 use fbinit::FacebookInit;
 
 use blobstore::BlobstoreUnlinkOps;
-use blobstore_factory::{make_sql_blobstore, BlobstoreOptions, ReadOnlyStorage};
+use blobstore_factory::make_sql_blobstore;
+use blobstore_factory::BlobstoreOptions;
+use blobstore_factory::ReadOnlyStorage;
 use cached_config::ConfigStore;
-use cmdlib::args::{self, MononokeMatches};
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
 use context::CoreContext;
-use metaconfig_types::{BlobConfig, BlobstoreId, StorageConfig};
-use slog::{info, Logger};
+use metaconfig_types::BlobConfig;
+use metaconfig_types::BlobstoreId;
+use metaconfig_types::StorageConfig;
+use slog::info;
+use slog::Logger;
 
 use crate::error::SubcommandError;
 
@@ -85,7 +96,7 @@ async fn get_blobstore(
         fb,
         blobconfig,
         readonly_storage,
-        &blobstore_options,
+        blobstore_options,
         config_store,
     )
     .await?;
@@ -100,7 +111,7 @@ pub async fn subcommand_blobstore_unlink<'a>(
     sub_m: &'a ArgMatches<'a>,
 ) -> Result<(), SubcommandError> {
     let config_store = matches.config_store();
-    let (_, config) = args::get_config(config_store, &matches)?;
+    let (_, config) = args::get_config(config_store, matches)?;
     let storage_config = config.storage_config;
     let inner_blobstore_id = args::get_u64_opt(&sub_m, "inner-blobstore-id");
     let blobstore_options = matches.blobstore_options();

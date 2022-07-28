@@ -14,20 +14,27 @@ from typing import Dict, Generator, Optional
 
 from eden.test_support.temporary_directory import TempFileManager
 
+from .generators import RepoGenerator
+
 
 class GlobalTestState(threading.local):
     temp_mgr: TempFileManager
+    repo_gen: RepoGenerator
     test_tmp: Path
     env: Dict[str, str]
+    debug: bool
 
     def __init__(self) -> None:
         # These are needed to satisfy pyre, but should never be used.
         self.temp_mgr = TempFileManager()
+        self.repo_gen = RepoGenerator()
         self.test_tmp = Path("")
         self.env = {}
+        self.debug = os.environ.get("HGTEST_DEBUG") is not None
 
     def setup(self) -> None:
         self.temp_mgr = TempFileManager()
+        self.repo_gen = RepoGenerator()
         self.test_tmp = self.temp_mgr.make_temp_dir()
 
         hgrc_path = os.path.join(new_dir(), "global_hgrc")
@@ -38,7 +45,8 @@ class GlobalTestState(threading.local):
         }
 
     def cleanup(self) -> None:
-        self.temp_mgr.cleanup()
+        if not self.debug:
+            self.temp_mgr.cleanup()
 
 
 # Global state makes it easier to hand common objects around, like the temp
@@ -47,9 +55,11 @@ class GlobalTestState(threading.local):
 test_globals = GlobalTestState()
 
 
-def new_dir() -> Path:
-    temp = test_globals.temp_mgr
-    return temp.make_temp_dir()
+def new_dir(label: Optional[str] = None) -> Path:
+    temp_dir = test_globals.temp_mgr.make_temp_dir()
+    if label and test_globals.debug:
+        print(f"{label}: {temp_dir}")
+    return temp_dir
 
 
 def new_file() -> Path:

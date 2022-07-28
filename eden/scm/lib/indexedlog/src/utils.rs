@@ -1,20 +1,20 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This software may be used and distributed according to the terms of the
- * GNU General Public License version 2.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 use std::cell::RefCell;
+use std::fs;
 use std::fs::File;
-use std::fs::{self};
 use std::hash::Hasher;
+use std::io;
 use std::io::Read;
 use std::io::Write;
-use std::io::{self};
 use std::path::Path;
+use std::sync::atomic;
 use std::sync::atomic::AtomicI64;
-use std::sync::atomic::{self};
 
 use memmap::MmapOptions;
 use minibytes::Bytes;

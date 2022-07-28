@@ -8,92 +8,59 @@
 use std::collections::HashSet;
 use std::io::Write;
 
-use anyhow::{bail, format_err, Error};
-use chrono::{naive::NaiveDateTime, DateTime};
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
-use futures::{future, stream};
-use futures_util::stream::StreamExt;
+use anyhow::Result;
+use chrono::naive::NaiveDateTime;
+use chrono::DateTime;
 use source_control::types as thrift;
 
-use crate::args::commit_id::{
-    add_multiple_commit_id_args, add_scheme_args, get_commit_ids, get_request_schemes, get_schemes,
-    resolve_commit_ids,
-};
-use crate::args::path::{add_optional_path_args, get_path};
-use crate::args::repo::{add_repo_args, get_repo_specifier};
-use crate::connection::Connection;
-use crate::lib::commit::{
-    render_commit_info, render_commit_summary, CommitInfo as CommitInfoOutput,
-};
-use crate::render::{Render, RenderStream};
+use crate::args::commit_id::resolve_commit_ids;
+use crate::args::commit_id::CommitIdsArgs;
+use crate::args::commit_id::SchemeArgs;
+use crate::args::repo::RepoArgs;
+use crate::lib::commit::render_commit_info;
+use crate::lib::commit::render_commit_summary;
+use crate::lib::commit::CommitInfo as CommitInfoOutput;
+use crate::render::Render;
+use crate::ScscApp;
 
-pub(super) const NAME: &str = "log";
-
-const ARG_LIMIT: &str = "LIMIT";
-const ARG_SKIP: &str = "SKIP";
-const ARG_AFTER: &str = "AFTER";
-const ARG_BEFORE: &str = "BEFORE";
-const ARG_VERBOSE: &str = "VERBOSE";
-const ARG_HISTORY_ACROSS_DELETIONS: &str = "HISTORY_ACROSS_DELETIONS";
-
-const ARG_LIMIT_DEFAULT: &str = "10";
-
-pub(super) fn make_subcommand<'a, 'b>() -> App<'a, 'b> {
-    let cmd = SubCommand::with_name(NAME)
-        .about("Show the history of a commit or a path in a commit")
-        .long_about(concat!(
-            "Show the history of a commit or a path in a commit\n\n",
-            "If a second commit id is provided, the results are limited to descendants ",
-            "of that commit.",
-        ))
-        .setting(AppSettings::ColoredHelp);
-    let cmd = add_repo_args(cmd);
-    let cmd = add_scheme_args(cmd);
-    let cmd = add_multiple_commit_id_args(cmd);
-    let cmd = add_optional_path_args(cmd);
-    let cmd = cmd
-        .arg(
-            Arg::with_name(ARG_LIMIT)
-                .short("l")
-                .long("limit")
-                .takes_value(true)
-                .default_value(ARG_LIMIT_DEFAULT)
-                .help("Limit history length"),
-        )
-        .arg(
-            Arg::with_name(ARG_SKIP)
-                .short("s")
-                .long("skip")
-                .takes_value(true)
-                .default_value("0")
-                .help("Show history and skip first [SKIP] commits"),
-        )
-        .arg(
-            Arg::with_name(ARG_AFTER)
-                .long("after")
-                .takes_value(true)
-                .conflicts_with(ARG_SKIP)
-                .help("Show only commits after the given date or timestamp. The given time must be after 1970-01-01 00:00:00 UTC.\nFormat: YYYY-MM-DD HH:MM:SS [+HH:MM]"),
-        )
-        .arg(
-            Arg::with_name(ARG_BEFORE)
-                .long("before")
-                .takes_value(true)
-                .conflicts_with(ARG_SKIP)
-                .help("Show only commits before the given date or timestamp. The given time must be after 1970-01-01 00:00:00 UTC.\nFormat: YYYY-MM-DD HH:MM:SS [+HH:MM]"),
-        )
-        .arg(
-            Arg::with_name(ARG_VERBOSE)
-                .long("verbose")
-                .short("v")
-                .help("Show the full commit message of each commit"),
-        )
-        .arg(
-            Arg::with_name(ARG_HISTORY_ACROSS_DELETIONS)
-                .long("history-across-deletions")
-                .help("Track history across deletion i.e. if a path was deleted then added back"),
-        );
-    cmd
+/// Show the history of a commit or a path in a commit
+///
+/// If a second commit id is provided, the results are limited to descendants
+/// of that commit.
+#[derive(clap::Parser)]
+pub(super) struct CommandArgs {
+    #[clap(flatten)]
+    repo_args: RepoArgs,
+    #[clap(flatten)]
+    scheme_args: SchemeArgs,
+    #[clap(flatten)]
+    commit_ids_args: CommitIdsArgs,
+    #[clap(long, short)]
+    /// Optional path to query history
+    path: Option<String>,
+    #[clap(long, short, default_value_t = 10)]
+    /// Limit history length
+    limit: u32,
+    #[clap(long, short)]
+    /// Show history and skip first [SKIP] commits
+    skip: Option<u32>,
+    #[clap(long, conflicts_with = "skip")]
+    /// Show only commits after the given date or timestamp. The given time must be after 1970-01-01 00:00:00 UTC.
+    /// Format: YYYY-MM-DD HH:MM:SS [+HH:MM]
+    after: Option<String>,
+    #[clap(long, conflicts_with = "skip")]
+    /// Show only commits before the given date or timestamp. The given time must be after 1970-01-01 00:00:00 UTC.
+    /// Format: YYYY-MM-DD HH:MM:SS [+HH:MM]
+    before: Option<String>,
+    #[clap(long, short)]
+    /// Show the full commit message of each commit
+    verbose: bool,
+    #[clap(long)]
+    /// Track history across deletion i.e. if a path was deleted then added back
+    history_across_deletions: bool,
+    #[clap(long)]
+    /// Follow mutable overrides to the history that make it more user friendly and 'correct'
+    follow_mutable_history: bool,
 }
 
 struct LogOutput {
@@ -103,8 +70,10 @@ struct LogOutput {
 }
 
 impl Render for LogOutput {
-    fn render(&self, matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
-        let verbose = matches.is_present(ARG_VERBOSE);
+    type Args = CommandArgs;
+
+    fn render(&self, args: &Self::Args, w: &mut dyn Write) -> Result<()> {
+        let verbose = args.verbose;
         for commit in &self.history {
             if verbose {
                 render_commit_info(commit, &self.requested, &self.schemes, w)?;
@@ -117,13 +86,13 @@ impl Render for LogOutput {
         Ok(())
     }
 
-    fn render_json(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    fn render_json(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         Ok(serde_json::to_writer(w, &self.history)?)
     }
 }
 
-fn convert_to_ts(matches: &ArgMatches, name: &str) -> Result<Option<i64>, Error> {
-    if let Some(date_str) = matches.value_of(name) {
+fn convert_to_ts(date_str: Option<&str>) -> Result<Option<i64>> {
+    if let Some(date_str) = date_str {
         let ts = if let Ok(date) = DateTime::parse_from_str(date_str, "%Y-%m-%d %H:%M:%S %:z") {
             date.timestamp()
         } else if let Ok(naive) = NaiveDateTime::parse_from_str(date_str, "%Y-%m-%d %H:%M:%S") {
@@ -135,25 +104,22 @@ fn convert_to_ts(matches: &ArgMatches, name: &str) -> Result<Option<i64>, Error>
         if ts > 0 {
             return Ok(Some(ts));
         }
-        return Err(format_err!(
+        anyhow::bail!(
             "The given date or timestamp must be after 1970-01-01 00:00:00 UTC: {:?}",
             date_str
-        ));
+        )
     }
 
     Ok(None)
 }
 
-pub(super) async fn run(
-    matches: &ArgMatches<'_>,
-    connection: Connection,
-) -> Result<RenderStream, Error> {
-    let repo = get_repo_specifier(matches).expect("repository is required");
-    let commit_ids = get_commit_ids(matches)?;
+pub(super) async fn run(app: ScscApp, args: CommandArgs) -> Result<()> {
+    let repo = args.repo_args.clone().into_repo_specifier();
+    let commit_ids = args.commit_ids_args.clone().into_commit_ids();
     if commit_ids.len() > 2 || commit_ids.is_empty() {
-        bail!("expected 1 or 2 commit_ids (got {})", commit_ids.len())
+        anyhow::bail!("expected 1 or 2 commit_ids (got {})", commit_ids.len())
     }
-    let ids = resolve_commit_ids(&connection, &repo, &commit_ids).await?;
+    let ids = resolve_commit_ids(&app.connection, &repo, &commit_ids).await?;
     let id = ids[0].clone();
     let descendants_of = ids.get(1).cloned();
     let commit = thrift::CommitSpecifier {
@@ -161,20 +127,16 @@ pub(super) async fn run(
         id,
         ..Default::default()
     };
-    let path = get_path(matches);
+    let path = args.path.clone();
 
-    let limit = matches
-        .value_of(ARG_LIMIT)
-        .expect("limit is required")
-        .parse::<i32>()?;
-    let skip = matches
-        .value_of(ARG_SKIP)
-        .expect("skip is required")
-        .parse::<i32>()?;
+    let limit: i32 = args.limit.try_into()?;
+    let skip: i32 = args.skip.unwrap_or(0).try_into()?;
 
-    let before_timestamp = convert_to_ts(matches, ARG_BEFORE)?;
-    let after_timestamp = convert_to_ts(matches, ARG_AFTER)?;
-    let follow_history_across_deletions = matches.is_present(ARG_HISTORY_ACROSS_DELETIONS);
+    let before_timestamp = convert_to_ts(args.before.as_deref())?;
+    let after_timestamp = convert_to_ts(args.after.as_deref())?;
+    let follow_history_across_deletions = args.history_across_deletions;
+    let follow_mutable_file_history = Some(args.follow_mutable_history);
+    let identity_schemes = args.scheme_args.clone().into_request_schemes();
 
     let response = match path {
         Some(path) => {
@@ -189,13 +151,14 @@ pub(super) async fn run(
                 skip,
                 before_timestamp,
                 after_timestamp,
-                identity_schemes: get_request_schemes(matches),
+                identity_schemes,
                 follow_history_across_deletions,
                 descendants_of,
                 exclude_changeset_and_ancestors: None,
+                follow_mutable_file_history,
                 ..Default::default()
             };
-            connection
+            app.connection
                 .commit_path_history(&commit_and_path, &params)
                 .await?
                 .history
@@ -207,12 +170,15 @@ pub(super) async fn run(
                 skip,
                 before_timestamp,
                 after_timestamp,
-                identity_schemes: get_request_schemes(matches),
+                identity_schemes,
                 descendants_of,
                 exclude_changeset_and_ancestors: None,
                 ..Default::default()
             };
-            connection.commit_history(&commit, &params).await?.history
+            app.connection
+                .commit_history(&commit, &params)
+                .await?
+                .history
         }
     };
 
@@ -224,16 +190,16 @@ pub(super) async fn run(
                 history.push(commit_info);
             }
 
-            let output: Box<dyn Render> = Box::new(LogOutput {
+            let output = LogOutput {
                 history,
                 requested: commit_ids[0].to_string(),
-                schemes: get_schemes(matches),
-            });
-            Ok(stream::once(future::ok(output)).boxed())
+                schemes: args.scheme_args.scheme_string_set(),
+            };
+            app.target.render_one(&args, output).await
         }
         thrift::History::UnknownField(id) => {
-            Err(format_err!("Unknown thrift::History field id: {}", id))
+            anyhow::bail!("Unknown thrift::History field id: {}", id)
         }
-        _ => Err(format_err!("Unexpected thrift::History format")),
+        _ => anyhow::bail!("Unexpected thrift::History format"),
     }
 }

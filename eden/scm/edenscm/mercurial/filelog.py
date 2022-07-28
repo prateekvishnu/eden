@@ -16,7 +16,10 @@ import re
 import struct
 from typing import Dict
 
-from . import error, git, mdiff, revlog
+import bindings
+
+from . import eagerepo, error, git, mdiff, revlog, util
+from .node import bin
 from .pycompat import decodeutf8, encodeutf8
 
 
@@ -70,7 +73,7 @@ class filelog(revlog.revlog):
         t = self.revision(node)
         m = parsemeta(t)[0]
         if m and "copy" in m:
-            return (m["copy"], revlog.bin(m["copyrev"]))
+            return (m["copy"], bin(m["copyrev"]))
         return False
 
     def size(self, rev: int) -> int:
@@ -159,10 +162,20 @@ class fileslog(object):
             gitstore = git.openstore(repo)
             self.contentstore = gitstore
             self.filescmstore = gitstore
+        elif eagerepo.iseagerepo(repo):
+            store = eagerepo.openstore(repo)
+            self.contentstore = store
+            self.filescmstore = store
+        elif util.istest():
+            self.filescmstore = bindings.revisionstore.pyfilescmstore(
+                lambda name, node: self.repo.file(name).read(node)
+            )
 
     def commitpending(self):
         """Used in alternative filelog implementations to commit pending
         additions."""
+        if eagerepo.iseagerepo(self.repo):
+            self.contentstore.flush()
 
     def abortpending(self):
         """Used in alternative filelog implementations to throw out pending

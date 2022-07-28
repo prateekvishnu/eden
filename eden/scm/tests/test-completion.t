@@ -37,6 +37,7 @@ Show all commands except debug commands
   identify
   import
   init
+  isl
   locate
   log
   manifest
@@ -71,6 +72,7 @@ Show all commands except debug commands
   verify
   verifyremotefilelog
   version
+  whereami
 
 Show all commands that start with "a"
   $ hg debugcomplete a
@@ -174,6 +176,7 @@ Show debug commands if there are no other candidates
   debugrename
   debugresetheads
   debugrevlog
+  debugrevlogclone
   debugrevspec
   debugrunlog
   debugrunshell
@@ -345,6 +348,7 @@ Show aliases with -v
   identify
   import patch
   init
+  isl
   locate
   log history
   manifest
@@ -379,6 +383,7 @@ Show aliases with -v
   verify
   verifyremotefilelog
   version
+  whereami
 
 Show an error if we use --options with an ambiguous abbreviation
   $ hg debugcomplete --options s
@@ -397,9 +402,9 @@ Show all commands + options
   blackbox: start, end, pattern, timestamp, sid
   bookmarks: force, rev, delete, strip, rename, inactive, template
   branch: force, clean, new
-  bundle: force, rev, base, all, type, ssh, remotecmd
+  bundle: force, rev, base, all, type
   cat: output, rev, decode, include, exclude, template
-  clone: noupdate, updaterev, rev, pull, stream, shallow, git, ssh, remotecmd
+  clone: noupdate, updaterev, rev, pull, stream, shallow, git
   commit: addremove, amend, edit, interactive, reuse-message, include, exclude, message, logfile, date, user
   config: untrusted, edit, local, global, template
   continue: 
@@ -433,7 +438,7 @@ Show all commands + options
   debugdifftree: rev, include, exclude, style, template
   debugdirs: rev, print0
   debugdirstate: nodates, datesort, json
-  debugdiscovery: rev, ssh, remotecmd
+  debugdiscovery: rev
   debugdrawdag: print, bookmarks, write-env
   debugdryup: 
   debugdumpdynamicconfig: reponame, username, canary
@@ -491,6 +496,7 @@ Show all commands + options
   debugrename: rev
   debugresetheads: 
   debugrevlog: changelog, manifest, dir, dump
+  debugrevlogclone: 
   debugrevspec: optimize, show-revs, show-set, show-stage, no-optimized, verify-optimized
   debugrunlog: ended, template
   debugrunshell: cmd
@@ -521,7 +527,7 @@ Show all commands + options
   debugwaitonprefetch: 
   debugwaitonrepack: 
   debugwalk: include, exclude
-  debugwireargs: three, four, five, ssh, remotecmd
+  debugwireargs: three, four, five
   diff: rev, change, text, git, binary, nodates, noprefix, show-function, reverse, ignore-all-space, ignore-space-change, ignore-blank-lines, ignore-space-at-eol, unified, stat, root, only-files-in-revs, include, exclude
   doctor: 
   export: output, switch-parent, rev, pattern, text, git, binary, nodates, include, exclude
@@ -536,9 +542,10 @@ Show all commands + options
   help: extension, command, keyword, system
   hint: ack
   histgrep: print0, all, text, follow, ignore-case, files-with-matches, line-number, rev, user, date, template, include, exclude
-  identify: rev, num, id, branch, tags, bookmarks, ssh, remotecmd, template
+  identify: rev, num, id, branch, tags, bookmarks, template
   import: strip, base, edit, force, no-commit, bypass, partial, exact, prefix, message, logfile, date, user, similarity
-  init: ssh, remotecmd, git
+  init: git
+  isl: port
   locate: rev, print0, fullpath, include, exclude
   log: follow, follow-first, date, copies, keyword, rev, line-range, removed, only-merges, user, branch, prune, patch, git, limit, no-merges, stat, graph, style, template, include, exclude
   manifest: rev, all, template
@@ -547,9 +554,9 @@ Show all commands + options
   paths: template
   phase: public, draft, secret, force, rev
   prefetch: rev, repack, base, include, exclude
-  pull: update, force, rev, bookmark, ssh, remotecmd
+  pull: update, force, rev, bookmark
   purge: abort-on-err, all, dirs, files, print, print0, include, exclude
-  push: force, rev, bookmark, new-branch, pushvars, ssh, remotecmd
+  push: force, rev, bookmark, new-branch, pushvars
   record: addremove, amend, secret, edit, message, logfile, date, user, ignore-all-space, ignore-space-change, ignore-blank-lines, ignore-space-at-eol, include, exclude
   recover: 
   remove: after, force, include, exclude
@@ -573,6 +580,7 @@ Show all commands + options
   verify: rev, dag
   verifyremotefilelog: decompress
   version: template
+  whereami: 
 
   $ hg init a
   $ cd a

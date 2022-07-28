@@ -5,18 +5,21 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Error};
+use anyhow::anyhow;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use blobstore::Loadable;
 use bookmarks::BookmarkName;
-use clap_old::{App, Arg, ArgMatches, SubCommand};
+use clap_old::App;
+use clap_old::Arg;
+use clap_old::ArgMatches;
+use clap_old::SubCommand;
 use fbinit::FacebookInit;
 use futures::TryFutureExt;
 
-use cmdlib::{
-    args::{self, MononokeMatches},
-    helpers,
-};
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers;
 use context::CoreContext;
 use maplit::hashset;
 use metaconfig_types::BookmarkAttrs;
@@ -55,7 +58,7 @@ pub async fn subcommand_pushrebase<'a>(
     sub_matches: &'a ArgMatches<'_>,
 ) -> Result<(), SubcommandError> {
     let ctx = CoreContext::new_with_logger(fb, logger.clone());
-    let repo: BlobRepo = args::open_repo(fb, &logger, &matches).await?;
+    let repo: BlobRepo = args::open_repo(fb, &logger, matches).await?;
 
     let cs_id = sub_matches
         .value_of(ARG_CSID)
@@ -92,7 +95,6 @@ pub async fn subcommand_pushrebase<'a>(
         &pushrebase_flags,
         &bookmark,
         &hashset![bcs],
-        None,
         &pushrebase_hooks,
     )
     .map_err(Error::from)

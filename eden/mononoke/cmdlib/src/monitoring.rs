@@ -7,13 +7,15 @@
 
 //! Scaffolding for service-level integration and monitoring.
 
-use std::thread::{self};
+use std::thread;
 
 use anyhow::Error;
 use fbinit::FacebookInit;
 pub use mononoke_app::fb303::ReadyFlagService;
-use services::{self, Fb303Service};
-use slog::{info, Logger};
+use services;
+use services::Fb303Service;
+use slog::info;
+use slog::Logger;
 
 use crate::args::MononokeMatches;
 

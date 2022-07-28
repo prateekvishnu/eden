@@ -25,15 +25,16 @@
 #include "eden/fs/config/EdenConfig.h"
 #include "eden/fs/inodes/CacheHint.h"
 #include "eden/fs/inodes/InodeNumber.h"
-#include "eden/fs/inodes/InodeOrTreeOrEntry.h"
 #include "eden/fs/inodes/InodePtrFwd.h"
 #include "eden/fs/inodes/InodeTimestamps.h"
 #include "eden/fs/inodes/Overlay.h"
+#include "eden/fs/inodes/VirtualInode.h"
 #include "eden/fs/journal/Journal.h"
 #include "eden/fs/model/RootId.h"
 #include "eden/fs/service/gen-cpp2/eden_types.h"
 #include "eden/fs/store/BlobAccess.h"
 #include "eden/fs/takeover/TakeoverData.h"
+#include "eden/fs/telemetry/ActivityBuffer.h"
 #include "eden/fs/telemetry/IActivityRecorder.h"
 #include "eden/fs/utils/PathFuncs.h"
 
@@ -197,7 +198,8 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
       std::shared_ptr<ObjectStore> objectStore,
       std::shared_ptr<BlobCache> blobCache,
       std::shared_ptr<ServerState> serverState,
-      std::unique_ptr<Journal> journal);
+      std::unique_ptr<Journal> journal,
+      std::optional<Overlay::OverlayType> overlayType = std::nullopt);
 
   /**
    * Asynchronous EdenMount initialization - post instantiation.
@@ -324,6 +326,7 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
   bool isFuseChannel() const;
   bool isNfsdChannel() const;
   bool isPrjfsChannel() const;
+  bool fsChannelIsInitialized() const;
   std::optional<MountProtocol> getMountProtocol() const;
 
   /**
@@ -543,7 +546,7 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
    * This function is marked slow due to forcing to load inodes that may not
    * have been loaded previously. Loading an Inode is unfortunately both
    * expensive to load (due to writing to the overlay), and may slow down
-   * future checkout operations. The method getInodeOrTreeOrEntry below should
+   * future checkout operations. The method getVirtualInode below should
    * instead be preferred as it doesn't suffer from these pathological cases.
    */
   ImmediateFuture<InodePtr> getInodeSlow(
@@ -565,54 +568,9 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
    * besides the path being invalid (for instance, an error loading data from
    * the ObjectStore).
    */
-  ImmediateFuture<InodeOrTreeOrEntry> getInodeOrTreeOrEntry(
+  ImmediateFuture<VirtualInode> getVirtualInode(
       RelativePathPiece path,
       ObjectFetchContext& context) const;
-
-  /**
-   * Resolves symlinks and loads file contents from the Inode at the given path.
-   * This loads the entire file contents into memory, so this can be expensive
-   * for large files.
-   *
-   * The fetchContext object must remain valid until the future is completed.
-   */
-  folly::Future<std::string> loadFileContentsFromPath(
-      ObjectFetchContext& fetchContext,
-      RelativePathPiece path,
-      CacheHint cacheHint = CacheHint::LikelyNeededAgain) const;
-
-  /**
-   * Resolves symlinks and loads file contents. This loads the entire file
-   * contents into memory, so this can be expensive for large files.
-   *
-   * The fetchContext object must remain valid until the future is completed.
-   *
-   * TODO: add maxSize parameter to cause the command to fail if the file is
-   * over a certain size.
-   */
-  folly::Future<std::string> loadFileContents(
-      ObjectFetchContext& fetchContext,
-      InodePtr fileInodePtr,
-      CacheHint cacheHint = CacheHint::LikelyNeededAgain) const;
-
-  /**
-   * Chases (to bounded depth) and returns the final non-symlink in the
-   * (possibly 0-length) chain of symlinks rooted at pInode.  Specifically:
-   * If pInode is a file or directory, it is immediately returned.
-   * If pInode is a symlink, the chain rooted at it chased down until
-   * one of the following conditions:
-   * 1) an entity outside this mount is encountered => error (EXDEV);
-   * 2) an non-symlink item under this mount is found => this item is returned;
-   * 3) a maximum depth is exceeded => error (ELOOP).
-   * 4) absolute path entity is encountered => error (EPERM).
-   * 5) the input inode refers to an unlinked inode => error (ENOENT).
-   * 6) a symlink points to a non-existing entity => error (ENOENT)
-   * NOTE: a loop in the chain is handled by max depth length logic.
-   */
-  folly::Future<InodePtr> resolveSymlink(
-      ObjectFetchContext& fetchContext,
-      InodePtr pInode,
-      CacheHint cacheHint = CacheHint::LikelyNeededAgain) const;
 
   /**
    * Check out the specified commit.
@@ -651,7 +609,7 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
    *     operation is complete.  This is marked FOLLY_NODISCARD to
    *     make sure callers do not forget to wait for the operation to complete.
    */
-  FOLLY_NODISCARD folly::Future<std::unique_ptr<ScmStatus>> diff(
+  FOLLY_NODISCARD ImmediateFuture<std::unique_ptr<ScmStatus>> diff(
       const RootId& commitHash,
       folly::CancellationToken cancellation,
       bool listIgnored = false,
@@ -676,7 +634,7 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
    * The caller must ensure that the DiffContext object ctsPtr points to
    * exists at least until the returned Future completes.
    */
-  FOLLY_NODISCARD folly::Future<folly::Unit> diff(
+  FOLLY_NODISCARD ImmediateFuture<folly::Unit> diff(
       DiffContext* ctxPtr,
       const RootId& commitHash) const;
 
@@ -711,6 +669,14 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
 
   const std::shared_ptr<ServerState>& getServerState() const {
     return serverState_;
+  }
+
+  std::optional<ActivityBuffer>& getActivityBuffer() {
+    return activityBuffer_;
+  }
+
+  TraceBus<InodeTraceEvent>& getInodeTraceBus() const {
+    return *inodeTraceBus_;
   }
 
   /**
@@ -820,6 +786,34 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
   struct InodeMetadata getInitialInodeMetadata(mode_t mode) const;
 
   /**
+   * Return a newly initialized ActivityBuffer for the mount if using
+   * ActivityBuffers is enabled and return std::nullopt otherwise.
+   */
+  std::optional<ActivityBuffer> initActivityBuffer();
+
+  /**
+   * Subscribes activityBuffer_ to the inodeTraceBus_ in order to read and store
+   * InodeTraceEvents into the ActivityBuffer as they occur. In addition, path
+   * names for the inodes are calculated here outside of the critical path of
+   * the inode event in order to be displayed in the eden inode tracing CLI.
+   */
+  void subscribeActivityBuffer();
+
+  /**
+   * Helper function to update ActivityBuffer in FileInode and TreeInode when a
+   * new InodeTraceEvent occurs. Note, path could be the full path (in the
+   * case of inode creations), or, more commonly, just base filenames depending
+   * on how much is easily available during the inode event.
+   */
+  void addInodeTraceEvent(
+      std::chrono::system_clock::time_point startTime,
+      InodeEventType eventType,
+      InodeType type,
+      InodeNumber ino,
+      folly::StringPiece path,
+      InodeEventProgress progress);
+
+  /**
    * mount any configured bind mounts.
    * This requires that the filesystem already be mounted, and must not
    * be called in the context of a fuseWorkerThread().
@@ -926,16 +920,6 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
   class JournalDiffCallback;
 
   /**
-   * Recursive method used for resolveSymlink() implementation
-   */
-  folly::Future<InodePtr> resolveSymlinkImpl(
-      ObjectFetchContext& fetchContext,
-      InodePtr pInode,
-      RelativePath&& path,
-      size_t depth,
-      CacheHint cacheHint) const;
-
-  /**
    * Attempt to transition from expected -> newState.
    * If the current state is expected then the state is set to newState
    * and returns boolean.
@@ -967,14 +951,16 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
   /**
    * Returns overlay type based on settings.
    */
-  Overlay::OverlayType getOverlayType();
+  Overlay::OverlayType getOverlayType(
+      std::optional<Overlay::OverlayType> overlayType);
 
   EdenMount(
       std::unique_ptr<CheckoutConfig> checkoutConfig,
       std::shared_ptr<ObjectStore> objectStore,
       std::shared_ptr<BlobCache> blobCache,
       std::shared_ptr<ServerState> serverState,
-      std::unique_ptr<Journal> journal);
+      std::unique_ptr<Journal> journal,
+      std::optional<Overlay::OverlayType> overlayType = std::nullopt);
 
   // Forbidden copy constructor and assignment operator
   EdenMount(EdenMount const&) = delete;
@@ -1005,7 +991,7 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
    * synchronization (if it is needed). It will be packaged into a DiffContext
    * and passed through the TreeInode diff() codepath
    */
-  FOLLY_NODISCARD folly::Future<folly::Unit> diff(
+  FOLLY_NODISCARD ImmediateFuture<folly::Unit> diff(
       DiffCallback* callback,
       const RootId& commitHash,
       bool listIgnored,
@@ -1130,6 +1116,8 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
     // differ.
     RootId workingCopyParentRootId;
     bool checkoutInProgress = false;
+    std::optional<std::tuple<RootId, RootId>> checkoutOriginalTrees;
+    std::optional<pid_t> checkoutPid;
   };
 
   /**
@@ -1230,6 +1218,25 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
    * The number of tree prefetches in progress for this mount point.
    */
   std::atomic<uint64_t> numPrefetchesInProgress_{0};
+
+  /**
+   * Fixed sized buffer containing recent events that have occured within
+   * EdenFS. Used in retroactive versions of the Eden tracing CLI. Note,
+   * currently events are limited to InodeMaterializeEvents though we plan to
+   * add more types of events later. Also the initialization of this buffer
+   * depends on serverState_ being intitialized to get eden config information,
+   * so activityBuffer_ is ordered after serverState_ in this header file
+   */
+  std::optional<ActivityBuffer> activityBuffer_;
+
+  std::shared_ptr<TraceBus<InodeTraceEvent>> inodeTraceBus_;
+
+  // Handle for inodeTraceBus subscription
+  struct InodeTraceHandle {
+    TraceSubscriptionHandle<InodeTraceEvent> subHandle;
+  };
+
+  std::shared_ptr<InodeTraceHandle> inodeTraceHandle_;
 
 #ifdef _WIN32
   /**

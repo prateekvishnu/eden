@@ -6,23 +6,30 @@
  */
 
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
+use anyhow::Context;
 use async_runtime::block_unless_interrupted as block_on;
+use clidispatch::abort;
+use clidispatch::abort_if;
 use clidispatch::errors;
 use clidispatch::global_flags::HgGlobalOpts;
+use clidispatch::output::new_logger;
+use clidispatch::output::TermLogger;
 use cliparser::define_flags;
-use edenapi::Builder;
 use migration::feature::deprecate;
 use repo::constants::HG_PATH;
 use repo::repo::Repo;
+use tracing::instrument;
 use types::HgId;
+use util::path::absolute;
 
 use super::ConfigSet;
 use super::Result;
 use super::IO;
+
+use crate::HgPython;
 
 static SEGMENTED_CHANGELOG_CAPABILITY: &str = "segmented-changelog";
 
@@ -64,6 +71,9 @@ define_flags! {
         /// use EdenFs (EXPERIMENTAL)
         eden: bool,
 
+        /// location of the backing repo to be used or created (EXPERIMENTAL)
+        eden_backing_repo: String,
+
         #[arg]
         source: String,
 
@@ -78,6 +88,8 @@ pub fn run(
     io: &IO,
     config: &mut ConfigSet,
 ) -> Result<u8> {
+    let mut logger = new_logger(io, &global_opts);
+
     let deprecated_options = [
         ("--rev", "rev-option", clone_opts.rev.is_empty()),
         (
@@ -101,13 +113,39 @@ pub fn run(
         }
     }
 
+    abort_if!(
+        !clone_opts.eden && !clone_opts.eden_backing_repo.is_empty(),
+        "--eden-backing-repo requires --eden",
+    );
+
+    abort_if!(
+        !clone_opts.enable_profile.is_empty() && clone_opts.eden,
+        "--enable-profile is not compatible with --eden",
+    );
+
+    abort_if!(
+        clone_opts.eden && clone_opts.noupdate,
+        "--noupdate is not compatible with --eden",
+    );
+
     let force_rust = config
         .get_or_default::<Vec<String>>("commands", "force-rust")?
         .contains(&name().to_owned());
     let use_rust = force_rust || config.get_or_default("clone", "use-rust")?;
     if !use_rust {
+        abort_if!(
+            clone_opts.eden,
+            "--eden requires --config clone.use-rust=True"
+        );
+
+        logger.info("Falling back to Python clone (config not enabled)");
         return Err(errors::FallbackToPython(name()).into());
     }
+
+    let supported_url = match url::Url::parse(&clone_opts.source) {
+        Err(_) => false,
+        Ok(url) => url.scheme() != "file" && url.scheme() != "ssh",
+    };
 
     if !clone_opts.updaterev.is_empty()
         || !clone_opts.rev.is_empty()
@@ -115,8 +153,14 @@ pub fn run(
         || clone_opts.stream
         || !clone_opts.shallow
         || clone_opts.git
-        || clone_opts.eden
+        || !supported_url
     {
+        abort_if!(
+            clone_opts.eden,
+            "some specified options are not compatible with --eden"
+        );
+
+        logger.info("Falling back to Python clone (incompatible options)");
         return Err(errors::FallbackToPython(name()).into());
     }
 
@@ -131,9 +175,13 @@ pub fn run(
         // This gets the reponame from the --configfile config. Ingore
         // bogus "no-repo" value that dynamicconfig sets when there is
         // no repo name.
-        Some(c) if c != "no-repo" => c,
+        Some(c) if c != "no-repo" => {
+            logger.debug(|| format!("Repo name is {} from config", c));
+            c
+        }
         Some(_) | None => match configparser::hg::repo_name_from_url(&clone_opts.source) {
             Some(name) => {
+                logger.debug(|| format!("Repo name is {} via URL {}", name, clone_opts.source));
                 config.set(
                     "remotefilelog",
                     "reponame",
@@ -142,78 +190,157 @@ pub fn run(
                 );
                 name
             }
-            None => return Err(errors::Abort("could not determine repo name".into()).into()),
+            None => abort!("could not determine repo name"),
         },
     };
 
-    // Rust clone only supports segmented changelog clone
-    // TODO: add binding for python streaming revlog download
-    let edenapi = Builder::from_config(config)?
-        .correlator(Some(edenapi::DEFAULT_CORRELATOR.as_str()))
-        .build()?;
-    let capabilities: Vec<String> =
-        block_on(edenapi.capabilities())?.map_err(|e| e.tag_network())?;
-    if !capabilities
-        .iter()
-        .any(|cap| cap == SEGMENTED_CHANGELOG_CAPABILITY)
-    {
-        return Err(errors::FallbackToPython(name()).into());
-    }
-
     let destination = match clone_opts.args.pop() {
-        Some(dest) => PathBuf::from(dest),
+        Some(dest) => absolute(dest).with_context(|| "Cannot get absolute destination path")?,
         None => {
-            if configparser::hg::is_plain(Some("default_clone_dir")) {
-                return Err(errors::Abort("DEST was not specified".into()).into());
-            } else {
-                clone::get_default_directory(config)?.join(&reponame)
-            }
+            abort_if!(
+                configparser::hg::is_plain(Some("default_clone_dir")),
+                "DEST must be specified because HGPLAIN is enabled",
+            );
+
+            clone::get_default_destination_directory(config)?.join(&reponame)
         }
     };
 
-    let dest_preexists = destination.exists();
-    let dest_hg = destination.join(HG_PATH);
-    if dest_hg.exists() {
-        return Err(
-            errors::Abort(".hg directory already exists at clone destination".into()).into(),
-        );
-    }
+    logger.status(format!(
+        "Cloning {} into {}",
+        reponame,
+        destination.display(),
+    ));
 
-    match clone_metadata(
-        io,
-        &clone_opts,
-        global_opts,
-        config,
-        &destination,
-        &reponame,
-    ) {
-        Ok((mut repo, target)) => {
-            if let Some(target) = target {
-                clone::init_working_copy(&mut repo, target, clone_opts.enable_profile.clone())?;
-            }
+    let dest_hg = destination.join(HG_PATH);
+
+    abort_if!(
+        dest_hg.exists(),
+        ".hg directory already exists at clone destination {}",
+        destination.display(),
+    );
+
+    if clone_opts.eden {
+        let backing_path = if !clone_opts.eden_backing_repo.is_empty() {
+            PathBuf::from(&clone_opts.eden_backing_repo)
+        } else if let Some(dir) = clone::get_default_eden_backing_directory(config)? {
+            dir.join(&reponame)
+        } else {
+            abort!("please specify --eden-backing-repo");
+        };
+        let backing_hg = backing_path.join(".hg");
+
+        let mut backing_repo = if !backing_hg.exists() {
+            logger.info(|| {
+                format!(
+                    "Cloning {} backing repo to {}",
+                    reponame,
+                    backing_path.display(),
+                )
+            });
+            try_clone_metadata(
+                &mut logger,
+                io,
+                &clone_opts,
+                &global_opts,
+                config,
+                &reponame,
+                &backing_path,
+            )?
+        } else {
+            let mut repo = Repo::load(&backing_path)?;
+            repo.config_mut().set_overrides(&global_opts.config)?;
+            repo
+        };
+        let target_rev =
+            get_update_target(&mut logger, &mut backing_repo, &clone_opts)?.map(|(rev, _)| rev);
+        logger.info(|| {
+            format!(
+                "Performing EdenFS clone {}@{} from {} to {}",
+                reponame,
+                target_rev.map_or(String::new(), |t| t.to_hex()),
+                backing_path.display(),
+                destination.display(),
+            )
+        });
+        clone::eden_clone(&backing_repo, &destination, target_rev)?;
+    } else {
+        let mut repo = try_clone_metadata(
+            &mut logger,
+            io,
+            &clone_opts,
+            &global_opts,
+            config,
+            &reponame,
+            &destination,
+        )?;
+
+        let target_rev = get_update_target(&mut logger, &mut repo, &clone_opts)?;
+        if let Some((target_rev, bm)) = &target_rev {
+            logger.status(format!("Checking out '{}'", bm));
+            logger.info(|| {
+                format!(
+                    "Initializing non-EdenFS working copy to commit {}",
+                    target_rev.to_hex(),
+                )
+            });
+        } else {
+            logger.info("Initializing empty non-EdenFS working copy");
         }
-        Err(e) => {
-            let removal_dir = if dest_preexists {
-                destination.join(HG_PATH)
-            } else {
-                destination
-            };
-            fs::remove_dir_all(removal_dir)?;
-            return Err(e);
-        }
+
+        clone::init_working_copy(
+            &mut logger,
+            &mut repo,
+            target_rev.map(|(rev, _)| rev),
+            clone_opts.enable_profile.clone(),
+        )?;
     }
 
     Ok(0)
 }
 
-fn clone_metadata(
+fn try_clone_metadata(
+    logger: &mut TermLogger,
     io: &IO,
     clone_opts: &CloneOpts,
-    global_opts: HgGlobalOpts,
+    global_opts: &HgGlobalOpts,
     config: &mut ConfigSet,
-    destination: &Path,
     reponame: &str,
-) -> Result<(Repo, Option<HgId>)> {
+    destination: &Path,
+) -> Result<Repo> {
+    let dest_preexists = destination.exists();
+    match clone_metadata(
+        logger,
+        io,
+        clone_opts,
+        global_opts,
+        config,
+        reponame,
+        destination,
+    ) {
+        Err(e) => {
+            let removal_dir = if dest_preexists {
+                destination.join(HG_PATH)
+            } else {
+                destination.to_path_buf()
+            };
+            fs::remove_dir_all(removal_dir)?;
+            Err(e)
+        }
+        Ok(repo) => Ok(repo),
+    }
+}
+
+#[instrument(skip_all, fields(repo=reponame), err)]
+fn clone_metadata(
+    logger: &mut TermLogger,
+    io: &IO,
+    clone_opts: &CloneOpts,
+    global_opts: &HgGlobalOpts,
+    config: &mut ConfigSet,
+    reponame: &str,
+    destination: &Path,
+) -> Result<Repo> {
     tracing::trace!("performing rust clone");
     tracing::debug!(target: "rust_clone", rust_clone="true");
 
@@ -237,50 +364,124 @@ fn clone_metadata(
     let mut repo = Repo::init(destination, config, Some(hgrc_content))?;
 
     repo.config_mut().set_overrides(&global_opts.config)?;
-    repo.add_store_requirement("lazychangelog")?;
     repo.add_requirement("remotefilelog")?;
 
     let edenapi = repo.eden_api()?;
-    let metalog = repo.metalog()?;
-    let commits = repo.dag_commits()?;
-    let config = repo.config();
 
-    let bookmark_names: Vec<String> = match config.get_opt("remotenames", "selectivepulldefault")? {
-        Some(bms) => bms,
-        None => {
-            return Err(
-                errors::Abort("remotenames.selectivepulldefault config is not set".into()).into(),
-            );
-        }
-    };
+    let capabilities: Vec<String> =
+        block_on(edenapi.capabilities())?.map_err(|e| e.tag_network())?;
 
-    tracing::trace!("fetching lazy commit data and bookmarks");
-    let bookmark_ids = exchange::clone(
-        edenapi,
-        &mut metalog.write(),
-        &mut commits.write(),
-        bookmark_names.clone(),
-    )?;
+    let segmented_changelog = capabilities
+        .iter()
+        .any(|cap| cap == SEGMENTED_CHANGELOG_CAPABILITY);
 
-    ::fail::fail_point!("run::clone", |_| {
-        Err(errors::Abort("Injected clone failure".to_string().into()).into())
-    });
+    if segmented_changelog {
+        repo.add_store_requirement("lazychangelog")?;
 
-    if !clone_opts.noupdate {
-        if let Some(default_bm) = bookmark_names.first() {
-            if let Some(target) = bookmark_ids.get(default_bm) {
-                return Ok((repo, Some(target.clone())));
-            } else if !global_opts.quiet {
-                write!(
-                    io.error(),
-                    "Server has no '{}' bookmark - skipping checkout.\n",
-                    default_bm
-                )?;
-            }
-        }
+        let bookmark_names: Vec<String> = get_selective_bookmarks(&repo)?;
+        let metalog = repo.metalog()?;
+        let commits = repo.dag_commits()?;
+        tracing::trace!("fetching lazy commit data and bookmarks");
+        let bookmark_ids = exchange::clone(
+            edenapi,
+            &mut metalog.write(),
+            &mut commits.write(),
+            bookmark_names,
+        )?;
+        logger.debug(|| format!("Pulled bookmarks {:?}", bookmark_ids));
+    } else {
+        revlog_clone(logger, io, global_opts, &clone_opts.source, destination)?;
+        // reload the repo to pick up any changes written out by the revlog clone
+        // such as metalog remotenames writes
+        repo = Repo::load(destination)?;
+        repo.config_mut().set_overrides(&global_opts.config)?;
     }
 
-    Ok((repo, None))
+    ::fail::fail_point!("run::clone", |_| {
+        abort!("Injected clone failure");
+    });
+    Ok(repo)
+}
+
+pub fn revlog_clone(
+    logger: &mut TermLogger,
+    io: &IO,
+    global_opts: &HgGlobalOpts,
+    source: &str,
+    root: &Path,
+) -> Result<()> {
+    let mut args = vec![
+        "hg".to_string(),
+        "debugrevlogclone".to_string(),
+        source.to_string(),
+        "-R".to_string(),
+        root.to_string_lossy().to_string(),
+    ];
+
+    for config in global_opts.config.iter() {
+        args.push("--config".into());
+        args.push(config.into());
+    }
+    if global_opts.quiet {
+        args.push("-q".into());
+    }
+    if global_opts.verbose {
+        args.push("-v".into());
+    }
+    if global_opts.debug {
+        args.push("--debug".into());
+    }
+
+    logger.debug(|| format!("Running {}", args.join(" ")));
+
+    let hg_python = HgPython::new(&args);
+
+    abort_if!(hg_python.run_hg(args, io) != 0, "Cloning revlog failed");
+    Ok(())
+}
+
+fn get_selective_bookmarks(repo: &Repo) -> Result<Vec<String>> {
+    match repo
+        .config()
+        .get_opt("remotenames", "selectivepulldefault")?
+    {
+        Some(bms) => Ok(bms),
+        None => {
+            abort!("remotenames.selectivepulldefault config is not set");
+        }
+    }
+}
+
+#[instrument(skip_all, err, ret)]
+fn get_update_target(
+    logger: &mut TermLogger,
+    repo: &mut Repo,
+    clone_opts: &CloneOpts,
+) -> Result<Option<(HgId, String)>> {
+    if clone_opts.noupdate {
+        return Ok(None);
+    }
+    let selective_bookmarks = get_selective_bookmarks(repo)?;
+    let main_bookmark = selective_bookmarks
+        .first()
+        .ok_or_else(|| {
+            errors::Abort("remotenames.selectivepulldefault config list is empty".into())
+        })?
+        .clone();
+
+    let remote_bookmark = exchange::convert_to_remote(&main_bookmark);
+    let remote_bookmarks = repo.remote_bookmarks()?;
+
+    match remote_bookmarks.get(&remote_bookmark) {
+        Some(rev) => Ok(Some((rev.clone(), main_bookmark))),
+        None => {
+            logger.status(format!(
+                "Server has no '{}' bookmark - skipping checkout.",
+                remote_bookmark,
+            ));
+            Ok(None)
+        }
+    }
 }
 
 pub fn name() -> &'static str {

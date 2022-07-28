@@ -7,9 +7,14 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
-use bookmarks::{BookmarkName, BookmarkUpdateReason, BookmarksRef};
-use bookmarks_movement::{check_bookmark_sync_config, BookmarkKind};
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Result;
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
+use bookmarks::BookmarksRef;
+use bookmarks_movement::check_bookmark_sync_config;
+use bookmarks_movement::BookmarkKind;
 use clap::Args;
 use context::CoreContext;
 
@@ -71,9 +76,7 @@ pub async fn delete(
 
     println!(
         "Deleting {} bookmark {} at {}",
-        kind.to_string(),
-        delete_args.name,
-        old_value,
+        kind, delete_args.name, old_value,
     );
 
     if let Err(e) = check_bookmark_sync_config(repo, &delete_args.name, kind) {
@@ -97,7 +100,6 @@ pub async fn delete(
                 &delete_args.name,
                 old_value,
                 BookmarkUpdateReason::ManualMove,
-                None,
             )?;
         }
         BookmarkKind::Scratch => {

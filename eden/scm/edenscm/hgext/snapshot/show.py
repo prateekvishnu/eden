@@ -7,7 +7,6 @@ from edenscm.mercurial import error, scmutil
 from edenscm.mercurial.cmdutil import changeset_printer, jsonchangeset
 from edenscm.mercurial.context import memctx, memfilectx
 from edenscm.mercurial.i18n import _
-from edenscm.mercurial.node import nullid
 from edenscm.mercurial.util import pickle
 
 
@@ -26,7 +25,7 @@ def _snapshot2ctx(repo, snapshot):
     if parent not in repo:
         repo.pull(headnodes=(parent,))
 
-    parents = (parent, nullid)
+    parents = [repo[parent]]
     path2filechange = {f[0]: f[1] for f in snapshot["file_changes"]}
 
     def token2cacheable(token):

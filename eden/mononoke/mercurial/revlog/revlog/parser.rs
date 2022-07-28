@@ -12,9 +12,16 @@ use std::io::Read;
 
 use bitflags::bitflags;
 use flate2::read::ZlibDecoder;
-use nom::{be_u16, be_u32, Err, ErrorKind, IResult, Needed, *};
+use nom::be_u16;
+use nom::be_u32;
+use nom::Err;
+use nom::ErrorKind;
+use nom::IResult;
+use nom::Needed;
+use nom::*;
 
-use mercurial_types::{bdiff::Delta, HgNodeHash};
+use mercurial_types::bdiff::Delta;
+use mercurial_types::HgNodeHash;
 
 use crate::revlog::revidx::RevIdx;
 
@@ -112,7 +119,7 @@ named!(pub header<Header>,
 
             Header {
                 version: vers,
-                features: features,
+                features,
             }
         }))
 );
@@ -135,7 +142,7 @@ named!(pub indexng<Entry>,
         hash: take!(32) >>
         ({
             Entry {
-                offset: offset,
+                offset,
                 flags: IdxFlags::from_bits(flags).expect("bad rev idx flags"),
                 compressed_len: compressed_length,
                 len: Some(uncompressed_length),
@@ -211,7 +218,7 @@ named!(pub deltachunk<Vec<Delta> >,
                 do_parse!(tag!(b"4") >> d: apply!(lz4::lz4_decompress, deltas) >> (d))       // compressed w/ lz4
             )
         ),
-        |dv: Vec<_>| dv.into_iter().flat_map(|x| x).collect())
+        |dv: Vec<_>| dv.into_iter().flatten().collect())
 );
 
 fn remains(i: &[u8]) -> IResult<&[u8], &[u8]> {
@@ -284,7 +291,10 @@ fn be_u48(i: &[u8]) -> IResult<&[u8], u64> {
 
 #[cfg(test)]
 mod test {
-    use super::{header, Features, Header, Version};
+    use super::header;
+    use super::Features;
+    use super::Header;
+    use super::Version;
     use nom::IResult;
 
     #[test]

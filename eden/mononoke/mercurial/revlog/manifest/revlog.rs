@@ -6,22 +6,43 @@
  */
 
 use std::collections::BTreeMap;
-use std::io::{self, Write};
+use std::io;
+use std::io::Write;
 use std::str;
 use std::vec;
 
-use anyhow::{bail, ensure, format_err, Context, Error, Result};
-use futures::future::{self, Future, IntoFuture};
-use futures::stream::{self, Stream};
-use futures::{Async, Poll};
-use futures_ext::{BoxFuture, BoxStream, FutureExt, StreamExt};
+use anyhow::bail;
+use anyhow::ensure;
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
+use futures::future;
+use futures::future::Future;
+use futures::future::IntoFuture;
+use futures::stream;
+use futures::stream::Stream;
+use futures::Async;
+use futures::Poll;
+use futures_ext::BoxFuture;
+use futures_ext::BoxStream;
+use futures_ext::FutureExt;
+use futures_ext::StreamExt;
 
 use crate::errors::ErrorKind;
+use mercurial_types::blobs::file;
 use mercurial_types::manifest::Type;
-use mercurial_types::{
-    blobs::file, FileType, HgBlob, HgBlobNode, HgEntryId, HgFileNodeId, HgManifestId, HgNodeHash,
-    HgParents, MPath, MPathElement, RepoPath,
-};
+use mercurial_types::FileType;
+use mercurial_types::HgBlob;
+use mercurial_types::HgBlobNode;
+use mercurial_types::HgEntryId;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::HgManifestId;
+use mercurial_types::HgNodeHash;
+use mercurial_types::HgParents;
+use mercurial_types::MPath;
+use mercurial_types::MPathElement;
+use mercurial_types::RepoPath;
 
 use crate::RevlogRepo;
 
@@ -110,7 +131,7 @@ impl ManifestContent {
     }
 
     pub fn generate<W: Write>(&self, out: &mut W) -> io::Result<()> {
-        for (ref k, ref v) in &self.files {
+        for (k, v) in &self.files {
             k.generate(out)?;
             out.write(&b"\0"[..])?;
             v.generate(out)?;
@@ -210,7 +231,7 @@ impl Details {
 
         let (hash, flags) = data.split_at(40);
         let hash = str::from_utf8(hash)
-            .map_err(|err| Error::from(err))
+            .map_err(Error::from)
             .and_then(|hash| hash.parse::<HgNodeHash>())
             .with_context(|| format!("malformed hash: {:?}", hash))?;
 
@@ -296,7 +317,7 @@ impl Stream for RevlogListStream {
 
 impl RevlogEntry {
     fn new(repo: RevlogRepo, path: MPath, details: Details) -> Result<Self> {
-        let name = (&path).into_iter().next_back().map(|path| path.clone());
+        let name = (&path).into_iter().next_back().cloned();
         let path = match details.flag() {
             Type::Tree => RepoPath::dir(path)
                 .with_context(|| ErrorKind::Path("error while creating RepoPath".into()))?,
@@ -383,7 +404,7 @@ impl RevlogEntry {
                         let revlog_manifest = RevlogManifest::parse_with_prefix(
                             self.repo.clone(),
                             node.parents(),
-                            &data,
+                            data,
                             self.get_path()
                                 .mpath()
                                 .expect("trees should always have a path"),

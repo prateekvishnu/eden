@@ -7,16 +7,21 @@
 
 use std::fmt;
 
-use anyhow::{anyhow, Result};
-use bookmarks_types::{BookmarkName, Freshness};
+use anyhow::Result;
+use bookmarks_types::BookmarkName;
+use bookmarks_types::Freshness;
 use clap::ArgEnum;
 use context::CoreContext;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use mononoke_types::{ChangesetId, RepositoryId, Timestamp};
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
+use mononoke_types::Timestamp;
 use sql::mysql;
-use sql::mysql_async::prelude::{ConvIr, FromValue};
-use sql::mysql_async::{FromValueError, Value};
+use sql::mysql_async::prelude::ConvIr;
+use sql::mysql_async::prelude::FromValue;
+use sql::mysql_async::FromValueError;
+use sql::mysql_async::Value;
 
 /// Entry that describes an update to a bookmark
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -204,38 +209,5 @@ impl From<BookmarkUpdateReason> for Value {
             XRepoSync => Value::Bytes(b"xreposync".to_vec()),
             ApiRequest => Value::Bytes(b"apirequest".to_vec()),
         }
-    }
-}
-
-/// Encapsulation of the data required to replay a Mercurial bundle.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RawBundleReplayData {
-    pub bundle_handle: String,
-    pub commit_timestamps_json: String,
-}
-
-impl RawBundleReplayData {
-    pub fn maybe_new(
-        bundle_handle: Option<String>,
-        commit_timestamps_json: Option<String>,
-    ) -> Result<Option<Self>> {
-        match (bundle_handle, commit_timestamps_json) {
-            (Some(bundle_handle), Some(commit_timestamps_json)) => Ok(Some(RawBundleReplayData {
-                bundle_handle,
-                commit_timestamps_json,
-            })),
-            (None, None) => Ok(None),
-            _ => Err(anyhow!("inconsistent replay data")),
-        }
-    }
-}
-
-pub trait BundleReplay: Sync {
-    fn to_raw(&self) -> Result<RawBundleReplayData>;
-}
-
-impl BundleReplay for RawBundleReplayData {
-    fn to_raw(&self) -> Result<RawBundleReplayData> {
-        Ok(self.clone())
     }
 }

@@ -4,6 +4,8 @@
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2.
 
+# pyre-unsafe
+
 import argparse
 import io
 import logging
@@ -24,7 +26,7 @@ from .subcmd import Subcmd
 
 stats_cmd = subcmd_mod.Decorator()
 
-log = logging.getLogger("eden.fs.cli.stats")
+log: logging.Logger = logging.getLogger("eden.fs.cli.stats")
 
 
 DiagInfoCounters = Dict[str, int]
@@ -32,7 +34,7 @@ Table = Dict[str, List[int]]
 Table2D = Dict[str, List[List[Optional[str]]]]
 
 # TODO: https://github.com/python/typeshed/issues/1240
-stdoutWrapper = cast(io.TextIOWrapper, sys.stdout)
+stdoutWrapper: io.TextIOWrapper = cast(io.TextIOWrapper, sys.stdout)
 
 
 class StatsGeneralOptions(NamedTuple):
@@ -57,7 +59,7 @@ def do_stats_general(instance: EdenInstance, options: StatsGeneralOptions) -> No
         print_stats(stat_info, out)
 
 
-def print_stats(stat_info, out: io.TextIOWrapper):
+def print_stats(stat_info, out: io.TextIOWrapper) -> None:
     private_bytes = (
         stats_print.format_size(stat_info.privateBytes)
         if stat_info.privateBytes is not None

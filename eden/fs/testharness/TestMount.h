@@ -9,6 +9,7 @@
 
 #include <folly/Portability.h>
 #include <folly/Range.h>
+#include <folly/executors/ManualExecutor.h>
 #include <folly/experimental/TestUtil.h>
 #include <sys/stat.h>
 #include <optional>
@@ -136,8 +137,12 @@ class TestMount {
   void initialize(
       const RootId& initialCommitHash,
       FakeTreeBuilder& rootBuilder,
-      bool startReady = true);
+      bool startReady = true,
+      Overlay::OverlayType overlayType = kDefaultOverlayType);
   void initialize(FakeTreeBuilder& rootBuilder, bool startReady = true);
+  void initialize(
+      FakeTreeBuilder& rootBuilder,
+      Overlay::OverlayType overlayType);
 
   /**
    * Like initialize, except EdenMount::initialize is not called.
@@ -147,7 +152,8 @@ class TestMount {
   void createMountWithoutInitializing(
       const RootId& initialCommitHash,
       FakeTreeBuilder& rootBuilder,
-      bool startReady = true);
+      bool startReady,
+      Overlay::OverlayType overlayType = kDefaultOverlayType);
   void createMountWithoutInitializing(
       FakeTreeBuilder& rootBuilder,
       bool startReady = true);
@@ -232,7 +238,9 @@ class TestMount {
   void mkdir(folly::StringPiece path);
 
   /** Overwrites the contents of an existing file. */
-  void overwriteFile(folly::StringPiece path, folly::StringPiece contents);
+  FileInodePtr overwriteFile(
+      folly::StringPiece path,
+      folly::StringPiece contents);
 
   /** Does the equivalent of mv(1). */
   void move(folly::StringPiece src, folly::StringPiece dest);
@@ -260,8 +268,8 @@ class TestMount {
   TreeInodePtr getTreeInode(folly::StringPiece path) const;
   FileInodePtr getFileInode(RelativePathPiece path) const;
   FileInodePtr getFileInode(folly::StringPiece path) const;
-  InodeOrTreeOrEntry getInodeOrTreeOrEntry(RelativePathPiece path) const;
-  InodeOrTreeOrEntry getInodeOrTreeOrEntry(folly::StringPiece path) const;
+  VirtualInode getVirtualInode(RelativePathPiece path) const;
+  VirtualInode getVirtualInode(folly::StringPiece path) const;
 
   /**
    * Walk the entire tree and load all inode objects.
@@ -278,13 +286,6 @@ class TestMount {
 
   /** Convenience method for getting the Tree for the root of the mount. */
   std::shared_ptr<const Tree> getRootTree() const;
-
-  /*
-   * Resolves symlinks and loads file contents from the Inode at the given path.
-   * This loads the entire file contents into memory, so this can be expensive
-   * for large files.
-   */
-  std::string loadFileContentsFromPath(std::string path);
 
   std::shared_ptr<EdenMount>& getEdenMount() & noexcept {
     return edenMount_;
@@ -347,7 +348,7 @@ class TestMount {
   }
 
  private:
-  void createMount();
+  void createMount(Overlay::OverlayType overlayType = kDefaultOverlayType);
   void initTestDirectory();
   void setInitialCommit(const RootId& commitHash);
   void setInitialCommit(const RootId& commitHash, ObjectId rootTreeHash);

@@ -58,6 +58,54 @@ where
     Ok(())
 }
 
+fn add_global_flag_derived_configs(repo: &mut OptionalRepo, global_opts: HgGlobalOpts) {
+    if let OptionalRepo::Some(_) = repo {
+        if global_opts.hidden {
+            let config = repo.config_mut();
+            config.set("visibility", "all-heads", Some("true"), &"--hidden".into());
+        }
+    }
+
+    let config = repo.config_mut();
+    if global_opts.trace || global_opts.traceback {
+        config.set("ui", "traceback", Some("on"), &"--traceback".into());
+    }
+    if global_opts.profile {
+        config.set("profiling", "enabled", Some("true"), &"--profile".into());
+    }
+    if !global_opts.color.is_empty() {
+        config.set(
+            "ui",
+            "color",
+            Some(global_opts.color.as_str()),
+            &"--color".into(),
+        );
+    }
+    if global_opts.verbose || global_opts.debug || global_opts.quiet {
+        config.set(
+            "ui",
+            "verbose",
+            Some(global_opts.verbose.to_string().as_str()),
+            &"--verbose".into(),
+        );
+        config.set(
+            "ui",
+            "debug",
+            Some(global_opts.debug.to_string().as_str()),
+            &"--debug".into(),
+        );
+        config.set(
+            "ui",
+            "quiet",
+            Some(global_opts.quiet.to_string().as_str()),
+            &"--quiet".into(),
+        );
+    }
+    if global_opts.noninteractive {
+        config.set("ui", "interactive", Some("off"), &"-y".into());
+    }
+}
+
 fn last_chance_to_abort(opts: &HgGlobalOpts) -> Result<()> {
     if opts.profile {
         return Err(errors::Abort("--profile does not support Rust commands (yet)".into()).into());
@@ -219,14 +267,14 @@ impl Dispatcher {
         }
     }
 
-    /// Return config without a repo's influence even if we are in a repo.
-    pub fn no_repo_config(self) -> Result<ConfigSet, (Error, ConfigSet)> {
-        if let OptionalRepo::None(config) = self.optional_repo {
-            return Ok(config);
+    /// Replace OptionalRepo::Some with OptionalRepo::None(config)
+    /// where config is not influenced by the current repo.
+    pub fn convert_to_repoless_config(&mut self) -> Result<()> {
+        if matches!(self.optional_repo, OptionalRepo::Some(_)) {
+            self.optional_repo = OptionalRepo::None(self.load_repoless_config()?)
         }
 
-        self.load_repoless_config()
-            .map_err(|e| (e, self.optional_repo.take_config()))
+        Ok(())
     }
 
     fn load_repoless_config(&self) -> Result<ConfigSet> {
@@ -331,49 +379,47 @@ impl Dispatcher {
     }
 
     /// Run a command. Return exit code if the command completes.
-    pub fn run_command(
-        mut self,
-        command_table: &CommandTable,
+    pub fn run_command<'a>(
+        &mut self,
+        command_table: &'a CommandTable,
         io: &IO,
-    ) -> Result<u8, (ConfigSet, Error)> {
+    ) -> (Option<&'a CommandDefinition>, Result<u8>) {
         let (handler, parsed) = match self.prepare_command(command_table, io) {
             Ok((name, args)) => (name, args),
-            Err(e) => return Err((self.optional_repo.take_config(), e)),
+            Err(e) => return (None, Err(e)),
         };
 
-        match handler.func() {
-            CommandFunc::Repo(f) => {
-                let res = match self.optional_repo {
-                    OptionalRepo::Some(ref mut repo) => f(parsed, io, repo),
-                    OptionalRepo::None(_) => {
-                        // FIXME: Try to "infer repo" here.
-                        Err(errors::RepoRequired(
-                            env::current_dir()
-                                .ok()
-                                .map(|p| p.to_string_lossy().to_string())
-                                .unwrap_or_default(),
-                        )
-                        .into())
+        let res = || -> Result<u8> {
+            add_global_flag_derived_configs(&mut self.optional_repo, parsed.clone().try_into()?);
+            match handler.func() {
+                CommandFunc::Repo(f) => {
+                    match self.optional_repo {
+                        OptionalRepo::Some(ref mut repo) => f(parsed, io, repo),
+                        OptionalRepo::None(_) => {
+                            // FIXME: Try to "infer repo" here.
+                            Err(errors::RepoRequired(
+                                env::current_dir()
+                                    .ok()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_default(),
+                            )
+                            .into())
+                        }
                     }
-                };
-                res.map_err(|e| (self.optional_repo.take_config(), e))
+                }
+                CommandFunc::OptionalRepo(f) => f(parsed, io, &mut self.optional_repo),
+                CommandFunc::NoRepo(f) => {
+                    self.convert_to_repoless_config()?;
+                    f(parsed, io, self.optional_repo.config_mut())
+                }
+                CommandFunc::NoRepoGlobalOpts(f) => {
+                    self.convert_to_repoless_config()?;
+                    f(parsed, io, self.optional_repo.config_mut())
+                }
+                CommandFunc::OptionalRepoGlobalOpts(f) => f(parsed, io, &mut self.optional_repo),
             }
-            CommandFunc::OptionalRepo(f) => f(parsed, io, &mut self.optional_repo)
-                .map_err(|e| (self.optional_repo.take_config(), e)),
-            CommandFunc::NoRepo(f) => {
-                let mut config = match self.no_repo_config() {
-                    Ok(config) => config,
-                    Err((e, config)) => return Err((config, e)),
-                };
-                f(parsed, io, &mut config).map_err(|e| (config, e))
-            }
-            CommandFunc::NoRepoGlobalOpts(f) => {
-                let mut config = match self.no_repo_config() {
-                    Ok(config) => config,
-                    Err((e, config)) => return Err((config, e)),
-                };
-                f(parsed, io, &mut config).map_err(|e| (config, e))
-            }
-        }
+        }();
+
+        (Some(handler), res)
     }
 }

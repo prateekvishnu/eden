@@ -7,18 +7,26 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Error};
+use anyhow::Context;
+use anyhow::Error;
 use async_trait::async_trait;
 use bookmarks::Freshness;
 use bytes::Bytes;
-use edenapi_types::{BookmarkEntry, BookmarkRequest, HgId, SetBookmarkRequest};
-use futures::{stream, StreamExt};
-use mercurial_types::{HgChangesetId, HgNodeHash};
+use edenapi_types::BookmarkEntry;
+use edenapi_types::BookmarkRequest;
+use edenapi_types::HgId;
+use edenapi_types::SetBookmarkRequest;
+use futures::stream;
+use futures::StreamExt;
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgNodeHash;
 use mononoke_api_hg::HgRepoContext;
 
 use crate::errors::ErrorKind;
 
-use super::{EdenApiHandler, EdenApiMethod, HandlerResult};
+use super::EdenApiHandler;
+use super::EdenApiMethod;
+use super::HandlerResult;
 
 /// XXX: This number was chosen arbitrarily.
 const MAX_CONCURRENT_FETCHES_PER_REQUEST: usize = 100;
@@ -81,7 +89,7 @@ impl EdenApiHandler for SetBookmarkHandler {
         request: Self::Request,
     ) -> HandlerResult<'async_trait, Self::Response> {
         Ok(stream::once(set_bookmark(
-            repo.clone(),
+            repo,
             request.bookmark,
             request.to,
             request.from,
@@ -102,7 +110,7 @@ async fn set_bookmark(
     from: Option<HgId>,
     pushvars: HashMap<String, Bytes>,
 ) -> Result<(), Error> {
-    let repo = repo.write().await?;
+    let repo = repo.repo();
 
     let pushvars = if pushvars.is_empty() {
         None
@@ -118,7 +126,7 @@ async fn set_bookmark(
                 .changeset(to)
                 .await
                 .context("failed to resolve 'to' hgid")?
-                .ok_or_else(|| ErrorKind::HgIdNotFound(to_hgid))?
+                .ok_or(ErrorKind::HgIdNotFound(to_hgid))?
                 .id();
 
             let from = HgChangesetId::new(HgNodeHash::from(from_hgid));
@@ -126,7 +134,7 @@ async fn set_bookmark(
                 .changeset(from)
                 .await
                 .context("failed to resolve 'from' hgid")?
-                .ok_or_else(|| ErrorKind::HgIdNotFound(from_hgid))?
+                .ok_or(ErrorKind::HgIdNotFound(from_hgid))?
                 .id();
 
             repo.move_bookmark(bookmark, to, Some(from), true, pushvars)
@@ -139,7 +147,7 @@ async fn set_bookmark(
                 .changeset(to)
                 .await
                 .context("failed to resolve 'to' hgid")?
-                .ok_or_else(|| ErrorKind::HgIdNotFound(to_hgid))?
+                .ok_or(ErrorKind::HgIdNotFound(to_hgid))?
                 .id();
 
             repo.create_bookmark(bookmark, to, pushvars).await?
@@ -151,7 +159,7 @@ async fn set_bookmark(
                 .changeset(from)
                 .await
                 .context("failed to resolve 'from' hgid")?
-                .ok_or_else(|| ErrorKind::HgIdNotFound(from_hgid))?
+                .ok_or(ErrorKind::HgIdNotFound(from_hgid))?
                 .id();
 
             repo.delete_bookmark(bookmark, Some(from), pushvars).await?

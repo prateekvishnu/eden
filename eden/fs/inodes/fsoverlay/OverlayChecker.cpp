@@ -11,14 +11,17 @@
 
 #include <boost/filesystem.hpp>
 #include <fcntl.h>
+#include <folly/portability/Unistd.h>
 #include <time.h>
-#include <unistd.h>
 
 #include <folly/Conv.h>
 #include <folly/ExceptionWrapper.h>
 #include <folly/File.h>
 #include <folly/FileUtil.h>
+#include <folly/Overload.h>
 #include <folly/String.h>
+#include <folly/gen/Base.h>
+#include <folly/gen/ParallelMap.h>
 #include <folly/logging/xlog.h>
 #include <thrift/lib/cpp2/protocol/Serializer.h>
 
@@ -120,8 +123,7 @@ class OverlayChecker::RepairState {
     // control state.  If the files can be recovered from source control, users
     // can always recover it themselves afterwards with `hg revert`
     if (S_ISDIR(mode)) {
-      overlay::OverlayDir contents;
-      fs()->saveOverlayDir(number, contents);
+      fs()->saveOverlayDir(number, overlay::OverlayDir{});
     } else if (S_ISLNK(mode)) {
       // symbolic links generally can't be empty in normal circumstances,
       // so put some dummy data in the link.
@@ -129,6 +131,44 @@ class OverlayChecker::RepairState {
     } else {
       fs()->createOverlayFile(number, ByteRange());
     }
+  }
+
+  bool dematerializeDirEntry(InodeNumber parent, PathComponent childName) {
+    auto parentPath = checker_->computePath(parent);
+    auto path = checker_->computePath(parent, childName);
+    auto treeOrTreeEntry = checker_->lookup(path.path).getTry();
+
+    if (treeOrTreeEntry.hasValue()) {
+      ObjectId hash = std::visit(
+          folly::overload(
+              [](std::shared_ptr<const Tree>& tree) { return tree->getHash(); },
+              [](TreeEntry& treeEntry) { return treeEntry.getHash(); }),
+          treeOrTreeEntry.value());
+
+      auto parentDirOpt = fs()->loadOverlayDir(parent);
+      if (parentDirOpt.has_value()) {
+        auto parentDir = parentDirOpt.value();
+        auto entries = parentDir.entries();
+        if (entries.is_set()) {
+          auto result = entries->find(childName.stringPiece().data());
+          if (result != entries->end()) {
+            overlay::OverlayEntry& entry = result->second;
+            entry.hash_ref() = hash.asString();
+            entry.inodeNumber_ref() = 0;
+
+            fs()->saveOverlayDir(parent, std::move(parentDir));
+            return true;
+          }
+        }
+      }
+    } else {
+      XLOGF(
+          WARN,
+          "Unable to compare {} with source control: {}",
+          path.path,
+          treeOrTreeEntry.exception().what());
+    }
+    return false;
   }
 
  private:
@@ -354,17 +394,24 @@ class OverlayChecker::MissingMaterializedInode : public OverlayChecker::Error {
     // Create replacement data for this inode in the overlay
     XDCHECK_NE(*childInfo_.inodeNumber_ref(), 0);
     InodeNumber childInodeNumber(*childInfo_.inodeNumber_ref());
-    repair.createInodeReplacement(childInodeNumber, *childInfo_.mode_ref());
 
-    // Add an entry in the OverlayChecker's inodes_ set.
-    // In case the parent directory was part of an orphaned subtree the
-    // OrphanInode code will look for this child in the inodes_ map.
-    auto type =
-        S_ISDIR(*childInfo_.mode_ref()) ? InodeType::Dir : InodeType::File;
-    auto [iter, inserted] = repair.checker()->inodes_.try_emplace(
-        childInodeNumber, childInodeNumber, type);
-    XDCHECK(inserted);
-    iter->second.addParent(parent_, *childInfo_.mode_ref());
+    // If we were unable to fetch the scm state of the file, let's replace it
+    // with an empty tree/file. This could happen if we're offline during fsck
+    // and can't fetch the scm state.
+    if (!repair.dematerializeDirEntry(parent_, childName_)) {
+      repair.createInodeReplacement(childInodeNumber, *childInfo_.mode_ref());
+
+      // Add an entry in the OverlayChecker's inodes_ set.
+      // In case the parent directory was part of an orphaned subtree the
+      // OrphanInode code will look for this child in the inodes_ map.
+      auto type =
+          S_ISDIR(*childInfo_.mode_ref()) ? InodeType::Dir : InodeType::File;
+      auto [iter, inserted] = repair.checker()->inodes_.try_emplace(
+          childInodeNumber, childInodeNumber, type);
+      XDCHECK(inserted);
+      iter->second.addParent(parent_, *childInfo_.mode_ref());
+    }
+
     return true;
   }
 
@@ -653,8 +700,11 @@ class OverlayChecker::BadNextInodeNumber : public OverlayChecker::Error {
 
 OverlayChecker::OverlayChecker(
     FsOverlay* fs,
-    optional<InodeNumber> nextInodeNumber)
-    : fs_(fs), loadedNextInodeNumber_(nextInodeNumber) {}
+    optional<InodeNumber> nextInodeNumber,
+    LookupCallback&& lookupCallback)
+    : fs_(fs),
+      loadedNextInodeNumber_(nextInodeNumber),
+      lookupCallback_(std::move(lookupCallback)) {}
 
 OverlayChecker::~OverlayChecker() {}
 
@@ -781,6 +831,11 @@ OverlayChecker::getInodeInfo(InodeNumber number) {
   return &(iter->second);
 }
 
+ImmediateFuture<std::variant<std::shared_ptr<const Tree>, TreeEntry>>
+OverlayChecker::lookup(RelativePathPiece path) {
+  return lookupCallback_(path);
+}
+
 OverlayChecker::PathInfo OverlayChecker::computePath(InodeNumber number) {
   return cachedPathComputation(number, [&]() {
     auto info = getInodeInfo(number);
@@ -855,92 +910,154 @@ PathComponent OverlayChecker::findChildName(
   return PathComponent(folly::to<string>("[missing_child(", child, ")]"));
 }
 
-void OverlayChecker::readInodes(const ProgressCallback& progressCallback) {
-  // Walk through all of the sharded subdirectories
-  uint32_t progress10pct = 0;
-  std::array<char, 2> subdirBuffer;
-  MutableStringPiece subdir{subdirBuffer.data(), subdirBuffer.size()};
-  for (uint32_t shardID = 0; shardID < FsOverlay::kNumShards; ++shardID) {
-    // Log a INFO message every 10% done
-    uint32_t progress = (10 * shardID) / FsOverlay::kNumShards;
-    if (progress > progress10pct) {
-      XLOG(INFO) << "fsck:" << fs_->getLocalDir() << ": scan " << progress
-                 << "0% complete: " << inodes_.size() << " inodes scanned";
-      if (auto callback = progressCallback) {
-        callback(progress);
-      }
-      progress10pct = progress;
-    }
-    FsOverlay::formatSubdirShardPath(shardID, subdir);
-    auto subdirPath = fs_->getLocalDir() + PathComponentPiece{subdir};
+template <typename ErrorType, typename... Args>
+std::unique_ptr<OverlayChecker::Error> make_error(Args&&... args) {
+  return std::make_unique<ErrorType>(std::forward<Args>(args)...);
+}
 
-    readInodeSubdir(subdirPath, shardID);
+void OverlayChecker::readInodes(const ProgressCallback& progressCallback) {
+  using namespace folly::gen;
+
+  auto threads = 4;
+  uint32_t progress10pct = 0;
+
+  folly::Synchronized<std::vector<std::unique_ptr<Error>>> errors;
+
+  seq(0u, FsOverlay::kNumShards - 1) |
+      pmap(
+          [this, &errors](
+              uint32_t shardID) -> std::vector<std::tuple<uint64_t, uint32_t>> {
+            // Get entries in directory
+            std::array<char, 2> subdirBuffer;
+            MutableStringPiece subdir{subdirBuffer.data(), subdirBuffer.size()};
+            FsOverlay::formatSubdirShardPath(shardID, subdir);
+            auto path = fs_->getLocalDir() + PathComponentPiece{subdir};
+
+            XLOG(DBG5) << "fsck:" << fs_->getLocalDir() << ": scanning "
+                       << path;
+
+            std::vector<std::tuple<uint64_t, uint32_t>> inodes;
+
+            boost::system::error_code error;
+            auto boostPath = boost::filesystem::path{path.value().c_str()};
+            auto iterator =
+                boost::filesystem::directory_iterator(boostPath, error);
+            if (error.value() != 0) {
+              errors.wlock()->push_back(
+                  make_error<ShardDirectoryEnumerationError>(path, error));
+              return inodes;
+            }
+
+            auto endIterator = boost::filesystem::directory_iterator();
+            while (iterator != endIterator) {
+              const auto& dirEntry = *iterator;
+              AbsolutePath inodePath(dirEntry.path().string());
+              auto entryInodeNumber =
+                  folly::tryTo<uint64_t>(inodePath.basename().value());
+              if (entryInodeNumber.hasValue()) {
+                inodes.push_back(std::make_tuple(*entryInodeNumber, shardID));
+              } else {
+                errors.wlock()->push_back(
+                    make_error<UnexpectedOverlayFile>(inodePath));
+              }
+
+              iterator.increment(error);
+              if (error.value() != 0) {
+                errors.wlock()->push_back(
+                    make_error<ShardDirectoryEnumerationError>(path, error));
+                break;
+              }
+            }
+
+            return inodes;
+          },
+          threads) |
+      rconcat | move |
+      pmap(
+          [this, &errors](std::tuple<uint64_t, uint32_t> result)
+              -> std::optional<InodeInfo> {
+            return this->loadInode(
+                InodeNumber(std::get<0>(result)), std::get<1>(result), errors);
+          },
+          threads) |
+      move |
+      map([this, progressCallback, &progress10pct](
+              std::optional<InodeInfo> inodeInfoOpt) -> bool {
+        if (inodeInfoOpt.has_value()) {
+          auto inodeInfo = inodeInfoOpt.value();
+          ShardID shardID = static_cast<ShardID>(inodeInfo.number.get() & 0xff);
+          uint32_t progress = (10 * shardID) / FsOverlay::kNumShards;
+          if (progress > progress10pct) {
+            XLOG(INFO) << "fsck:" << fs_->getLocalDir() << ": scan " << progress
+                       << "0% complete: " << inodes_.size()
+                       << " inodes scanned";
+            if (auto callback = progressCallback) {
+              callback(progress);
+            }
+            progress10pct = progress;
+          }
+
+          updateMaxInodeNumber(inodeInfo.number);
+          inodes_.emplace(inodeInfo.number, inodeInfo);
+          if (inodes_.size() % 10000 == 0) {
+            XLOG(DBG5) << "fsck: " << fs_->getLocalDir() << ": scanned "
+                       << inodes_.size() << " inodes";
+          }
+        }
+        return true;
+      }) |
+      count;
+
+  auto errorsLock = errors.wlock();
+  while (!errorsLock->empty()) {
+    addError(std::move(errorsLock->back()));
+    errorsLock->pop_back();
   }
-  if (auto callback = progressCallback) {
-    callback(10);
-  }
+
   XLOG(INFO) << "fsck:" << fs_->getLocalDir() << ": scanned " << inodes_.size()
              << " inodes";
 }
 
-void OverlayChecker::readInodeSubdir(
-    const AbsolutePath& path,
-    ShardID shardID) {
-  XLOG(DBG5) << "fsck:" << fs_->getLocalDir() << ": scanning " << path;
-
-  boost::system::error_code error;
-  auto boostPath = boost::filesystem::path{path.value().c_str()};
-  auto iterator = boost::filesystem::directory_iterator(boostPath, error);
-  if (error.value() != 0) {
-    addError<ShardDirectoryEnumerationError>(path, error);
-    return;
+overlay::OverlayDir loadDirectoryChildren(folly::File& file) {
+  std::string serializedData;
+  if (!folly::readFile(file.fd(), serializedData)) {
+    folly::throwSystemError("read failed");
   }
 
-  auto endIterator = boost::filesystem::directory_iterator();
-  while (iterator != endIterator) {
-    const auto& dirEntry = *iterator;
-    AbsolutePath inodePath(dirEntry.path().string());
-    auto entryInodeNumber =
-        folly::tryTo<uint64_t>(inodePath.basename().value());
-    if (entryInodeNumber.hasValue()) {
-      loadInode(InodeNumber(*entryInodeNumber), shardID);
-    } else {
-      addError<UnexpectedOverlayFile>(inodePath);
-    }
-
-    iterator.increment(error);
-    if (error.value() != 0) {
-      addError<ShardDirectoryEnumerationError>(path, error);
-      break;
-    }
-  }
+  return CompactSerializer::deserialize<overlay::OverlayDir>(serializedData);
 }
 
-void OverlayChecker::loadInode(InodeNumber number, ShardID shardID) {
+std::optional<OverlayChecker::InodeInfo> OverlayChecker::loadInode(
+    InodeNumber number,
+    ShardID shardID,
+    folly::Synchronized<std::vector<std::unique_ptr<Error>>>& errors) const {
   XLOG(DBG9) << "fsck: loading inode " << number;
-  updateMaxInodeNumber(number);
 
   // Verify that we found this inode in the correct shard subdirectory.
   // Ignore the data if it is in the wrong directory.
   ShardID expectedShard = static_cast<ShardID>(number.get() & 0xff);
   if (expectedShard != shardID) {
-    addError<UnexpectedInodeShard>(number, shardID);
-    return;
+    auto error = make_error<UnexpectedInodeShard>(number, shardID);
+    errors.wlock()->push_back(std::move(error));
+    return std::nullopt;
   }
 
-  inodes_.emplace(number, loadInodeInfo(number));
+  return loadInodeInfo(number, errors);
 }
 
-OverlayChecker::InodeInfo OverlayChecker::loadInodeInfo(InodeNumber number) {
-  auto inodeError = [this, number](auto&&... args) {
-    addError<InodeDataError>(number, args...);
-    return InodeInfo(number, InodeType::Error);
+std::optional<OverlayChecker::InodeInfo> OverlayChecker::loadInodeInfo(
+    InodeNumber number,
+    folly::Synchronized<std::vector<std::unique_ptr<Error>>>& errors) const {
+  auto inodeError = [number,
+                     &errors](auto&&... args) -> std::optional<InodeInfo> {
+    errors.wlock()->push_back(make_error<InodeDataError>(number, args...));
+    return {InodeInfo(number, InodeType::Error)};
   };
 
   // Open the inode file
   folly::File file;
   try {
-    file = fs_->openFileNoVerify(number);
+    file = this->fs_->openFileNoVerify(number);
   } catch (const std::exception& ex) {
     return inodeError("error opening file: ", folly::exceptionStr(ex));
   }
@@ -993,22 +1110,14 @@ OverlayChecker::InodeInfo OverlayChecker::loadInodeInfo(InodeNumber number) {
 
   if (type == InodeType::Dir) {
     try {
-      return InodeInfo(number, loadDirectoryChildren(file));
+      return {InodeInfo(number, loadDirectoryChildren(file))};
     } catch (const std::exception& ex) {
       return inodeError(
           "error parsing directory contents: ", folly::exceptionStr(ex));
     }
+  } else {
+    return {InodeInfo(number, type)};
   }
-  return InodeInfo(number, type);
-}
-
-overlay::OverlayDir OverlayChecker::loadDirectoryChildren(folly::File& file) {
-  std::string serializedData;
-  if (!folly::readFile(file.fd(), serializedData)) {
-    folly::throwSystemError("read failed");
-  }
-
-  return CompactSerializer::deserialize<overlay::OverlayDir>(serializedData);
 }
 
 void OverlayChecker::linkInodeChildren() {

@@ -7,35 +7,39 @@
 
 //! Recursively fetch the contents of a directory.
 
-use anyhow::{bail, Context, Error};
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Result;
 use bytesize::ByteSize;
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
-use futures::future::{BoxFuture, FutureExt};
+use futures::future::BoxFuture;
+use futures::future::FutureExt;
 use futures::pin_mut;
-use futures::stream::{self, Stream, StreamExt, TryStreamExt};
+use futures::stream;
+use futures::stream::Stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use source_control::types as thrift;
 use std::borrow::Cow;
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::AsyncBufReadExt;
+use tokio::io::AsyncWriteExt;
 
-use crate::args::commit_id::{add_commit_id_args, get_commit_id, resolve_commit_id};
-use crate::args::path::{add_path_args, get_path};
-use crate::args::repo::{add_repo_args, get_repo_specifier};
+use crate::args::commit_id::resolve_commit_id;
+use crate::args::commit_id::CommitIdArgs;
+use crate::args::path::PathArgs;
+use crate::args::progress::ProgressArgs;
+use crate::args::progress::ProgressOutput;
+use crate::args::repo::RepoArgs;
 use crate::connection::Connection;
-use crate::lib::path_tree::{PathItem, PathTree};
-use crate::lib::progress::{add_progress_args, progress_renderer, ProgressOutput};
-use crate::render::{Render, RenderStream};
-
-pub(super) const NAME: &str = "export";
-
-const ARG_OUTPUT: &str = "OUTPUT";
-const ARG_VERBOSE: &str = "VERBOSE";
-const ARG_MAKE_PARENT_DIRS: &str = "MAKE_PARENT_DIRS";
-const ARG_PATH_LIST_FILE: &str = "PATH_LIST_FILE";
-const ARG_CASE_INSENSITIVE: &str = "CASE_INSENSITIVE";
+use crate::lib::path_tree::PathItem;
+use crate::lib::path_tree::PathTree;
+use crate::render::Render;
+use crate::ScscApp;
 
 /// Chunk size for requests.
 const TREE_CHUNK_SIZE: i64 = source_control::TREE_LIST_MAX_LIMIT;
@@ -45,46 +49,32 @@ const FILE_CHUNK_SIZE: i64 = source_control::FILE_CONTENT_CHUNK_RECOMMENDED_SIZE
 const CONCURRENT_TREE_FETCHES: usize = 4;
 const CONCURRENT_FILE_FETCHES: usize = 4;
 
-pub(super) fn make_subcommand<'a, 'b>() -> App<'a, 'b> {
-    let cmd = SubCommand::with_name(NAME)
-        .about("Recursively fetch the contents of a directory")
-        .setting(AppSettings::ColoredHelp);
-    let cmd = add_repo_args(cmd);
-    let cmd = add_commit_id_args(cmd);
-    let cmd = add_path_args(cmd);
-    let cmd = add_progress_args(cmd);
-    let cmd = cmd.arg(
-        Arg::with_name(ARG_OUTPUT)
-            .short("o")
-            .long("output")
-            .takes_value(true)
-            .number_of_values(1)
-            .required(true)
-            .help("Destination to export to"),
-    );
-    let cmd = cmd.arg(
-        Arg::with_name(ARG_VERBOSE)
-            .short("v")
-            .long("verbose")
-            .help("Show paths of files fetched"),
-    );
-    let cmd = cmd.arg(
-        Arg::with_name(ARG_MAKE_PARENT_DIRS)
-            .long("make-parent-dirs")
-            .help("Create parent directories of the destination if they do not exist"),
-    );
-    let cmd = cmd.arg(
-        Arg::with_name(ARG_PATH_LIST_FILE)
-            .long("path-list-file")
-            .takes_value(true)
-            .help("Filename of a file containing a list of paths (relative to PATH) to export"),
-    );
-    let cmd = cmd.arg(
-        Arg::with_name(ARG_CASE_INSENSITIVE)
-            .long("case-insensitive")
-            .help("Perform additional requests to try for case insensitive matches"),
-    );
-    cmd
+#[derive(clap::Parser)]
+/// Recursively fetch the contents of a directory
+pub(super) struct CommandArgs {
+    #[clap(flatten)]
+    repo_args: RepoArgs,
+    #[clap(flatten)]
+    commit_id_args: CommitIdArgs,
+    #[clap(flatten)]
+    path_args: PathArgs,
+    #[clap(flatten)]
+    progress_args: ProgressArgs,
+    #[clap(long, short)]
+    /// Destination to export to
+    output: PathBuf,
+    #[clap(long, short)]
+    /// Show paths of files fetched
+    verbose: bool,
+    #[clap(long)]
+    /// Create parent directories of the destination if they do not exist
+    make_parent_dirs: bool,
+    #[clap(long)]
+    /// Filename of a file containing a list of paths (relative to PATH) to export
+    path_list_file: Option<String>,
+    #[clap(long)]
+    /// Perform additional requests to try for case insensitive matches
+    case_insensitive: bool,
 }
 
 /// Returns a stream of the names of the entries in a single directory `path`.
@@ -92,7 +82,7 @@ async fn stream_tree_elements(
     connection: &Connection,
     commit: &thrift::CommitSpecifier,
     path: &str,
-) -> Result<impl Stream<Item = Result<String, Error>>, Error> {
+) -> Result<impl Stream<Item = Result<String>>> {
     let tree = thrift::TreeSpecifier::by_commit_path(thrift::CommitPathSpecifier {
         commit: commit.clone(),
         path: path.to_string(),
@@ -165,7 +155,7 @@ fn case_insensitive_subpath<'a>(
     commit: &'a thrift::CommitSpecifier,
     target_dir: &'a str,
     subpath: &'a str,
-) -> BoxFuture<'a, Result<Option<String>, Error>> {
+) -> BoxFuture<'a, Result<Option<String>>> {
     async move {
         let (target_elem, target_subpath) = subpath.split_once('/').unwrap_or((subpath, ""));
         let target_elem_lower = target_elem.to_lowercase();
@@ -219,7 +209,7 @@ async fn case_insensitive_path(
     connection: &Connection,
     commit: &thrift::CommitSpecifier,
     path: &str,
-) -> Result<Option<String>, Error> {
+) -> Result<Option<String>> {
     // Heuristic: typically it's the last few path elements that actually need
     // casefolding, so start from the end of the path and look up parent
     // directories one by one.
@@ -246,8 +236,8 @@ async fn case_insensitive_path(
 
 fn join_path(path: &str, elem: &str) -> String {
     let mut path = path.to_string();
-    if !path.is_empty() && !path.ends_with("/") {
-        path.push_str("/");
+    if !path.is_empty() && !path.ends_with('/') {
+        path.push('/');
     }
     path.push_str(elem);
     path
@@ -257,7 +247,7 @@ fn export_tree_entry(
     path: &str,
     destination: &Path,
     entry: thrift::TreeEntry,
-) -> Result<ExportItem, Error> {
+) -> Result<ExportItem> {
     match entry.info {
         thrift::EntryInfo::tree(info) => Ok(ExportItem::Tree {
             path: join_path(path, &entry.name),
@@ -284,7 +274,7 @@ fn export_filtered_tree_entry(
     entry: thrift::TreeEntry,
     filter: &mut PathTree,
     casefold: Casefold,
-) -> Result<Option<ExportItem>, Error> {
+) -> Result<Option<ExportItem>> {
     match (filter.remove(&casefold.of(&entry.name)), entry.info) {
         (None, _) => Ok(None),
         (Some(item), thrift::EntryInfo::tree(info)) => {
@@ -319,7 +309,7 @@ async fn export_tree(
     destination: PathBuf,
     filter: Option<PathTree>,
     casefold: Casefold,
-) -> Result<Vec<ExportItem>, Error> {
+) -> Result<Vec<ExportItem>> {
     tokio::fs::create_dir(&destination).await?;
     let tree = thrift::TreeSpecifier::by_id(thrift::TreeIdSpecifier {
         repo,
@@ -346,7 +336,7 @@ async fn export_tree(
                             limit: TREE_CHUNK_SIZE,
                             ..Default::default()
                         };
-                        Ok::<_, Error>(connection.tree_list(&tree, &params).await?.entries)
+                        anyhow::Ok(connection.tree_list(&tree, &params).await?.entries)
                     }
                 }
             })
@@ -383,7 +373,7 @@ async fn export_file(
     size: u64,
     type_: thrift::EntryType,
     bytes_written: &Arc<AtomicU64>,
-) -> Result<(), Error> {
+) -> Result<()> {
     let file = thrift::FileSpecifier::by_id(thrift::FileIdSpecifier {
         repo,
         id,
@@ -438,7 +428,7 @@ async fn export_file(
                 // Propagate read permissions to execute permissions.
                 permissions.set_mode(mode | ((mode & 0o444) >> 2));
                 std::fs::set_permissions(&destination, permissions)?;
-                Ok::<_, Error>(())
+                anyhow::Ok(())
             })
             .await??;
         }
@@ -454,7 +444,7 @@ async fn export_item(
     casefold: Casefold,
     files_written: Arc<AtomicU64>,
     bytes_written: Arc<AtomicU64>,
-) -> Result<(Option<String>, Vec<ExportItem>), Error> {
+) -> Result<(Option<String>, Vec<ExportItem>)> {
     match item {
         ExportItem::Tree {
             path,
@@ -510,33 +500,29 @@ struct ExportedFile {
 }
 
 impl Render for ExportedFile {
-    fn render_tty(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    type Args = ();
+
+    fn render_tty(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         writeln!(w, "{}", self.path)?;
         Ok(())
     }
 }
 
-pub(super) async fn run(
-    matches: &ArgMatches<'_>,
-    connection: Connection,
-) -> Result<RenderStream, Error> {
-    let destination: PathBuf = matches
-        .value_of_os(ARG_OUTPUT)
-        .expect("destination is required")
-        .into();
+pub(super) async fn run(app: ScscApp, args: CommandArgs) -> Result<()> {
+    let destination: PathBuf = args.output;
     if destination.exists() {
         bail!(
             "destination ({}) already exists",
             destination.to_string_lossy()
         );
     }
-    let casefold = if matches.is_present(ARG_CASE_INSENSITIVE) {
+    let casefold = if args.case_insensitive {
         Casefold::Insensitive
     } else {
         Casefold::Sensitive
     };
 
-    let path_tree = match matches.value_of_os(ARG_PATH_LIST_FILE) {
+    let path_tree = match args.path_list_file {
         Some(path_list_file) => {
             let file = tokio::fs::File::open(path_list_file)
                 .await
@@ -554,7 +540,7 @@ pub(super) async fn run(
         None => None,
     };
 
-    if matches.is_present(ARG_MAKE_PARENT_DIRS) {
+    if args.make_parent_dirs {
         if let Some(parent) = destination.parent() {
             if !parent.exists() {
                 tokio::fs::create_dir_all(parent)
@@ -564,15 +550,15 @@ pub(super) async fn run(
         }
     }
 
-    let repo = get_repo_specifier(matches).expect("repository is required");
-    let commit_id = get_commit_id(matches)?;
-    let id = resolve_commit_id(&connection, &repo, &commit_id).await?;
+    let repo = args.repo_args.clone().into_repo_specifier();
+    let commit_id = args.commit_id_args.clone().into_commit_id();
+    let id = resolve_commit_id(&app.connection, &repo, &commit_id).await?;
     let commit = thrift::CommitSpecifier {
         repo: repo.clone(),
         id,
         ..Default::default()
     };
-    let path = get_path(matches).expect("path is required");
+    let path = args.path_args.clone().path;
     let mut commit_path = thrift::CommitPathSpecifier {
         commit: commit.clone(),
         path: path.clone(),
@@ -583,11 +569,17 @@ pub(super) async fn run(
         ..Default::default()
     };
     let response = {
-        let mut response = connection.commit_path_info(&commit_path, &params).await?;
+        let mut response = app
+            .connection
+            .commit_path_info(&commit_path, &params)
+            .await?;
         if !response.exists && casefold == Casefold::Insensitive {
-            if let Some(case_path) = case_insensitive_path(&connection, &commit, &path).await? {
+            if let Some(case_path) = case_insensitive_path(&app.connection, &commit, &path).await? {
                 commit_path.path = case_path;
-                response = connection.commit_path_info(&commit_path, &params).await?;
+                response = app
+                    .connection
+                    .commit_path_info(&commit_path, &params)
+                    .await?;
             }
         }
         response
@@ -619,7 +611,7 @@ pub(super) async fn run(
             if path_tree.is_some() {
                 // A list of paths to filter has been provided, but the target
                 // is a file, so none of the paths can possible match.
-                return Ok(stream::empty().boxed());
+                return Ok(());
             }
             ExportItem::File {
                 path,
@@ -639,7 +631,7 @@ pub(super) async fn run(
         let bytes_written = bytes_written.clone();
         move |item| {
             export_item(
-                connection.clone(),
+                app.connection.clone(),
                 repo.clone(),
                 item,
                 casefold,
@@ -650,11 +642,9 @@ pub(super) async fn run(
         }
     });
 
-    let stream = if matches.is_present(ARG_VERBOSE) {
+    let stream = if args.verbose {
         stream
-            .try_filter_map(|path| async move {
-                Ok(path.map(|path| Box::new(ExportedFile { path }) as Box<dyn Render>))
-            })
+            .try_filter_map(|path| async move { Ok(path.map(|path| ExportedFile { path })) })
             .left_stream()
     } else {
         stream
@@ -662,7 +652,7 @@ pub(super) async fn run(
             .right_stream()
     };
 
-    Ok(progress_renderer(matches, stream, move || {
+    let render = args.progress_args.render_progress(stream, move || {
         let files_written = files_written.load(Ordering::Relaxed);
         let bytes_written = bytes_written.load(Ordering::Relaxed);
         let message = format!(
@@ -673,5 +663,6 @@ pub(super) async fn run(
             ByteSize::b(total_size).to_string_as(true),
         );
         ProgressOutput::new(message, bytes_written, total_size)
-    }))
+    });
+    app.target.render(&(), render).await
 }

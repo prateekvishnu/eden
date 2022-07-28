@@ -5,23 +5,29 @@
  * GNU General Public License version 2.
  */
 
-use crate::{Entry, Manifest, PathTree, StoreLoadable};
-use anyhow::{format_err, Error};
+use crate::AsyncManifest as Manifest;
+use crate::Entry;
+use crate::PathTree;
+use crate::StoreLoadable;
+use anyhow::format_err;
+use anyhow::Error;
+use borrowed::borrowed;
 use cloned::cloned;
 use context::CoreContext;
-use futures::{
-    channel::mpsc,
-    future::{self, FutureExt, TryFutureExt},
-    stream::{StreamExt, TryStreamExt},
-};
-use mononoke_types::{MPath, MPathElement};
-use std::{
-    collections::{BTreeMap, HashSet},
-    fmt,
-    future::Future,
-    hash::Hash,
-    sync::Arc,
-};
+use futures::channel::mpsc;
+use futures::future;
+use futures::future::FutureExt;
+use futures::future::TryFutureExt;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use mononoke_types::MPath;
+use mononoke_types::MPathElement;
+use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::fmt;
+use std::future::Future;
+use std::hash::Hash;
+use std::sync::Arc;
 
 /// Information passed to `create_tree` function when tree node is constructed
 ///
@@ -76,22 +82,15 @@ where
     Leaf: Send + 'static,
     IntermediateLeafId: Send + From<LeafId> + 'static + fmt::Debug + Clone + Eq + Hash,
     TreeId: StoreLoadable<Store> + Clone + Eq + Hash + fmt::Debug + Send + Sync + 'static,
-    TreeId::Value: Manifest<TreeId = TreeId, LeafId = LeafId>,
-    <TreeId as StoreLoadable<Store>>::Value: Send,
+    TreeId::Value: Manifest<Store, TreeId = TreeId, LeafId = LeafId>,
+    <TreeId as StoreLoadable<Store>>::Value: Send + Sync,
     T: Fn(TreeInfo<TreeId, IntermediateLeafId, Ctx>) -> TFut + Send + Sync + 'static,
     TFut: Future<Output = Result<(Ctx, TreeId), Error>> + Send + 'static,
     L: Fn(LeafInfo<IntermediateLeafId, Leaf>) -> LFut + Send + Sync + 'static,
     LFut: Future<Output = Result<(Ctx, IntermediateLeafId), Error>> + Send + 'static,
     Ctx: Send + 'static,
 {
-    derive_manifest_inner(
-        ctx.clone(),
-        store,
-        parents,
-        changes,
-        create_tree,
-        create_leaf,
-    )
+    derive_manifest_inner(ctx, store, parents, changes, create_tree, create_leaf)
 }
 
 /// Construct a new manifest from parent manifests and a list of changes from a bonsai commit.
@@ -164,8 +163,8 @@ where
     Leaf: Send + 'static,
     IntermediateLeafId: Send + From<LeafId> + 'static + Eq + Hash + Clone + fmt::Debug,
     TreeId: StoreLoadable<Store> + Clone + Eq + Hash + fmt::Debug + Send + Sync + 'static,
-    TreeId::Value: Manifest<TreeId = TreeId, LeafId = LeafId>,
-    <TreeId as StoreLoadable<Store>>::Value: Send,
+    TreeId::Value: Manifest<Store, TreeId = TreeId, LeafId = LeafId>,
+    <TreeId as StoreLoadable<Store>>::Value: Send + Sync,
     T: Fn(TreeInfo<TreeId, IntermediateLeafId, Ctx>) -> TFut + Send + Sync + 'static,
     TFut: Future<Output = Result<(Ctx, TreeId), Error>> + Send + 'static,
     L: Fn(LeafInfo<IntermediateLeafId, Leaf>) -> LFut + Send + Sync + 'static,
@@ -303,8 +302,8 @@ where
     IntermediateLeafId: Send + From<LeafId> + 'static + Eq + Hash + fmt::Debug + Clone,
     Store: Sync + Send + Clone + 'static,
     TreeId: StoreLoadable<Store> + Clone + Eq + Hash + fmt::Debug + Send + Sync + 'static,
-    TreeId::Value: Manifest<TreeId = TreeId, LeafId = LeafId>,
-    <TreeId as StoreLoadable<Store>>::Value: Send,
+    TreeId::Value: Manifest<Store, TreeId = TreeId, LeafId = LeafId>,
+    <TreeId as StoreLoadable<Store>>::Value: Send + Sync,
     T: Fn(
             TreeInfo<TreeId, IntermediateLeafId, Ctx>,
             mpsc::UnboundedSender<BoxFuture<(), Error>>,
@@ -323,7 +322,7 @@ where
     let (sender, receiver) = mpsc::unbounded();
 
     let derive = derive_manifest_inner(
-        ctx.clone(),
+        ctx,
         store,
         parents,
         changes,
@@ -351,7 +350,7 @@ enum Change<LeafId> {
 
 impl<Leaf> From<Option<Leaf>> for Change<Leaf> {
     fn from(change: Option<Leaf>) -> Self {
-        change.map(Change::Add).unwrap_or(Change::Remove)
+        change.map_or(Change::Remove, Change::Add)
     }
 }
 
@@ -399,7 +398,7 @@ where
     IntermediateLeafId: Send + From<LeafId> + 'static + fmt::Debug + Clone + Eq + Hash,
     LeafId: Clone + Eq + Hash + fmt::Debug,
     TreeId: StoreLoadable<Store> + Clone + Eq + Hash + fmt::Debug + Sync,
-    TreeId::Value: Manifest<TreeId = TreeId, LeafId = LeafId>,
+    TreeId::Value: Manifest<Store, TreeId = TreeId, LeafId = LeafId>,
 {
     let MergeNode {
         name,
@@ -529,7 +528,7 @@ where
     }
 
     // Fetch parent trees and merge them.
-    let store = &store;
+    borrowed!(ctx, store);
     let manifests = future::try_join_all(parent_subtrees.iter().map(move |tree_id| {
         cloned!(ctx);
         async move { tree_id.load(&ctx, store).await }
@@ -539,7 +538,10 @@ where
     let mut deps: BTreeMap<MPathElement, _> = Default::default();
     // add subentries from all parents
     for manifest in manifests {
-        for (name, entry) in manifest.list() {
+        // TODO(T123518092): Do this concurrently where possible. Also, skip
+        // it altogether if possible, instead using lookup.
+        let mut stream = manifest.list(ctx, store).await?;
+        while let Some((name, entry)) = stream.try_next().await? {
             let subentry = deps.entry(name.clone()).or_insert_with(|| MergeNode {
                 path: Some(MPath::join_opt_element(path.as_ref(), &name)),
                 name: Some(name),

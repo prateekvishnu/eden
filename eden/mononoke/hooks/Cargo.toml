@@ -22,6 +22,7 @@ bookmarks = { version = "0.1.0", path = "../bookmarks" }
 bytes = { version = "1.1", features = ["serde"] }
 cloned = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 context = { version = "0.1.0", path = "../server/context" }
+facet = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 fbinit = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 futures = { version = "0.3.13", features = ["async-await", "compat"] }
 futures_stats = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
@@ -30,7 +31,7 @@ hyper = { version = "0.14.7", features = ["client", "http1", "http2"] }
 hyper-tls = "0.5"
 ipnetwork = "0.15"
 itertools = "0.10.3"
-lazy_static = "1.0"
+lazy_static = "1.4"
 manifest = { version = "0.1.0", path = "../manifest" }
 maplit = "1.0"
 mercurial_types = { version = "0.1.0", path = "../mercurial/types" }
@@ -48,14 +49,16 @@ stats = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust
 tempdir = "0.3"
 thiserror = "1.0.30"
 tokio = { version = "1.15", features = ["full", "test-util", "tracing"] }
+tunables = { version = "0.1.0", path = "../tunables" }
 
 [dev-dependencies]
-blobrepo = { version = "0.1.0", path = "../blobrepo" }
 blobstore = { version = "0.1.0", path = "../blobstore" }
 borrowed = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 fbinit-tokio = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 fixtures = { version = "0.1.0", path = "../tests/fixtures" }
 mononoke_types-mocks = { version = "0.1.0", path = "../mononoke_types/mocks" }
+pretty_assertions = { version = "1.2", features = ["alloc"], default-features = false }
+repo_blobstore = { version = "0.1.0", path = "../blobrepo/repo_blobstore" }
 sorted_vector_map = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 test_repo_factory = { version = "0.1.0", path = "../repo_factory/test_repo_factory" }
 tests_utils = { version = "0.1.0", path = "../tests/utils" }

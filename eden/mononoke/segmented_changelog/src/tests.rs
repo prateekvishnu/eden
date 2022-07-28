@@ -8,46 +8,74 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{format_err, Context, Result};
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Result;
 use fbinit::FacebookInit;
 use futures::compat::Stream01CompatExt;
-use futures::future::{try_join_all, FutureExt};
+use futures::future::try_join_all;
+use futures::future::FutureExt;
 use futures::stream;
 use futures::StreamExt;
 use once_cell::sync::Lazy;
 
-use blobrepo::{AsBlobRepo, BlobRepo};
+use blobrepo::AsBlobRepo;
+use blobrepo::BlobRepo;
 use bonsai_hg_mapping::BonsaiHgMappingArc;
-use bookmarks::{BookmarkName, Bookmarks, BookmarksArc};
+use bookmarks::BookmarkName;
+use bookmarks::Bookmarks;
+use bookmarks::BookmarksArc;
 use bulkops::PublicChangesetBulkFetch;
-use caching_ext::{CachelibHandler, MemcacheHandler};
+use caching_ext::CachelibHandler;
+use caching_ext::MemcacheHandler;
 use changeset_fetcher::PrefetchedChangesetsFetcher;
-use changesets::{ChangesetEntry, ChangesetsArc, ChangesetsRef};
+use changesets::ChangesetEntry;
+use changesets::ChangesetsArc;
+use changesets::ChangesetsRef;
 use context::CoreContext;
+use fixtures::set_bookmark;
+use fixtures::BranchEven;
+use fixtures::Linear;
+use fixtures::MergeEven;
+use fixtures::MergeUneven;
 use fixtures::TestRepoFixture;
-use fixtures::{set_bookmark, BranchEven, Linear, MergeEven, MergeUneven, UnsharedMergeEven};
+use fixtures::UnsharedMergeEven;
 use maplit::hashmap;
-use mononoke_types::{ChangesetId, RepositoryId};
-use phases::{PhasesArc, PhasesRef};
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
+use phases::PhasesArc;
+use phases::PhasesRef;
 use revset::AncestorsNodeStream;
 use sql_construct::SqlConstruct;
 use sql_ext::replication::NoReplicaLagMonitor;
-use tests_utils::{resolve_cs_id, CreateCommitContext};
-use tunables::{override_tunables, with_tunables_async};
+use tests_utils::resolve_cs_id;
+use tests_utils::CreateCommitContext;
+use tunables::override_tunables;
+use tunables::with_tunables_async;
 
 use crate::builder::SegmentedChangelogSqlConnections;
 use crate::iddag::IdDagSaveStore;
-use crate::idmap::{CacheHandlers, ConcurrentMemIdMap, IdMap, IdMapFactory, SqlIdMap};
-use crate::manager::{SegmentedChangelogManager, SegmentedChangelogType};
+use crate::idmap::CacheHandlers;
+use crate::idmap::ConcurrentMemIdMap;
+use crate::idmap::IdMap;
+use crate::idmap::IdMapFactory;
+use crate::idmap::SqlIdMap;
+use crate::manager::SegmentedChangelogManager;
+use crate::manager::SegmentedChangelogType;
 use crate::on_demand::OnDemandUpdateSegmentedChangelog;
 use crate::owned::OwnedSegmentedChangelog;
 use crate::periodic_reload::PeriodicReloadSegmentedChangelog;
 use crate::tailer::SegmentedChangelogTailer;
-use crate::types::{IdDagVersion, IdMapVersion, SegmentedChangelogVersion};
+use crate::types::IdDagVersion;
+use crate::types::IdMapVersion;
+use crate::types::SegmentedChangelogVersion;
 use crate::version_store::SegmentedChangelogVersionStore;
-use crate::{
-    CloneHints, InProcessIdDag, Location, SeedHead, SegmentedChangelog, SegmentedChangelogRef,
-};
+use crate::CloneHints;
+use crate::InProcessIdDag;
+use crate::Location;
+use crate::SeedHead;
+use crate::SegmentedChangelog;
+use crate::SegmentedChangelogRef;
 
 #[async_trait::async_trait]
 trait SegmentedChangelogExt {
@@ -89,7 +117,7 @@ async fn new_tailer(
 ) -> Result<SegmentedChangelogTailer> {
     let prefetched = match prefetched {
         None => stream::empty().boxed(),
-        Some(prefetched) => stream::iter(prefetched.into_iter().map(|cs_id| Ok(cs_id))).boxed(),
+        Some(prefetched) => stream::iter(prefetched.into_iter().map(Ok)).boxed(),
     };
 
     let changeset_fetcher = Arc::new(
@@ -266,7 +294,7 @@ async fn validate_build_idmap(
 }
 
 async fn fetch_cs_entry(ctx: &CoreContext, repo: &BlobRepo, cs: &str) -> Result<ChangesetEntry> {
-    let cs = resolve_cs_id(&ctx, &repo, cs).await?;
+    let cs = resolve_cs_id(ctx, &repo, cs).await?;
     repo.changesets()
         .get(ctx.clone(), cs)
         .await?
@@ -600,7 +628,7 @@ async fn test_changeset_id_to_location_multiple_heads(fb: FacebookInit) -> Resul
 
     set_bookmark(
         fb,
-        blobrepo.clone(),
+        &blobrepo,
         "1d8a907f7b4bf50c6a09c16361e2205047ecc5e5",
         BOOKMARK_NAME.clone(),
     )
@@ -928,7 +956,7 @@ async fn test_periodic_update(fb: FacebookInit) -> Result<()> {
 
     let start_hg_id = "607314ef579bd2407752361ba1b0c1729d08b281";
     let start_cs = resolve_cs_id(&ctx, &blobrepo, start_hg_id).await?;
-    set_bookmark(fb, blobrepo.clone(), start_hg_id, bookmark_name.clone()).await;
+    set_bookmark(fb, &blobrepo, start_hg_id, bookmark_name.clone()).await;
 
     tokio::time::pause(); // TODO: pause only works with the `current_thread` Runtime.
 
@@ -954,7 +982,7 @@ async fn test_periodic_update(fb: FacebookInit) -> Result<()> {
 
     let new_hg_id = "79a13814c5ce7330173ec04d279bf95ab3f652fb";
     let new_cs = resolve_cs_id(&ctx, &blobrepo, new_hg_id).await?;
-    set_bookmark(fb, blobrepo.clone(), new_hg_id, bookmark_name.clone()).await;
+    set_bookmark(fb, &blobrepo, new_hg_id, bookmark_name.clone()).await;
 
     tokio::time::advance(Duration::from_secs(5)).await;
     // second tick is ready to be scheduled

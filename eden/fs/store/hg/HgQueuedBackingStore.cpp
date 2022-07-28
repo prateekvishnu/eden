@@ -17,8 +17,8 @@
 #include <folly/Range.h>
 #include <folly/futures/Future.h>
 #include <folly/logging/xlog.h>
+#include <folly/portability/GFlags.h>
 #include <folly/system/ThreadName.h>
-#include <gflags/gflags.h>
 
 #include "eden/fs/config/ReloadableConfig.h"
 #include "eden/fs/model/Blob.h"
@@ -37,6 +37,7 @@
 #include "eden/fs/utils/IDGen.h"
 #include "eden/fs/utils/PathFuncs.h"
 #include "eden/fs/utils/StaticAssert.h"
+#include "eden/fs/utils/Throw.h"
 #include "folly/ScopeGuard.h"
 #include "folly/String.h"
 
@@ -238,8 +239,37 @@ void HgQueuedBackingStore::processRequest() {
   }
 }
 
-bool HgQueuedBackingStore::hasBijectiveBlobIds() {
-  return config_->getEdenConfig()->hgBijectiveBlobIds.getValue();
+ObjectComparison HgQueuedBackingStore::compareObjectsById(
+    const ObjectId& one,
+    const ObjectId& two) {
+  // This is by far the common case, so check it first:
+  if (one.bytesEqual(two)) {
+    return ObjectComparison::Identical;
+  }
+
+  if (config_->getEdenConfig()->hgBijectiveBlobIds.getValue()) {
+    // If one and two differ, and hg bijective blob IDs is enabled, then we know
+    // the blob contents differ.
+    return ObjectComparison::Different;
+  }
+
+  // Now parse the object IDs and read their rev hashes.
+  auto oneProxy =
+      HgProxyHash::load(localStore_.get(), one, "areObjectIdsEquivalent");
+  auto twoProxy =
+      HgProxyHash::load(localStore_.get(), two, "areObjectIdsEquivalent");
+
+  // If the rev hashes are the same, we know the contents are the same.
+  if (oneProxy.revHash() == twoProxy.revHash()) {
+    return ObjectComparison::Identical;
+  }
+
+  // If rev hashes differ, and hg IDs aren't bijective, then we don't know
+  // whether the IDs refer to the same contents or not.
+  //
+  // Mercurial's blob hashes also include history metadata, so there may be
+  // multiple different blob hashes for the same file contents.
+  return ObjectComparison::Unknown;
 }
 
 RootId HgQueuedBackingStore::parseRootId(folly::StringPiece rootId) {
@@ -265,8 +295,8 @@ ObjectId HgQueuedBackingStore::staticParseObjectId(
     folly::StringPiece objectId) {
   if (objectId.startsWith("proxy-")) {
     if (objectId.size() != 46) {
-      throw std::invalid_argument(
-          fmt::format("invalid proxy hash length: {}", objectId.size()));
+      throwf<std::invalid_argument>(
+          "invalid proxy hash length: {}", objectId.size());
     }
 
     return ObjectId{folly::unhexlify<folly::fbstring>(objectId.subpiece(6))};
@@ -277,13 +307,12 @@ ObjectId HgQueuedBackingStore::staticParseObjectId(
   }
 
   if (objectId.size() < 41) {
-    throw std::invalid_argument(
-        fmt::format("hg object ID too short: {}", objectId));
+    throwf<std::invalid_argument>("hg object ID too short: {}", objectId);
   }
 
   if (objectId[40] != ':') {
-    throw std::invalid_argument(
-        fmt::format("missing separator colon in hg object ID: {}", objectId));
+    throwf<std::invalid_argument>(
+        "missing separator colon in hg object ID: {}", objectId);
   }
 
   Hash20 hgRevHash{objectId.subpiece(0, 40)};

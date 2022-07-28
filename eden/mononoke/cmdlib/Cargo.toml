@@ -24,6 +24,7 @@ environment = { version = "0.1.0", path = "environment" }
 facet = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 fbinit = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 futures = { version = "0.3.13", features = ["async-await", "compat"] }
+hostname = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 libc = "0.2.121"
 maybe-owned = "0.3.4"
 megarepo_config = { version = "0.1.0", path = "../megarepo_api/megarepo_config" }
@@ -34,8 +35,9 @@ metaconfig_types = { version = "0.1.0", path = "../metaconfig/types" }
 mononoke_app = { version = "0.1.0", path = "mononoke_app" }
 mononoke_types = { version = "0.1.0", path = "../mononoke_types" }
 observability = { version = "0.1.0", path = "../observability" }
-once_cell = "1.8"
+once_cell = "1.12"
 panichandler = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
+permission_checker = { version = "0.1.0", path = "../permission_checker" }
 rand_distr = "0.4"
 rendezvous = { version = "0.1.0", path = "../common/rendezvous" }
 repo_factory = { version = "0.1.0", path = "../repo_factory" }

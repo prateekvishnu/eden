@@ -6,46 +6,38 @@
  */
 
 use anyhow::Result;
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
-use futures::stream::{self, StreamExt};
 use source_control::types as thrift;
 
-use crate::args::commit_id::{add_commit_id_args, get_commit_id, resolve_commit_id};
-use crate::args::pushvars::{add_pushvar_args, get_pushvars};
-use crate::args::repo::{add_repo_args, get_repo_specifier};
-use crate::args::service_id::{add_service_id_args, get_service_id};
-use crate::connection::Connection;
-use crate::render::RenderStream;
+use crate::args::commit_id::resolve_commit_id;
+use crate::args::commit_id::CommitIdArgs;
+use crate::args::pushvars::PushvarArgs;
+use crate::args::repo::RepoArgs;
+use crate::args::service_id::ServiceIdArgs;
+use crate::ScscApp;
 
-pub(super) const NAME: &str = "create-bookmark";
-
-const ARG_NAME: &str = "BOOKMARK_NAME";
-
-pub(super) fn make_subcommand<'a, 'b>() -> App<'a, 'b> {
-    let cmd = SubCommand::with_name(NAME)
-        .about("Create a bookmark")
-        .setting(AppSettings::ColoredHelp);
-    let cmd = add_repo_args(cmd);
-    let cmd = add_commit_id_args(cmd);
-    let cmd = add_service_id_args(cmd);
-    let cmd = add_pushvar_args(cmd);
-    cmd.arg(
-        Arg::with_name(ARG_NAME)
-            .short("n")
-            .long("name")
-            .takes_value(true)
-            .help("Name of the bookmark to create")
-            .required(true),
-    )
+#[derive(clap::Parser)]
+/// Create a bookmark
+pub(super) struct CommandArgs {
+    #[clap(flatten)]
+    repo_args: RepoArgs,
+    #[clap(flatten)]
+    commit_id_args: CommitIdArgs,
+    #[clap(flatten)]
+    service_id_args: ServiceIdArgs,
+    #[clap(flatten)]
+    pushvar_args: PushvarArgs,
+    #[clap(long, short)]
+    /// Name of the bookmark to create
+    name: String,
 }
 
-pub(super) async fn run(matches: &ArgMatches<'_>, connection: Connection) -> Result<RenderStream> {
-    let repo = get_repo_specifier(matches).expect("repository is required");
-    let commit_id = get_commit_id(matches)?;
-    let id = resolve_commit_id(&connection, &repo, &commit_id).await?;
-    let bookmark = matches.value_of(ARG_NAME).expect("name is required").into();
-    let service_identity = get_service_id(matches).map(String::from);
-    let pushvars = get_pushvars(&matches)?;
+pub(super) async fn run(app: ScscApp, args: CommandArgs) -> Result<()> {
+    let repo = args.repo_args.clone().into_repo_specifier();
+    let commit_id = args.commit_id_args.clone().into_commit_id();
+    let id = resolve_commit_id(&app.connection, &repo, &commit_id).await?;
+    let bookmark = args.name.clone();
+    let service_identity = args.service_id_args.service_id.clone();
+    let pushvars = args.pushvar_args.into_pushvars();
 
     let params = thrift::RepoCreateBookmarkParams {
         bookmark,
@@ -54,6 +46,6 @@ pub(super) async fn run(matches: &ArgMatches<'_>, connection: Connection) -> Res
         pushvars,
         ..Default::default()
     };
-    connection.repo_create_bookmark(&repo, &params).await?;
-    Ok(stream::empty().boxed())
+    app.connection.repo_create_bookmark(&repo, &params).await?;
+    Ok(())
 }

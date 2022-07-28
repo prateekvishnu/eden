@@ -8,25 +8,28 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use bookmarks::{BookmarkUpdateReason, BundleReplay};
-use bookmarks_types::{BookmarkKind, BookmarkName};
+use bookmarks::BookmarkUpdateReason;
+use bookmarks_types::BookmarkKind;
+use bookmarks_types::BookmarkName;
 use bytes::Bytes;
 use context::CoreContext;
-use hooks::{CrossRepoPushSource, HookManager};
-use metaconfig_types::{
-    BookmarkAttrs, InfinitepushParams, PushrebaseParams, SourceControlServiceParams,
-};
-use mononoke_types::{BonsaiChangeset, ChangesetId};
+use hooks::CrossRepoPushSource;
+use hooks::HookManager;
+use metaconfig_types::InfinitepushParams;
+use metaconfig_types::PushrebaseParams;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::ChangesetId;
 use reachabilityindex::LeastCommonAncestorsHint;
-use repo_read_write_status::RepoReadWriteFetcher;
+use repo_authorization::AuthorizationContext;
+use repo_authorization::RepoWriteOperation;
 
-use crate::affected_changesets::{
-    find_draft_ancestors, log_bonsai_commits_to_scribe, AdditionalChangesets, AffectedChangesets,
-};
+use crate::affected_changesets::find_draft_ancestors;
+use crate::affected_changesets::log_bonsai_commits_to_scribe;
+use crate::affected_changesets::AdditionalChangesets;
+use crate::affected_changesets::AffectedChangesets;
 use crate::repo_lock::check_repo_lock;
-use crate::restrictions::{
-    check_bookmark_sync_config, BookmarkKindRestrictions, BookmarkMoveAuthorization,
-};
+use crate::restrictions::check_bookmark_sync_config;
+use crate::restrictions::BookmarkKindRestrictions;
 use crate::BookmarkMovementError;
 use crate::Repo;
 
@@ -35,13 +38,12 @@ pub struct CreateBookmarkOp<'op> {
     bookmark: &'op BookmarkName,
     target: ChangesetId,
     reason: BookmarkUpdateReason,
-    auth: BookmarkMoveAuthorization<'op>,
     kind_restrictions: BookmarkKindRestrictions,
     cross_repo_push_source: CrossRepoPushSource,
     affected_changesets: AffectedChangesets,
     pushvars: Option<&'op HashMap<String, Bytes>>,
-    bundle_replay: Option<&'op dyn BundleReplay>,
     log_new_public_commits_to_scribe: bool,
+    only_log_acl_checks: bool,
 }
 
 impl<'op> CreateBookmarkOp<'op> {
@@ -54,25 +56,13 @@ impl<'op> CreateBookmarkOp<'op> {
             bookmark,
             target,
             reason,
-            auth: BookmarkMoveAuthorization::User,
             kind_restrictions: BookmarkKindRestrictions::AnyKind,
             cross_repo_push_source: CrossRepoPushSource::NativeToThisRepo,
             affected_changesets: AffectedChangesets::new(),
             pushvars: None,
-            bundle_replay: None,
             log_new_public_commits_to_scribe: false,
+            only_log_acl_checks: false,
         }
-    }
-
-    /// This bookmark change is for an authenticated named service.  The change
-    /// will be checked against the service's write restrictions.
-    pub fn for_service(
-        mut self,
-        service_name: impl Into<String>,
-        params: &'op SourceControlServiceParams,
-    ) -> Self {
-        self.auth = BookmarkMoveAuthorization::Service(service_name.into(), params);
-        self
     }
 
     pub fn only_if_scratch(mut self) -> Self {
@@ -90,13 +80,13 @@ impl<'op> CreateBookmarkOp<'op> {
         self
     }
 
-    pub fn with_bundle_replay_data(mut self, bundle_replay: Option<&'op dyn BundleReplay>) -> Self {
-        self.bundle_replay = bundle_replay;
+    pub fn log_new_public_commits_to_scribe(mut self) -> Self {
+        self.log_new_public_commits_to_scribe = true;
         self
     }
 
-    pub fn log_new_public_commits_to_scribe(mut self) -> Self {
-        self.log_new_public_commits_to_scribe = true;
+    pub fn only_log_acl_checks(mut self, only_log: bool) -> Self {
+        self.only_log_acl_checks = only_log;
         self
     }
 
@@ -118,20 +108,34 @@ impl<'op> CreateBookmarkOp<'op> {
     pub async fn run(
         mut self,
         ctx: &'op CoreContext,
+        authz: &'op AuthorizationContext,
         repo: &'op impl Repo,
         lca_hint: &'op Arc<dyn LeastCommonAncestorsHint>,
         infinitepush_params: &'op InfinitepushParams,
         pushrebase_params: &'op PushrebaseParams,
-        bookmark_attrs: &'op BookmarkAttrs,
         hook_manager: &'op HookManager,
-        repo_read_write_fetcher: &'op RepoReadWriteFetcher,
     ) -> Result<(), BookmarkMovementError> {
         let kind = self
             .kind_restrictions
             .check_kind(infinitepush_params, self.bookmark)?;
 
-        self.auth
-            .check_authorized(ctx, bookmark_attrs, self.bookmark)
+        if self.only_log_acl_checks {
+            if authz
+                .check_repo_write(ctx, repo, RepoWriteOperation::CreateBookmark(kind))
+                .await?
+                .is_denied()
+            {
+                ctx.scuba()
+                    .clone()
+                    .log_with_msg("Repo write ACL check would fail for bookmark create", None);
+            }
+        } else {
+            authz
+                .require_repo_write(ctx, repo, RepoWriteOperation::CreateBookmark(kind))
+                .await?;
+        }
+        authz
+            .require_bookmark_modify(ctx, repo, self.bookmark)
             .await?;
 
         check_bookmark_sync_config(repo, self.bookmark, kind)?;
@@ -139,29 +143,21 @@ impl<'op> CreateBookmarkOp<'op> {
         self.affected_changesets
             .check_restrictions(
                 ctx,
+                authz,
                 repo,
                 lca_hint,
                 pushrebase_params,
-                bookmark_attrs,
                 hook_manager,
                 self.bookmark,
                 self.pushvars,
                 self.reason,
                 kind,
-                &self.auth,
                 AdditionalChangesets::Ancestors(self.target),
                 self.cross_repo_push_source,
             )
             .await?;
 
-        check_repo_lock(
-            repo_read_write_fetcher,
-            kind,
-            self.pushvars,
-            repo.repo_permission_checker(),
-            ctx.metadata().identities(),
-        )
-        .await?;
+        check_repo_lock(repo, kind, self.pushvars, ctx.metadata().identities()).await?;
 
         let mut txn = repo.bookmarks().create_transaction(ctx.clone());
         let txn_hook;
@@ -183,7 +179,6 @@ impl<'op> CreateBookmarkOp<'op> {
                     ctx,
                     repo,
                     self.bookmark,
-                    bookmark_attrs,
                     pushrebase_params,
                     lca_hint,
                     self.target,
@@ -224,7 +219,7 @@ impl<'op> CreateBookmarkOp<'op> {
                     .add("bookmark", self.bookmark.to_string())
                     .log_with_msg("Creating public bookmark", None);
 
-                txn.create(self.bookmark, self.target, self.reason, self.bundle_replay)?;
+                txn.create(self.bookmark, self.target, self.reason)?;
                 to_log
             }
         };

@@ -6,11 +6,16 @@
  */
 
 use crate::CommitsInBundle;
-use anyhow::{format_err, Error};
-use blobrepo::BlobRepo;
+use crate::Repo;
+use anyhow::format_err;
+use anyhow::Error;
 use bonsai_globalrev_mapping::BonsaiGlobalrevMappingEntry;
+use bonsai_globalrev_mapping::BonsaiGlobalrevMappingRef;
+use cloned::cloned;
 use context::CoreContext;
-use futures::{stream, StreamExt, TryStreamExt};
+use futures::stream;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use sql::Connection;
 use sql_construct::SqlConstruct;
 use sql_ext::SqlConnections;
@@ -24,8 +29,8 @@ pub enum GlobalrevSyncer {
 }
 
 pub struct DarkstormGlobalrevSyncer {
-    orig_repo: BlobRepo,
-    darkstorm_repo: BlobRepo,
+    orig_repo: Repo,
+    darkstorm_repo: Repo,
 }
 
 #[derive(Clone)]
@@ -47,7 +52,7 @@ impl SqlConstruct for HgsqlConnection {
 }
 
 impl GlobalrevSyncer {
-    pub fn darkstorm(orig_repo: &BlobRepo, darkstorm_repo: &BlobRepo) -> Self {
+    pub fn darkstorm(orig_repo: &Repo, darkstorm_repo: &Repo) -> Self {
         Self::Darkstorm(Arc::new(DarkstormGlobalrevSyncer {
             orig_repo: orig_repo.clone(),
             darkstorm_repo: darkstorm_repo.clone(),
@@ -74,28 +79,30 @@ impl DarkstormGlobalrevSyncer {
             }
         };
 
-        let bcs_id_to_globalrev = stream::iter(commits.iter().map(|(_, bcs_id)| async move {
-            let maybe_globalrev = self
-                .orig_repo
-                .bonsai_globalrev_mapping()
-                .get_globalrev_from_bonsai(ctx, *bcs_id)
-                .await?;
-            Result::<_, Error>::Ok((bcs_id, maybe_globalrev))
+        let commits = commits.clone().into_iter().map(|(_, bcs_id)| bcs_id);
+        let bcs_id_to_globalrev = stream::iter(commits.map(|bcs_id| {
+            cloned!(ctx, self.orig_repo);
+            async move {
+                let maybe_globalrev = orig_repo
+                    .bonsai_globalrev_mapping()
+                    .get_globalrev_from_bonsai(&ctx, bcs_id)
+                    .await?;
+                Result::<_, Error>::Ok((bcs_id, maybe_globalrev))
+            }
         }))
         .map(Ok)
         .try_buffer_unordered(100)
-        .try_filter_map(|(bcs_id, maybe_globalrev)| async move {
-            Ok(maybe_globalrev.map(|globalrev| (bcs_id, globalrev)))
+        .try_filter_map(|(bcs_id, maybe_globalrev)| {
+            let bcs_id = bcs_id.clone();
+            let maybe_globalrev = maybe_globalrev.clone();
+            async move { Ok(maybe_globalrev.map(|globalrev| (bcs_id, globalrev))) }
         })
         .try_collect::<HashMap<_, _>>()
         .await?;
 
         let entries = bcs_id_to_globalrev
             .into_iter()
-            .map(|(bcs_id, globalrev)| BonsaiGlobalrevMappingEntry {
-                bcs_id: *bcs_id,
-                globalrev,
-            })
+            .map(|(bcs_id, globalrev)| BonsaiGlobalrevMappingEntry { bcs_id, globalrev })
             .collect::<Vec<_>>();
 
         self.darkstorm_repo
@@ -112,20 +119,23 @@ mod test {
     use super::*;
     use bonsai_globalrev_mapping::BonsaiGlobalrevMappingEntry;
     use fbinit::FacebookInit;
-    use mercurial_types_mocks::globalrev::{GLOBALREV_ONE, GLOBALREV_TWO};
-    use mercurial_types_mocks::nodehash::{ONES_CSID as ONES_HG_CSID, TWOS_CSID as TWOS_HG_CSID};
+    use mercurial_types_mocks::globalrev::GLOBALREV_ONE;
+    use mercurial_types_mocks::globalrev::GLOBALREV_TWO;
+    use mercurial_types_mocks::nodehash::ONES_CSID as ONES_HG_CSID;
+    use mercurial_types_mocks::nodehash::TWOS_CSID as TWOS_HG_CSID;
     use mononoke_types::RepositoryId;
-    use mononoke_types_mocks::changesetid::{ONES_CSID, TWOS_CSID};
+    use mononoke_types_mocks::changesetid::ONES_CSID;
+    use mononoke_types_mocks::changesetid::TWOS_CSID;
     use test_repo_factory::TestRepoFactory;
 
     #[fbinit::test]
     async fn test_sync_darkstorm(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
 
-        let orig_repo: BlobRepo = TestRepoFactory::new(fb)?
+        let orig_repo: Repo = TestRepoFactory::new(fb)?
             .with_id(RepositoryId::new(0))
             .build()?;
-        let darkstorm_repo: BlobRepo = TestRepoFactory::new(fb)?
+        let darkstorm_repo: Repo = TestRepoFactory::new(fb)?
             .with_id(RepositoryId::new(1))
             .build()?;
 

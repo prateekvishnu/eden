@@ -7,26 +7,33 @@
 
 //! Functions to load and parse Mononoke configuration.
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-    str,
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::path::Path;
+use std::str;
 
 use crate::convert::Convert;
 use crate::errors::ConfigurationError;
-use anyhow::{anyhow, Context, Result};
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Result;
 use cached_config::ConfigStore;
-use metaconfig_types::{
-    AllowlistEntry, BackupRepoConfig, BlobConfig, CensoredScubaParams, CommonConfig,
-    HgsqlGlobalrevsName, HgsqlName, Redaction, RedactionConfig, RepoConfig, RepoReadOnly,
-    StorageConfig,
-};
+use metaconfig_types::BackupRepoConfig;
+use metaconfig_types::BlobConfig;
+use metaconfig_types::CensoredScubaParams;
+use metaconfig_types::CommonConfig;
+use metaconfig_types::Redaction;
+use metaconfig_types::RedactionConfig;
+use metaconfig_types::RepoConfig;
+use metaconfig_types::RepoReadOnly;
+use metaconfig_types::StorageConfig;
 use mononoke_types::RepositoryId;
-use repos::{
-    RawAclRegionConfig, RawCommonConfig, RawRepoConfig, RawRepoConfigs, RawRepoDefinition,
-    RawStorageConfig,
-};
+use repos::RawAclRegionConfig;
+use repos::RawCommonConfig;
+use repos::RawRepoConfig;
+use repos::RawRepoConfigs;
+use repos::RawRepoDefinition;
+use repos::RawStorageConfig;
 
 const LIST_KEYS_PATTERNS_MAX_DEFAULT: u64 = 500_000;
 const HOOK_MAX_FILE_SIZE_DEFAULT: u64 = 8 * 1024 * 1024; // 8MiB
@@ -106,7 +113,6 @@ fn parse_with_repo_definition(
         backup_source_repo_name,
         repo_name,
         repo_config,
-        write_lock_db_address,
         hipster_acl,
         enabled,
         readonly,
@@ -116,8 +122,7 @@ fn parse_with_repo_definition(
     } = repo_definition;
 
     let named_repo_config_name = repo_config
-        .clone()
-        .ok_or_else(|| ConfigurationError::InvalidConfig(format!("No named_repo_config")))?;
+        .ok_or_else(|| ConfigurationError::InvalidConfig("No named_repo_config".to_string()))?;
 
     let named_repo_config = named_repo_configs
         .get(named_repo_config_name.as_str())
@@ -130,7 +135,7 @@ fn parse_with_repo_definition(
         .clone();
 
     let reponame = repo_name.ok_or_else(|| {
-        ConfigurationError::InvalidConfig(format!("No repo_name in repo_definition"))
+        ConfigurationError::InvalidConfig("No repo_name in repo_definition".to_string())
     })?;
 
     let backup_repo_config = if let Some(backup_source_repo_name) = backup_source_repo_name {
@@ -160,7 +165,6 @@ fn parse_with_repo_definition(
         lfs,
         hash_validation_percentage,
         skiplist_index_blobstore_key,
-        bundle2_replay_params,
         infinitepush,
         list_keys_patterns_max,
         filestore,
@@ -169,8 +173,6 @@ fn parse_with_repo_definition(
         source_control_service_monitoring,
         derived_data_config,
         scuba_local_path_hooks,
-        hgsql_name,
-        hgsql_globalrevs_name,
         enforce_lfs_acl_check,
         repo_client_use_warm_bookmarks_cache,
         segmented_changelog_config,
@@ -178,6 +180,9 @@ fn parse_with_repo_definition(
         phabricator_callsign,
         walker_config,
         cross_repo_commit_validation_config,
+        sparse_profiles_config,
+        hg_sync_config,
+        backup_hg_sync_config,
         ..
     } = named_repo_config;
 
@@ -218,8 +223,6 @@ fn parse_with_repo_definition(
     let push = push.convert()?.unwrap_or_default();
 
     let pushrebase = pushrebase.convert()?.unwrap_or_default();
-
-    let bundle2_replay_params = bundle2_replay_params.convert()?.unwrap_or_default();
 
     let lfs = lfs.convert()?.unwrap_or_default();
 
@@ -265,12 +268,6 @@ fn parse_with_repo_definition(
 
     let derived_data_config = derived_data_config.convert()?.unwrap_or_default();
 
-    // XXX only www has it explicitly specified.
-    let hgsql_name = HgsqlName(hgsql_name.unwrap_or_else(|| reponame.to_string()));
-
-    let hgsql_globalrevs_name =
-        HgsqlGlobalrevsName(hgsql_globalrevs_name.unwrap_or_else(|| hgsql_name.0.clone()));
-
     let enforce_lfs_acl_check = enforce_lfs_acl_check.unwrap_or(false);
     let repo_client_use_warm_bookmarks_cache =
         repo_client_use_warm_bookmarks_cache.unwrap_or(false);
@@ -293,6 +290,10 @@ fn parse_with_repo_definition(
 
     let cross_repo_commit_validation_config = cross_repo_commit_validation_config.convert()?;
 
+    let sparse_profiles_config = sparse_profiles_config.convert()?;
+    let hg_sync_config = hg_sync_config.convert()?;
+    let backup_hg_sync_config = backup_hg_sync_config.convert()?;
+
     Ok(RepoConfig {
         enabled,
         storage_config,
@@ -311,8 +312,6 @@ fn parse_with_repo_definition(
         readonly,
         redaction,
         skiplist_index_blobstore_key,
-        bundle2_replay_params,
-        write_lock_db_address,
         infinitepush,
         list_keys_patterns_max,
         filestore,
@@ -321,8 +320,6 @@ fn parse_with_repo_definition(
         source_control_service,
         source_control_service_monitoring,
         derived_data_config,
-        hgsql_name,
-        hgsql_globalrevs_name,
         enforce_lfs_acl_check,
         repo_client_use_warm_bookmarks_cache,
         segmented_changelog_config,
@@ -332,6 +329,9 @@ fn parse_with_repo_definition(
         acl_region_config,
         walker_config,
         cross_repo_commit_validation_config,
+        sparse_profiles_config,
+        hg_sync_config,
+        backup_hg_sync_config,
     })
 }
 
@@ -360,64 +360,27 @@ fn parse_common_config(
     common: RawCommonConfig,
     common_storage_config: &HashMap<String, RawStorageConfig>,
 ) -> Result<CommonConfig> {
-    let mut tiers_num = 0;
-    let security_config: Vec<_> = common
-        .whitelist_entry
+    let trusted_parties_hipster_tier = common
+        .trusted_parties_hipster_tier
+        .filter(|tier| !tier.is_empty());
+    let trusted_parties_allowlist = common
+        .trusted_parties_allowlist
         .unwrap_or_default()
         .into_iter()
-        .map(|allowlist_entry| {
-            let has_tier = allowlist_entry.tier.is_some();
-            let has_identity = {
-                if allowlist_entry.identity_data.is_none() ^ allowlist_entry.identity_type.is_none()
-                {
-                    return Err(ConfigurationError::InvalidFileStructure(
-                        "identity type and data must be specified".into(),
-                    )
-                    .into());
-                }
-
-                allowlist_entry.identity_type.is_some()
-            };
-
-            if has_tier && has_identity {
-                return Err(ConfigurationError::InvalidFileStructure(
-                    "tier and identity cannot be both specified".into(),
-                )
-                .into());
-            }
-
-            if !has_tier && !has_identity {
-                return Err(ConfigurationError::InvalidFileStructure(
-                    "tier or identity must be specified".into(),
-                )
-                .into());
-            }
-
-            if allowlist_entry.tier.is_some() {
-                tiers_num += 1;
-                Ok(AllowlistEntry::Tier(allowlist_entry.tier.unwrap()))
-            } else {
-                let identity_type = allowlist_entry.identity_type.unwrap();
-
-                Ok(AllowlistEntry::HardcodedIdentity {
-                    ty: identity_type,
-                    data: allowlist_entry.identity_data.unwrap(),
-                })
-            }
-        })
-        .collect::<Result<_>>()?;
-
-    if tiers_num > 1 {
-        return Err(
-            ConfigurationError::InvalidFileStructure("only one tier is allowed".into()).into(),
-        );
-    }
-
+        .map(Convert::convert)
+        .collect::<Result<Vec<_>>>()?;
+    let global_allowlist = common
+        .global_allowlist
+        .unwrap_or_default()
+        .into_iter()
+        .map(Convert::convert)
+        .collect::<Result<Vec<_>>>()?;
     let loadlimiter_category = common
         .loadlimiter_category
         .filter(|category| !category.is_empty());
     let scuba_censored_table = common.scuba_censored_table;
     let scuba_censored_local_path = common.scuba_local_path_censored;
+    let internal_identity = common.internal_identity.convert()?;
 
     let censored_scuba_params = CensoredScubaParams {
         table: scuba_censored_table,
@@ -449,11 +412,14 @@ fn parse_common_config(
     };
 
     Ok(CommonConfig {
-        security_config,
+        trusted_parties_hipster_tier,
+        trusted_parties_allowlist,
+        global_allowlist,
         loadlimiter_category,
         enable_http_control_api: common.enable_http_control_api,
         censored_scuba_params,
         redaction_config,
+        internal_identity,
     })
 }
 
@@ -471,27 +437,66 @@ mod test {
     use super::*;
     use bookmarks_types::BookmarkName;
     use cached_config::TestSource;
-    use maplit::{btreemap, hashmap, hashset};
-    use metaconfig_types::{
-        AclRegion, AclRegionConfig, AclRegionRule, BlameVersion, BlobConfig, BlobstoreId,
-        BookmarkParams, BubbleDeletionMode, Bundle2ReplayParams, CacheWarmupParams,
-        CommitSyncConfig, CommitSyncConfigVersion, CrossRepoCommitValidation, DatabaseConfig,
-        DefaultSmallToLargeCommitSyncPathAction, DerivedDataConfig, DerivedDataTypesConfig,
-        EphemeralBlobstoreConfig, FilestoreParams, HookBypass, HookConfig, HookManagerParams,
-        HookParams, InfinitepushNamespace, InfinitepushParams, LfsParams, LocalDatabaseConfig,
-        MetadataDatabaseConfig, MultiplexId, MultiplexedStoreType, PushParams, PushrebaseFlags,
-        PushrebaseParams, RemoteDatabaseConfig, RemoteMetadataDatabaseConfig, RepoClientKnobs,
-        SegmentedChangelogConfig, SegmentedChangelogHeadConfig, ShardableRemoteDatabaseConfig,
-        ShardedRemoteDatabaseConfig, SmallRepoCommitSyncConfig, SourceControlServiceMonitoring,
-        SourceControlServiceParams, UnodeVersion, WalkerConfig,
-    };
+    use maplit::btreemap;
+    use maplit::hashmap;
+    use maplit::hashset;
+    use metaconfig_types::AclRegion;
+    use metaconfig_types::AclRegionConfig;
+    use metaconfig_types::AclRegionRule;
+    use metaconfig_types::Address;
+    use metaconfig_types::BlameVersion;
+    use metaconfig_types::BlobConfig;
+    use metaconfig_types::BlobstoreId;
+    use metaconfig_types::BookmarkParams;
+    use metaconfig_types::BubbleDeletionMode;
+    use metaconfig_types::CacheWarmupParams;
+    use metaconfig_types::CommitSyncConfig;
+    use metaconfig_types::CommitSyncConfigVersion;
+    use metaconfig_types::CrossRepoCommitValidation;
+    use metaconfig_types::DatabaseConfig;
+    use metaconfig_types::DefaultSmallToLargeCommitSyncPathAction;
+    use metaconfig_types::DerivedDataConfig;
+    use metaconfig_types::DerivedDataTypesConfig;
+    use metaconfig_types::EphemeralBlobstoreConfig;
+    use metaconfig_types::FilestoreParams;
+    use metaconfig_types::HgSyncConfig;
+    use metaconfig_types::HookBypass;
+    use metaconfig_types::HookConfig;
+    use metaconfig_types::HookManagerParams;
+    use metaconfig_types::HookParams;
+    use metaconfig_types::Identity;
+    use metaconfig_types::InfinitepushNamespace;
+    use metaconfig_types::InfinitepushParams;
+    use metaconfig_types::LfsParams;
+    use metaconfig_types::LocalDatabaseConfig;
+    use metaconfig_types::MetadataDatabaseConfig;
+    use metaconfig_types::MultiplexId;
+    use metaconfig_types::MultiplexedStoreType;
+    use metaconfig_types::PushParams;
+    use metaconfig_types::PushrebaseFlags;
+    use metaconfig_types::PushrebaseParams;
+    use metaconfig_types::PushrebaseRemoteMode;
+    use metaconfig_types::RemoteDatabaseConfig;
+    use metaconfig_types::RemoteMetadataDatabaseConfig;
+    use metaconfig_types::RepoClientKnobs;
+    use metaconfig_types::SegmentedChangelogConfig;
+    use metaconfig_types::SegmentedChangelogHeadConfig;
+    use metaconfig_types::ShardableRemoteDatabaseConfig;
+    use metaconfig_types::ShardedRemoteDatabaseConfig;
+    use metaconfig_types::SmallRepoCommitSyncConfig;
+    use metaconfig_types::SourceControlServiceMonitoring;
+    use metaconfig_types::SourceControlServiceParams;
+    use metaconfig_types::SparseProfilesConfig;
+    use metaconfig_types::UnodeVersion;
+    use metaconfig_types::WalkerConfig;
     use mononoke_types::MPath;
     use mononoke_types_mocks::changesetid::ONES_CSID;
     use nonzero_ext::nonzero;
     use pretty_assertions::assert_eq;
     use regex::Regex;
     use repos::RawCommitSyncConfig;
-    use std::fs::{create_dir_all, write};
+    use std::fs::create_dir_all;
+    use std::fs::write;
     use std::num::NonZeroUsize;
     use std::sync::Arc;
     use std::time::Duration;
@@ -623,7 +628,7 @@ mod test {
         let tmp_dir = write_files(&paths);
         let config_store = ConfigStore::new(Arc::new(TestSource::new()), None, None);
         let RawRepoConfigs { commit_sync, .. } =
-            crate::raw::read_raw_configs(tmp_dir.path().as_ref(), &config_store).unwrap();
+            crate::raw::read_raw_configs(tmp_dir.path(), &config_store).unwrap();
         for (_config_name, commit_sync_config) in commit_sync {
             let res = commit_sync_config.convert();
             let msg = format!("{:#?}", res);
@@ -660,7 +665,7 @@ mod test {
         let tmp_dir = write_files(&paths);
         let config_store = ConfigStore::new(Arc::new(TestSource::new()), None, None);
         let RawRepoConfigs { commit_sync, .. } =
-            crate::raw::read_raw_configs(tmp_dir.path().as_ref(), &config_store).unwrap();
+            crate::raw::read_raw_configs(tmp_dir.path(), &config_store).unwrap();
         for (_config_name, commit_sync_config) in commit_sync {
             let res = commit_sync_config.convert();
             let msg = format!("{:#?}", res);
@@ -683,11 +688,9 @@ mod test {
         "#;
         let common_content = r#"
             loadlimiter_category="test-category"
+            trusted_parties_hipster_tier = "tier1"
 
-            [[whitelist_entry]]
-            tier = "tier1"
-
-            [[whitelist_entry]]
+            [[global_allowlist]]
             identity_type = "username"
             identity_data = "user"
         "#;
@@ -787,14 +790,14 @@ mod test {
             casefolding_check = false
             emit_obsmarkers = false
             allow_change_xrepo_mapping_extra = true
+            
+            [pushrebase.remote_mode]
+            remote_scs = { tier = "my-tier" }
 
             [lfs]
             threshold = 1000
             rollout_percentage = 56
             generate_lfs_blob_in_hg_sync_job = true
-
-            [bundle2_replay_params]
-            preserve_raw_bundle2 = true
 
             [infinitepush]
             allow_writes = true
@@ -824,17 +827,30 @@ mod test {
 
             [backup_config]
             verification_enabled = false
-            
+
             [walker_config]
             scrub_enabled = true
             validate_enabled = true
-            
+
             [cross_repo_commit_validation_config]
             skip_bookmarks = ["weirdy"]
+
+            [sparse_profiles_config]
+            sparse_profiles_location = "sparse"
+
+            [hg_sync_config]
+            hg_repo_ssh_path = "ssh://hg.vip.facebook.com//data/scm/just_some_repo"
+            batch_size = 10
+            lock_on_failure = true
+
+            [backup_hg_sync_config]
+            hg_repo_ssh_path = "mononoke://mononoke-backup.internal.tfbnw.net/just_some_repo"
+            batch_size = 20
+            lock_on_failure = false
+            darkstorm_backup_repo_id = 1001
         "#;
         let fbsource_repo_def = r#"
             repo_id=0
-            write_lock_db_address="write_lock_db_address"
             repo_name="fbsource"
             hipster_acl="foo/test"
             repo_config="fbsource"
@@ -845,8 +861,6 @@ mod test {
         let www_content = r#"
             scuba_table_hooks="scm_hooks"
             storage_config="files"
-            hgsql_name = "www-foobar"
-            hgsql_globalrevs_name = "www-barfoo"
             phabricator_callsign="WWW"
             [segmented_changelog_config]
             heads_to_include = [
@@ -862,15 +876,17 @@ mod test {
             loadlimiter_category="test-category"
             scuba_censored_table="censored_table"
             scuba_local_path_censored="censored_local_path"
+            trusted_parties_hipster_tier="tier1"
+
+            [internal_identity]
+            identity_type = "SERVICE_IDENTITY"
+            identity_data = "internal"
 
             [redaction_config]
             blobstore="main"
             redaction_sets_location="loc"
 
-            [[whitelist_entry]]
-            tier = "tier1"
-
-            [[whitelist_entry]]
+            [[global_allowlist]]
             identity_type = "username"
             identity_data = "user"
         "#;
@@ -880,6 +896,7 @@ mod test {
         primary = { db_address = "db_address" }
         filenodes = { sharded = { shard_map = "db_address_shards", shard_num = 123 } }
         mutation = { db_address = "mutation_db_address" }
+        sparse_profiles = { db_address = "sparse_profiles_db_address" }
 
         [main.blobstore.multiplexed]
         multiplex_id = 1
@@ -978,6 +995,9 @@ mod test {
                 mutation: RemoteDatabaseConfig {
                     db_address: "mutation_db_address".into(),
                 },
+                sparse_profiles: RemoteDatabaseConfig {
+                    db_address: "sparse_profiles_db_address".into(),
+                },
             }),
             ephemeral_blobstore: None,
         };
@@ -988,7 +1008,6 @@ mod test {
             RepoConfig {
                 enabled: true,
                 storage_config: main_storage_config.clone(),
-                write_lock_db_address: Some("write_lock_db_address".into()),
                 generation_cache_size: 1024 * 1024,
                 repoid: RepositoryId::new(0),
                 scuba_table_hooks: Some("scm_hooks".to_string()),
@@ -1070,6 +1089,7 @@ mod test {
                         forbid_p2_root_rebases: false,
                         casefolding_check: false,
                         not_generated_filenodes_limit: 500,
+                        monitoring_bookmark: None,
                     },
                     block_merges: false,
                     emit_obsmarkers: false,
@@ -1077,6 +1097,9 @@ mod test {
                     globalrevs_publishing_bookmark: None,
                     populate_git_mapping: false,
                     allow_change_xrepo_mapping_extra: true,
+                    remote_mode: PushrebaseRemoteMode::RemoteScs(Address::Tier(
+                        "my-tier".to_string(),
+                    )),
                 },
                 lfs: LfsParams {
                     threshold: Some(1000),
@@ -1087,9 +1110,6 @@ mod test {
                 readonly: RepoReadOnly::ReadWrite,
                 redaction: Redaction::Enabled,
                 skiplist_index_blobstore_key: Some("skiplist_key".into()),
-                bundle2_replay_params: Bundle2ReplayParams {
-                    preserve_raw_bundle2: true,
-                },
                 infinitepush: InfinitepushParams {
                     allow_writes: true,
                     namespace: Some(InfinitepushNamespace::new(Regex::new("foobar/.+").unwrap())),
@@ -1132,8 +1152,6 @@ mod test {
                     },],
                     scuba_table: None,
                 },
-                hgsql_name: HgsqlName("fbsource".to_string()),
-                hgsql_globalrevs_name: HgsqlGlobalrevsName("fbsource".to_string()),
                 enforce_lfs_acl_check: false,
                 repo_client_use_warm_bookmarks_cache: true,
                 segmented_changelog_config: SegmentedChangelogConfig {
@@ -1173,6 +1191,25 @@ mod test {
                 cross_repo_commit_validation_config: Some(CrossRepoCommitValidation {
                     skip_bookmarks: [BookmarkName::new("weirdy").unwrap()].into(),
                 }),
+                sparse_profiles_config: Some(SparseProfilesConfig {
+                    sparse_profiles_location: "sparse".to_string(),
+                    excluded_paths: vec![],
+                    monitored_profiles: vec![],
+                }),
+                hg_sync_config: Some(HgSyncConfig {
+                    hg_repo_ssh_path: "ssh://hg.vip.facebook.com//data/scm/just_some_repo"
+                        .to_string(),
+                    batch_size: 10,
+                    lock_on_failure: true,
+                    darkstorm_backup_repo_id: None,
+                }),
+                backup_hg_sync_config: Some(HgSyncConfig {
+                    hg_repo_ssh_path:
+                        "mononoke://mononoke-backup.internal.tfbnw.net/just_some_repo".to_string(),
+                    batch_size: 20,
+                    lock_on_failure: false,
+                    darkstorm_backup_repo_id: Some(1001),
+                }),
             },
         );
 
@@ -1199,7 +1236,6 @@ mod test {
                         bubble_deletion_mode: BubbleDeletionMode::MarkOnly,
                     }),
                 },
-                write_lock_db_address: None,
                 generation_cache_size: 10 * 1024 * 1024,
                 repoid: RepositoryId::new(1),
                 scuba_table_hooks: Some("scm_hooks".to_string()),
@@ -1215,7 +1251,6 @@ mod test {
                 readonly: RepoReadOnly::ReadWrite,
                 redaction: Redaction::Enabled,
                 skiplist_index_blobstore_key: None,
-                bundle2_replay_params: Bundle2ReplayParams::default(),
                 infinitepush: InfinitepushParams::default(),
                 list_keys_patterns_max: LIST_KEYS_PATTERNS_MAX_DEFAULT,
                 hook_max_file_size: HOOK_MAX_FILE_SIZE_DEFAULT,
@@ -1224,8 +1259,6 @@ mod test {
                 source_control_service: SourceControlServiceParams::default(),
                 source_control_service_monitoring: None,
                 derived_data_config: DerivedDataConfig::default(),
-                hgsql_name: HgsqlName("www-foobar".to_string()),
-                hgsql_globalrevs_name: HgsqlGlobalrevsName("www-barfoo".to_string()),
                 enforce_lfs_acl_check: false,
                 repo_client_use_warm_bookmarks_cache: false,
                 segmented_changelog_config: SegmentedChangelogConfig {
@@ -1245,18 +1278,20 @@ mod test {
                 acl_region_config: None,
                 walker_config: None,
                 cross_repo_commit_validation_config: None,
+                sparse_profiles_config: None,
+                hg_sync_config: None,
+                backup_hg_sync_config: None,
             },
         );
         assert_eq!(
             repoconfig.common,
             CommonConfig {
-                security_config: vec![
-                    AllowlistEntry::Tier("tier1".to_string()),
-                    AllowlistEntry::HardcodedIdentity {
-                        ty: "username".to_string(),
-                        data: "user".to_string(),
-                    },
-                ],
+                trusted_parties_hipster_tier: Some("tier1".to_string()),
+                trusted_parties_allowlist: vec![],
+                global_allowlist: vec![Identity {
+                    id_type: "username".to_string(),
+                    id_data: "user".to_string()
+                }],
                 loadlimiter_category: Some("test-category".to_string()),
                 enable_http_control_api: false,
                 censored_scuba_params: CensoredScubaParams {
@@ -1264,10 +1299,14 @@ mod test {
                     local_path: Some("censored_local_path".to_string()),
                 },
                 redaction_config: RedactionConfig {
-                    blobstore: main_storage_config.blobstore.clone(),
+                    blobstore: main_storage_config.blobstore,
                     darkstorm_blobstore: None,
                     redaction_sets_location: "loc".to_string(),
                 },
+                internal_identity: Identity {
+                    id_type: "SERVICE_IDENTITY".to_string(),
+                    id_data: "internal".to_string(),
+                }
             }
         );
         assert_eq!(
@@ -1379,33 +1418,16 @@ mod test {
         }
 
         let common = r#"
-        [[whitelist_entry]]
+        [[global_allowlist]]
         identity_type="user"
         "#;
         check_fails(common, "identity type and data must be specified");
 
         let common = r#"
-        [[whitelist_entry]]
+        [[global_allowlist]]
         identity_data="user"
         "#;
         check_fails(common, "identity type and data must be specified");
-
-        let common = r#"
-        [[whitelist_entry]]
-        tier="user"
-        identity_type="user"
-        identity_data="user"
-        "#;
-        check_fails(common, "tier and identity cannot be both specified");
-
-        // Only one tier is allowed
-        let common = r#"
-        [[whitelist_entry]]
-        tier="tier1"
-        [[whitelist_entry]]
-        tier="tier2"
-        "#;
-        check_fails(common, "only one tier is allowed");
     }
 
     #[test]
@@ -1415,6 +1437,7 @@ mod test {
         primary = { db_address = "some_db" }
         filenodes = { sharded = { shard_map = "some-shards", shard_num = 123 } }
         mutation = { db_address = "some_db" }
+        sparse_profiles = { db_address = "some_db" }
 
         [multiplex_store.blobstore.multiplexed]
         multiplex_id = 1
@@ -1446,6 +1469,10 @@ mod test {
         [redaction_config]
         blobstore = "multiplex_store"
         redaction_sets_location = "loc"
+
+        [internal_identity]
+        identity_type = "SERVICE_IDENTITY"
+        identity_data = "internal"
         "#;
 
         let paths = btreemap! {
@@ -1492,6 +1519,9 @@ mod test {
                         mutation: RemoteDatabaseConfig {
                             db_address: "some_db".into(),
                         },
+                        sparse_profiles: RemoteDatabaseConfig {
+                            db_address: "some_db".into(),
+                        },
                     }),
                     ephemeral_blobstore: None,
                 },
@@ -1499,8 +1529,6 @@ mod test {
                 generation_cache_size: 10 * 1024 * 1024,
                 list_keys_patterns_max: LIST_KEYS_PATTERNS_MAX_DEFAULT,
                 hook_max_file_size: HOOK_MAX_FILE_SIZE_DEFAULT,
-                hgsql_name: HgsqlName("test".to_string()),
-                hgsql_globalrevs_name: HgsqlGlobalrevsName("test".to_string()),
                 ..Default::default()
             }
         };
@@ -1543,6 +1571,7 @@ mod test {
         primary = { db_address = "other_other_db" }
         filenodes = { sharded = { shard_map = "other-other-shards", shard_num = 789 } }
         mutation = { db_address = "other_other_mutation_db" }
+        sparse_profiles = { db_address = "test_db" }
 
         [storage.multiplex_store.blobstore]
         disabled = {}
@@ -1558,6 +1587,10 @@ mod test {
         [redaction_config]
         blobstore = "multiplex_store"
         redaction_sets_location = "loc"
+
+        [internal_identity]
+        identity_type = "SERVICE_IDENTITY"
+        identity_data = "internal"
         "#;
 
         let paths = btreemap! {
@@ -1581,6 +1614,7 @@ mod test {
                         primary: RemoteDatabaseConfig { db_address: "other_other_db".into(), },
                         filenodes: ShardableRemoteDatabaseConfig::Sharded(ShardedRemoteDatabaseConfig { shard_map: "other-other-shards".into(), shard_num: NonZeroUsize::new(789).unwrap() }),
                         mutation: RemoteDatabaseConfig { db_address: "other_other_mutation_db".into(), },
+                        sparse_profiles: RemoteDatabaseConfig { db_address: "test_db".into(), }
                     }),
 
                     ephemeral_blobstore: None,
@@ -1589,8 +1623,6 @@ mod test {
                 generation_cache_size: 10 * 1024 * 1024,
                 list_keys_patterns_max: LIST_KEYS_PATTERNS_MAX_DEFAULT,
                 hook_max_file_size: HOOK_MAX_FILE_SIZE_DEFAULT,
-                hgsql_name: HgsqlName("test".to_string()),
-                hgsql_globalrevs_name: HgsqlGlobalrevsName("test".to_string()),
                 ..Default::default()
             }
         };
@@ -1668,6 +1700,10 @@ mod test {
         [redaction_config]
         blobstore = "multiplex_store"
         redaction_sets_location = "loc"
+
+        [internal_identity]
+        identity_type = "SERVICE_IDENTITY"
+        identity_data = "internal"
         "#;
 
         let paths = btreemap! {

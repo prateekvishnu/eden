@@ -5,31 +5,48 @@
  * GNU General Public License version 2.
  */
 
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
+use std::time::Instant;
 
-use anyhow::{bail, format_err, Error};
+use anyhow::bail;
+use anyhow::format_err;
+use anyhow::Error;
 use clap_old::Arg;
 use cloned::cloned;
 use fbinit::FacebookInit;
-use futures::{compat::Future01CompatExt, FutureExt, TryFutureExt};
-use futures_old::{Future, IntoFuture};
-use serde_derive::{Deserialize, Serialize};
+use futures::compat::Future01CompatExt;
+use futures::FutureExt;
+use futures::TryFutureExt;
+use futures_old::Future;
+use futures_old::IntoFuture;
+use serde_derive::Deserialize;
+use serde_derive::Serialize;
 
-use blobstore::{Blobstore, BlobstoreKeyParam, BlobstoreKeySource, DEFAULT_PUT_BEHAVIOUR};
-use blobstore_sync_queue::{
-    BlobstoreSyncQueue, BlobstoreSyncQueueEntry, OperationKey, SqlBlobstoreSyncQueue,
-};
+use blobstore::Blobstore;
+use blobstore::BlobstoreKeyParam;
+use blobstore::BlobstoreKeySource;
+use blobstore::DEFAULT_PUT_BEHAVIOUR;
+use blobstore_sync_queue::BlobstoreSyncQueue;
+use blobstore_sync_queue::BlobstoreSyncQueueEntry;
+use blobstore_sync_queue::OperationKey;
+use blobstore_sync_queue::SqlBlobstoreSyncQueue;
 use cmdlib::args;
 use context::CoreContext;
 use fileblob::Fileblob;
 use manifoldblob::ManifoldBlob;
-use metaconfig_types::{
-    BlobConfig, BlobstoreId, MetadataDatabaseConfig, MultiplexId, RemoteDatabaseConfig,
-    RemoteMetadataDatabaseConfig, StorageConfig,
-};
-use mononoke_types::{BlobstoreBytes, DateTime, RepositoryId};
+use metaconfig_types::BlobConfig;
+use metaconfig_types::BlobstoreId;
+use metaconfig_types::MetadataDatabaseConfig;
+use metaconfig_types::MultiplexId;
+use metaconfig_types::RemoteDatabaseConfig;
+use metaconfig_types::RemoteMetadataDatabaseConfig;
+use metaconfig_types::StorageConfig;
+use mononoke_types::BlobstoreBytes;
+use mononoke_types::DateTime;
+use mononoke_types::RepositoryId;
 use sql_construct::facebook::FbSqlConstruct;
-use sql_ext::facebook::{MysqlOptions, ReadConnectionType};
+use sql_ext::facebook::MysqlOptions;
+use sql_ext::facebook::ReadConnectionType;
 
 /// Save manifold continuation token each once per `PRESERVE_STATE_RATIO` entries
 const PRESERVE_STATE_RATIO: usize = 10_000;
@@ -175,23 +192,21 @@ fn parse_args(fb: FacebookInit) -> Result<Config, Error> {
 
     let storage_id = matches
         .value_of("storage-id")
-        .ok_or(Error::msg("`storage-id` argument required"))?;
+        .ok_or_else(|| Error::msg("`storage-id` argument required"))?;
 
     let storage_config = args::load_storage_configs(config_store, &matches)?
         .storage
         .remove(storage_id)
-        .ok_or(Error::msg("Unknown `storage-id`"))?;
+        .ok_or_else(|| Error::msg("Unknown `storage-id`"))?;
 
     let src_blobstore_id = matches
         .value_of("source-blobstore-id")
-        .ok_or(Error::msg("`source-blobstore-id` argument is required"))
+        .ok_or_else(|| Error::msg("`source-blobstore-id` argument is required"))
         .and_then(|src| src.parse::<u64>().map_err(Error::from))
         .map(BlobstoreId::new)?;
     let dst_blobstore_id = matches
         .value_of("destination-blobstore-id")
-        .ok_or(Error::msg(
-            "`destination-blobstore-id` argument is required",
-        ))
+        .ok_or_else(|| Error::msg("`destination-blobstore-id` argument is required"))
         .and_then(|dst| dst.parse::<u64>().map_err(Error::from))
         .map(BlobstoreId::new)?;
     if src_blobstore_id == dst_blobstore_id {
@@ -220,17 +235,14 @@ fn parse_args(fb: FacebookInit) -> Result<Config, Error> {
         .filter(|(id, ..)| src_blobstore_id == *id)
         .map(|(.., args)| args)
         .next()
-        .ok_or(format_err!(
-            "failed to find source blobstore id: {:?}",
-            src_blobstore_id,
-        ))
-        .and_then(|args| Ok(args.clone()))?;
+        .ok_or_else(|| format_err!("failed to find source blobstore id: {:?}", src_blobstore_id,))
+        .map(|args| args.clone())?;
 
     let mysql_options = matches.mysql_options().clone();
     let readonly_storage = matches.readonly_storage();
     Ok(Config {
         repo_id,
-        db_address: db_address.clone(),
+        db_address,
         mysql_options,
         blobstore_args,
         src_blobstore_id,
@@ -253,7 +265,7 @@ async fn get_resume_state(
     let resume_state = match &config.state_key {
         Some(state_key) => {
             blobstore
-                .get(&config.ctx, &state_key)
+                .get(&config.ctx, state_key)
                 .compat()
                 .map(|data| {
                     data.and_then(|data| {
@@ -303,7 +315,7 @@ async fn put_resume_state(
             let started_at = config.started_at;
             cloned!(state_key, blobstore);
             serde_json::to_vec(&StateSerde::from(&state))
-                .map(|state_json| BlobstoreBytes::from_bytes(state_json))
+                .map(BlobstoreBytes::from_bytes)
                 .map_err(Error::from)
                 .into_future()
                 .and_then(move |state_data| {

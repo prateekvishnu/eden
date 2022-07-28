@@ -9,8 +9,9 @@ use anyhow::Error;
 use fbinit::FacebookInit;
 use stats::prelude::*;
 use std::time::Duration;
-use time_window_counter::{BoxGlobalTimeWindowCounter, GlobalTimeWindowCounterBuilder};
-use tokio::time::{self};
+use time_window_counter::BoxGlobalTimeWindowCounter;
+use time_window_counter::GlobalTimeWindowCounterBuilder;
+use tokio::time;
 
 use crate::batch::InternalObject;
 use crate::config::ObjectPopularity;
@@ -55,7 +56,7 @@ async fn increment_and_fetch_object_popularity<B: PopularityBuilder>(
     config: &ObjectPopularity,
     builder: B,
 ) -> Result<u64, Error> {
-    let key = format!("{}/{}", ctx.repo.name(), obj.id());
+    let key = format!("{}/{}", &ctx.repo.name, obj.id());
     let ctr = builder.build(
         ctx.ctx.fb,
         &config.category,
@@ -82,7 +83,7 @@ pub async fn allow_consistent_routing<B: PopularityBuilder>(
 
     let popularity = time::timeout(
         OBJECT_POPULARITY_TIMEOUT,
-        increment_and_fetch_object_popularity(ctx, obj, &config, builder),
+        increment_and_fetch_object_popularity(ctx, obj, config, builder),
     )
     .await;
 
@@ -111,14 +112,15 @@ mod test {
 
     use async_trait::async_trait;
     use futures::future;
-    use mononoke_types_mocks::{contentid::ONES_CTID, hash::ONES_SHA256};
-    use std::sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    };
+    use mononoke_types_mocks::contentid::ONES_CTID;
+    use mononoke_types_mocks::hash::ONES_SHA256;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
     use time_window_counter::GlobalTimeWindowCounter;
 
-    use crate::config::{ObjectPopularity, ServerConfig};
+    use crate::config::ObjectPopularity;
+    use crate::config::ServerConfig;
 
     fn dummy(size: impl Into<Option<u64>>) -> InternalObject {
         InternalObject::new(ONES_CTID, ONES_SHA256, size.into())
@@ -210,7 +212,7 @@ mod test {
         let ctx = RepositoryRequestContext::test_builder(fb)?.build()?;
         let ctr = DummyCounter::default();
 
-        assert_eq!(allow_consistent_routing(&ctx, dummy(None), ctr).await, true);
+        assert!(allow_consistent_routing(&ctx, dummy(None), ctr).await);
 
         Ok(())
     }

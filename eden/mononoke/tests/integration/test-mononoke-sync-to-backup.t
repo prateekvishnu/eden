@@ -98,19 +98,19 @@ Sync it to another client
 
 Sync a pushrebase bookmark move
 
-  $ mononoke_backup_sync backup sync-once 2 --generate-bundles 2>&1 | grep 'successful sync'
-  * successful sync of entries [3] (glob)
+  $ mononoke_backup_sync backup sync-once 2 2>&1 | grep 'successful sync'
+  * successful sync of entries [3]* (glob)
 
-  $ mononoke_backup_sync backup sync-once 3 --generate-bundles 2>&1 | grep 'successful sync'
-  * successful sync of entries [4] (glob)
+  $ mononoke_backup_sync backup sync-once 3 2>&1 | grep 'successful sync'
+  * successful sync of entries [4]* (glob)
 
-  $ mononoke_backup_sync backup sync-once 4 --generate-bundles 2>&1 | grep 'successful sync'
-  * successful sync of entries [5] (glob)
+  $ mononoke_backup_sync backup sync-once 4 2>&1 | grep 'successful sync'
+  * successful sync of entries [5]* (glob)
 
-  $ mononoke_backup_sync backup sync-loop 5 --generate-bundles 2>&1 | grep 'successful sync'
-  * successful sync of entries [6] (glob)
-  * successful sync of entries [7] (glob)
-  * successful sync of entries [8] (glob)
+  $ mononoke_backup_sync backup sync-loop 5 2>&1 | grep 'successful sync'
+  * successful sync of entries [6]* (glob)
+  * successful sync of entries [7]* (glob)
+  * successful sync of entries [8]* (glob)
 
 
 Do a manual move
@@ -122,8 +122,8 @@ Do a manual move
   $ REPOID=0 mononoke_admin bookmarks set master_bookmark "$NODE" &> /dev/null
 
   $ cd "$TESTTMP"
-  $ mononoke_backup_sync backup sync-loop 7 --generate-bundles --bookmark-move-any-direction 2>&1 | grep 'successful sync'
-  * successful sync of entries [15] (glob)
+  $ mononoke_backup_sync backup sync-loop 7 --bookmark-move-any-direction 2>&1 | grep 'successful sync'
+  * successful sync of entries [15]* (glob)
 
   $ cd "$TESTTMP/backup"
   $ REPONAME=backup

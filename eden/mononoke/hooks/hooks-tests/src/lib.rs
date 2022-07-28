@@ -7,35 +7,63 @@
 
 use anyhow::Error;
 use async_trait::async_trait;
-use blobrepo::BlobRepo;
 use blobstore::Loadable;
-use bookmarks::{BookmarkName, BookmarkUpdateReason};
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
+use bookmarks::BookmarksRef;
 use context::CoreContext;
 use fbinit::FacebookInit;
 use fixtures::TestRepoFixture;
-use futures::stream::{futures_unordered, TryStreamExt};
-use futures::{future, TryFutureExt};
-use hooks::{
-    hook_loader::load_hooks, ChangesetHook, CrossRepoPushSource, ErrorKind, FileHook,
-    HookExecution, HookManager, HookRejectionInfo, PushAuthoredBy,
-};
-use hooks_content_stores::{
-    FileChange as FileDiff, FileContentManager, InMemoryFileContentManager, PathContent,
-    RepoFileContentManager,
-};
-use maplit::{btreemap, hashmap, hashset};
-use metaconfig_types::{BookmarkParams, HookConfig, HookManagerParams, HookParams, RepoConfig};
-use mononoke_types::{
-    BasicFileChange, BonsaiChangeset, BonsaiChangesetMut, ChangesetId, DateTime, FileChange,
-    FileType, MPath,
-};
-use mononoke_types_mocks::contentid::{ONES_CTID, THREES_CTID, TWOS_CTID};
+use futures::future;
+use futures::stream::futures_unordered;
+use futures::stream::TryStreamExt;
+use futures::TryFutureExt;
+use hooks::hook_loader::load_hooks;
+use hooks::ChangesetHook;
+use hooks::CrossRepoPushSource;
+use hooks::ErrorKind;
+use hooks::FileHook;
+use hooks::HookExecution;
+use hooks::HookManager;
+use hooks::HookRejectionInfo;
+use hooks::PushAuthoredBy;
+use hooks_content_stores::FileChange as FileDiff;
+use hooks_content_stores::FileContentManager;
+use hooks_content_stores::InMemoryFileContentManager;
+use hooks_content_stores::PathContent;
+use hooks_content_stores::RepoFileContentManager;
+use maplit::btreemap;
+use maplit::hashmap;
+use maplit::hashset;
+use metaconfig_types::BookmarkParams;
+use metaconfig_types::HookConfig;
+use metaconfig_types::HookManagerParams;
+use metaconfig_types::HookParams;
+use metaconfig_types::RepoConfig;
+use mononoke_types::BasicFileChange;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::BonsaiChangesetMut;
+use mononoke_types::ChangesetId;
+use mononoke_types::DateTime;
+use mononoke_types::FileChange;
+use mononoke_types::FileType;
+use mononoke_types::MPath;
+use mononoke_types_mocks::contentid::ONES_CTID;
+use mononoke_types_mocks::contentid::THREES_CTID;
+use mononoke_types_mocks::contentid::TWOS_CTID;
+use permission_checker::DefaultAclProvider;
 use regex::Regex;
+use repo_blobstore::RepoBlobstoreRef;
 use scuba_ext::MononokeScubaSampleBuilder;
 use sorted_vector_map::sorted_vector_map;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
-use tests_utils::{bookmark, create_commit, store_files, CreateCommitContext};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use tests_utils::bookmark;
+use tests_utils::create_commit;
+use tests_utils::store_files;
+use tests_utils::BasicTestRepo;
+use tests_utils::CreateCommitContext;
 
 #[derive(Clone, Debug)]
 struct FnChangesetHook {
@@ -69,7 +97,7 @@ fn always_accepting_changeset_hook() -> Box<dyn ChangesetHook> {
 }
 
 fn always_rejecting_changeset_hook() -> Box<dyn ChangesetHook> {
-    let f: fn() -> HookExecution = || default_rejection();
+    let f: fn() -> HookExecution = default_rejection;
     Box::new(FnChangesetHook::new(f))
 }
 
@@ -132,7 +160,7 @@ impl ChangesetHook for FileChangesChangesetHook {
         let parent = changeset.parents().next();
         let (added, changed, removed) = if let Some(parent) = parent {
             let file_changes = content_manager
-                .file_changes(&ctx, changeset.get_changeset_id(), parent)
+                .file_changes(ctx, changeset.get_changeset_id(), parent)
                 .await?;
 
             let (mut added, mut changed, mut removed) = (0, 0, 0);
@@ -184,7 +212,7 @@ impl ChangesetHook for LatestChangesChangesetHook {
             .await?;
 
         for (path, linknode) in self.0.iter() {
-            let found_linknode = res.get(&path).map(|info| info.changeset_id());
+            let found_linknode = res.get(path).map(|info| info.changeset_id());
             if linknode.as_ref() != found_linknode {
                 return Ok(HookExecution::Rejected(HookRejectionInfo::new(
                     "found linknode doesn't match the expected one",
@@ -227,11 +255,7 @@ impl ChangesetHook for FileContentMatchingChangesetHook {
                         // True only if there is content containing the expected content
                         Ok(match (content, expected_content.as_ref()) {
                             (Some(content), Some(expected_content)) => {
-                                if content.contains(expected_content) {
-                                    true
-                                } else {
-                                    false
-                                }
+                                content.contains(expected_content)
                             }
                             (None, None) => true,
                             _ => false,
@@ -352,7 +376,7 @@ fn always_accepting_file_hook() -> Box<dyn FileHook> {
 }
 
 fn always_rejecting_file_hook() -> Box<dyn FileHook> {
-    let f: fn() -> HookExecution = || default_rejection();
+    let f: fn() -> HookExecution = default_rejection;
     Box::new(FnFileHook::new(f))
 }
 
@@ -372,7 +396,7 @@ impl FileHook for PathMatchingFileHook {
         _cross_repo_push_source: CrossRepoPushSource,
         _push_authored_by: PushAuthoredBy,
     ) -> Result<HookExecution, Error> {
-        Ok(if self.paths.contains(&path) {
+        Ok(if self.paths.contains(path) {
             HookExecution::Accepted
         } else {
             default_rejection()
@@ -925,8 +949,7 @@ async fn test_file_hook_length(fb: FacebookInit) {
 #[fbinit::test]
 async fn test_cs_find_content_hook_with_blob_store(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    // set up a blobrepo
-    let repo: BlobRepo = test_repo_factory::build_empty(fb)?;
+    let repo: BasicTestRepo = test_repo_factory::build_empty(fb)?;
     let root_id = CreateCommitContext::new_root(&ctx, &repo)
         .add_file("dir/file", "dir/file")
         .add_file("dir-2/file", "dir-2/file")
@@ -976,12 +999,11 @@ async fn test_cs_find_content_hook_with_blob_store(fb: FacebookInit) -> Result<(
     .await;
 
     // set master bookmark
-    let mut txn = repo.update_bookmark_transaction(ctx.clone());
+    let mut txn = repo.bookmarks().create_transaction(ctx.clone());
     txn.force_set(
         &BookmarkName::new("master")?,
         bcs_id,
         BookmarkUpdateReason::TestMove,
-        None,
     )?;
     txn.commit().await?;
 
@@ -1016,8 +1038,7 @@ async fn test_cs_find_content_hook_with_blob_store(fb: FacebookInit) -> Result<(
 #[fbinit::test]
 async fn test_cs_file_changes_hook_with_blob_store(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    // set up a blobrepo
-    let repo: BlobRepo = test_repo_factory::build_empty(fb)?;
+    let repo: BasicTestRepo = test_repo_factory::build_empty(fb)?;
     let root_id = CreateCommitContext::new_root(&ctx, &repo)
         .add_file("file", "file")
         .add_file("dir/file", "dir/file")
@@ -1036,7 +1057,7 @@ async fn test_cs_file_changes_hook_with_blob_store(fb: FacebookInit) -> Result<(
         .add_file("dir-3/sub/file-2", "dir-3/sub/file-2")
         .commit()
         .await?;
-    let changeset = bcs_id.load(&ctx, &repo.get_blobstore()).await?;
+    let changeset = bcs_id.load(&ctx, repo.repo_blobstore()).await?;
 
     let hook_name = "hook".to_string();
     let hook = Box::new(FileChangesChangesetHook {
@@ -1073,8 +1094,7 @@ async fn test_cs_file_changes_hook_with_blob_store(fb: FacebookInit) -> Result<(
 #[fbinit::test]
 async fn test_cs_latest_changes_hook_with_blob_store(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    // set up a blobrepo
-    let repo: BlobRepo = test_repo_factory::build_empty(fb)?;
+    let repo: BasicTestRepo = test_repo_factory::build_empty(fb)?;
     let root_id = CreateCommitContext::new_root(&ctx, &repo)
         .add_file("file", "file")
         .commit()
@@ -1132,7 +1152,7 @@ async fn test_cs_hooks_with_blob_store(fb: FacebookInit) {
         bookmarks,
         regexes.clone(),
         expected,
-        ContentFetcherType::Blob(fixtures::ManyFilesDirs::getrepo(ctx.fb).await),
+        ContentFetcherType::Blob(fixtures::ManyFilesDirs::get_test_repo(ctx.fb).await),
     )
     .await;
 }
@@ -1142,7 +1162,7 @@ async fn test_file_hooks_with_blob_store(fb: FacebookInit) {
     let ctx = CoreContext::test_mock(fb);
     // Create an init a repo
     let (repo, bcs_id) = {
-        let repo: BlobRepo = test_repo_factory::build_empty(fb).unwrap();
+        let repo: BasicTestRepo = test_repo_factory::build_empty(fb).unwrap();
 
         let parent = create_commit(
             ctx.clone(),
@@ -1168,12 +1188,11 @@ async fn test_file_hooks_with_blob_store(fb: FacebookInit) {
         )
         .await;
 
-        let mut txn = repo.update_bookmark_transaction(ctx.clone());
+        let mut txn = repo.bookmarks().create_transaction(ctx.clone());
         txn.force_set(
             &BookmarkName::new("master").unwrap(),
             bcs_id,
             BookmarkUpdateReason::TestMove,
-            None,
         )
         .unwrap();
         txn.commit().await.unwrap();
@@ -1197,7 +1216,7 @@ async fn test_file_hooks_with_blob_store(fb: FacebookInit) {
     };
 
     let bcs = bcs_id
-        .load(&ctx, repo.blobstore())
+        .load(&ctx, repo.repo_blobstore())
         .await
         .expect("Can't load commit");
     run_file_hooks_for_cs(
@@ -1271,7 +1290,7 @@ async fn run_changeset_hooks_with_mgr(
 
 enum ContentFetcherType {
     InMemory,
-    Blob(BlobRepo),
+    Blob(BasicTestRepo),
 }
 
 async fn run_file_hooks(
@@ -1365,7 +1384,7 @@ async fn setup_hook_manager(
 ) -> HookManager {
     let mut hook_manager = match content_manager_type {
         ContentFetcherType::InMemory => hook_manager_inmem(fb).await,
-        ContentFetcherType::Blob(repo) => hook_manager_blobrepo(fb, repo).await,
+        ContentFetcherType::Blob(repo) => hook_manager_repo(fb, &repo).await,
     };
     for (bookmark_name, hook_names) in bookmarks {
         hook_manager
@@ -1378,10 +1397,7 @@ async fn setup_hook_manager(
 }
 
 fn default_rejection() -> HookExecution {
-    HookExecution::Rejected(HookRejectionInfo::new_long(
-        "desc".into(),
-        "long_desc".to_string(),
-    ))
+    HookExecution::Rejected(HookRejectionInfo::new_long("desc", "long_desc".to_string()))
 }
 
 fn default_changeset() -> BonsaiChangeset {
@@ -1402,12 +1418,13 @@ fn default_changeset() -> BonsaiChangeset {
     }.freeze().expect("Created changeset")
 }
 
-async fn hook_manager_blobrepo(fb: FacebookInit, repo: BlobRepo) -> HookManager {
+async fn hook_manager_repo(fb: FacebookInit, repo: &BasicTestRepo) -> HookManager {
     let ctx = CoreContext::test_mock(fb);
 
-    let content_manager = RepoFileContentManager::new(repo);
+    let content_manager = RepoFileContentManager::new(&repo);
     HookManager::new(
         ctx.fb,
+        DefaultAclProvider::new(fb),
         Box::new(content_manager),
         HookManagerParams {
             disable_acl_checker: true,
@@ -1420,8 +1437,8 @@ async fn hook_manager_blobrepo(fb: FacebookInit, repo: BlobRepo) -> HookManager 
     .expect("Failed to construct HookManager")
 }
 
-async fn hook_manager_many_files_dirs_blobrepo(fb: FacebookInit) -> HookManager {
-    hook_manager_blobrepo(fb, fixtures::ManyFilesDirs::getrepo(fb).await).await
+async fn hook_manager_many_files_dirs_repo(fb: FacebookInit) -> HookManager {
+    hook_manager_repo(fb, &fixtures::ManyFilesDirs::get_test_repo(fb).await).await
 }
 
 fn to_mpath(string: &str) -> MPath {
@@ -1438,6 +1455,7 @@ async fn hook_manager_inmem(fb: FacebookInit) -> HookManager {
 
     HookManager::new(
         ctx.fb,
+        DefaultAclProvider::new(fb),
         Box::new(content_manager),
         HookManagerParams {
             disable_acl_checker: true,
@@ -1472,10 +1490,16 @@ async fn test_verify_integrity_fast_failure(fb: FacebookInit) {
         },
     }];
 
-    let mut hm = hook_manager_many_files_dirs_blobrepo(fb).await;
-    load_hooks(fb, &mut hm, &config, &hashset![])
-        .await
-        .expect_err("`verify_integrity` hook loading should have failed");
+    let mut hm = hook_manager_many_files_dirs_repo(fb).await;
+    load_hooks(
+        fb,
+        &DefaultAclProvider::new(fb),
+        &mut hm,
+        &config,
+        &hashset![],
+    )
+    .await
+    .expect_err("`verify_integrity` hook loading should have failed");
 }
 
 #[fbinit::test]
@@ -1498,12 +1522,18 @@ async fn test_load_hooks_bad_rust_hook(fb: FacebookInit) {
         config: Default::default(),
     }];
 
-    let mut hm = hook_manager_many_files_dirs_blobrepo(fb).await;
+    let mut hm = hook_manager_many_files_dirs_repo(fb).await;
 
-    match load_hooks(fb, &mut hm, &config, &hashset![])
-        .await
-        .unwrap_err()
-        .downcast::<ErrorKind>()
+    match load_hooks(
+        fb,
+        &DefaultAclProvider::new(fb),
+        &mut hm,
+        &config,
+        &hashset![],
+    )
+    .await
+    .unwrap_err()
+    .downcast::<ErrorKind>()
     {
         Ok(ErrorKind::InvalidRustHook(hook_name)) => {
             assert_eq!(hook_name, "hook1".to_string());
@@ -1523,11 +1553,17 @@ async fn test_load_disabled_hooks(fb: FacebookInit) {
         config: Default::default(),
     }];
 
-    let mut hm = hook_manager_many_files_dirs_blobrepo(fb).await;
+    let mut hm = hook_manager_many_files_dirs_repo(fb).await;
 
-    load_hooks(fb, &mut hm, &config, &hashset!["hook1".to_string()])
-        .await
-        .expect("disabling a broken hook should allow loading to succeed");
+    load_hooks(
+        fb,
+        &DefaultAclProvider::new(fb),
+        &mut hm,
+        &config,
+        &hashset!["hook1".to_string()],
+    )
+    .await
+    .expect("disabling a broken hook should allow loading to succeed");
 }
 
 #[fbinit::test]
@@ -1551,11 +1587,17 @@ async fn test_load_disabled_hooks_referenced_by_bookmark(fb: FacebookInit) {
         config: Default::default(),
     }];
 
-    let mut hm = hook_manager_many_files_dirs_blobrepo(fb).await;
+    let mut hm = hook_manager_many_files_dirs_repo(fb).await;
 
-    load_hooks(fb, &mut hm, &config, &hashset!["hook1".to_string()])
-        .await
-        .expect("disabling a broken hook should allow loading to succeed");
+    load_hooks(
+        fb,
+        &DefaultAclProvider::new(fb),
+        &mut hm,
+        &config,
+        &hashset!["hook1".to_string()],
+    )
+    .await
+    .expect("disabling a broken hook should allow loading to succeed");
 }
 
 #[fbinit::test]
@@ -1565,12 +1607,18 @@ async fn test_load_disabled_hooks_hook_does_not_exist(fb: FacebookInit) {
     config.bookmarks = vec![];
     config.hooks = vec![];
 
-    let mut hm = hook_manager_many_files_dirs_blobrepo(fb).await;
+    let mut hm = hook_manager_many_files_dirs_repo(fb).await;
 
-    match load_hooks(fb, &mut hm, &config, &hashset!["hook1".to_string()])
-        .await
-        .unwrap_err()
-        .downcast::<ErrorKind>()
+    match load_hooks(
+        fb,
+        &DefaultAclProvider::new(fb),
+        &mut hm,
+        &config,
+        &hashset!["hook1".to_string()],
+    )
+    .await
+    .unwrap_err()
+    .downcast::<ErrorKind>()
     {
         Ok(ErrorKind::NoSuchHookToDisable(hooks)) => {
             assert_eq!(hashset!["hook1".to_string()], hooks);

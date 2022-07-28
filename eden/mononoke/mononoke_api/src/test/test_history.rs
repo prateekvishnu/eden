@@ -15,7 +15,11 @@ use futures::stream::TryStreamExt;
 use mononoke_types::DateTime;
 use tests_utils::CreateCommitContext;
 
-use crate::{ChangesetHistoryOptions, ChangesetId, ChangesetPathHistoryOptions, Repo, RepoContext};
+use crate::ChangesetHistoryOptions;
+use crate::ChangesetId;
+use crate::ChangesetPathHistoryOptions;
+use crate::Repo;
+use crate::RepoContext;
 
 // Generates this commit graph:
 //
@@ -185,7 +189,7 @@ async fn init_repo(ctx: &CoreContext) -> Result<(RepoContext, HashMap<&'static s
     );
 
     let repo = Repo::new_test(ctx.clone(), blob_repo).await?;
-    let repo_ctx = RepoContext::new(ctx.clone(), Arc::new(repo)).await?;
+    let repo_ctx = RepoContext::new_test(ctx.clone(), Arc::new(repo)).await?;
     Ok((repo_ctx, changesets))
 }
 
@@ -262,8 +266,8 @@ async fn commit_path_history(fb: FacebookInit) -> Result<()> {
             changesets["b3"],
             changesets["c1"],
             changesets["m1"],
-            changesets["b2"],
             changesets["a3"],
+            changesets["b2"],
         ]
     );
 
@@ -287,11 +291,11 @@ async fn commit_path_history(fb: FacebookInit) -> Result<()> {
             changesets["b3"],
             changesets["c1"],
             changesets["m1"],
-            changesets["b2"],
             changesets["a3"],
-            changesets["b1"],
             changesets["a2"],
+            changesets["b2"],
             changesets["a1"],
+            changesets["b1"],
         ]
     );
 

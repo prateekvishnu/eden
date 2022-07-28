@@ -6,7 +6,7 @@
 from edenscm.mercurial import cmdutil, scmutil, visibility
 from edenscm.mercurial.context import memctx
 from edenscm.mercurial.i18n import _
-from edenscm.mercurial.node import hex, nullid
+from edenscm.mercurial.node import hex
 
 from . import backup, backuplock
 from .commands import command
@@ -59,7 +59,7 @@ def debughiddencommit(ui, repo, *pats, **opts):
 
         node = memctx(
             repo,
-            [wctx.p1().node(), nullid],
+            [wctx.p1()],
             "Ephemeral commit",
             sorted(files),
             getfilectx,

@@ -8,43 +8,34 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use anyhow::{Error, Result};
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
-use futures::stream::{self, StreamExt};
-use serde_derive::Serialize;
+use anyhow::Result;
+use serde::Serialize;
 use source_control::types as thrift;
 
-use crate::args::commit_id::{add_commit_id_args, get_commit_id, resolve_commit_id};
-use crate::args::pushvars::{add_pushvar_args, get_pushvars};
-use crate::args::repo::{add_repo_args, get_repo_specifier};
-use crate::connection::Connection;
-use crate::render::{Render, RenderStream};
+use crate::args::commit_id::resolve_commit_id;
+use crate::args::commit_id::CommitIdArgs;
+use crate::args::pushvars::PushvarArgs;
+use crate::args::repo::RepoArgs;
+use crate::render::Render;
+use crate::ScscApp;
 
-pub(super) const NAME: &str = "run-hooks";
-
-const ARG_NAME: &str = "BOOKMARK_NAME";
-
-pub(super) fn make_subcommand<'a, 'b>() -> App<'a, 'b> {
-    let cmd = SubCommand::with_name(NAME)
-        .about("Run hooks on a commit without pushing it")
-        .long_about(concat!(
-            "Run hooks on a commit\n\n",
-            "Provide a commit and the bookmark you plan to push to. ",
-            "The hooks that would run when you push this commit to bookmark will run now ",
-            "and their outcomes will be reported. A success does NOT guarantee ",
-            "the commit will successfully land (e.g. conflicts may prevent landing)."
-        ))
-        .setting(AppSettings::ColoredHelp);
-    let cmd = add_repo_args(cmd);
-    let cmd = add_commit_id_args(cmd);
-    let cmd = add_pushvar_args(cmd);
-    cmd.arg(
-        Arg::with_name(ARG_NAME)
-            .long("to")
-            .takes_value(true)
-            .help("Name of the bookmark you would push to if pushing for real")
-            .required(true),
-    )
+#[derive(clap::Parser)]
+/// Run hooks on a commit without pushing it
+///
+/// Provide a commit and the bookmark you plan to push to.
+/// The hooks that would run when you push this commit to bookmark will run now
+/// and their outcomes will be reported. A success does NOT guarantee
+/// the commit will successfully land (e.g. conflicts may prevent landing).
+pub(super) struct CommandArgs {
+    #[clap(flatten)]
+    repo_args: RepoArgs,
+    #[clap(flatten)]
+    commit_id_args: CommitIdArgs,
+    #[clap(flatten)]
+    pushvar_args: PushvarArgs,
+    #[clap(long)]
+    /// Name of the bookmark you would push to if pushing for real
+    to: String,
 }
 
 #[derive(Serialize)]
@@ -62,7 +53,9 @@ struct RunHooksOutput {
 }
 
 impl Render for RunHooksOutput {
-    fn render(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    type Args = CommandArgs;
+
+    fn render(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         write!(
             w,
             "Hook outcomes when dry-run landing {} to bookmark {}:\n\n",
@@ -78,29 +71,30 @@ impl Render for RunHooksOutput {
         Ok(())
     }
 
-    fn render_json(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    fn render_json(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         Ok(serde_json::to_writer(w, self)?)
     }
 }
 
-pub(super) async fn run(matches: &ArgMatches<'_>, connection: Connection) -> Result<RenderStream> {
-    let repo = get_repo_specifier(matches).expect("repository is required");
-    let original_commit_id = get_commit_id(matches)?;
-    let commit_id = resolve_commit_id(&connection, &repo, &original_commit_id).await?;
+pub(super) async fn run(app: ScscApp, args: CommandArgs) -> Result<()> {
+    let repo = args.repo_args.clone().into_repo_specifier();
+    let original_commit_id = args.commit_id_args.clone().into_commit_id();
+    let commit_id = resolve_commit_id(&app.connection, &repo, &original_commit_id).await?;
     let commit_specifier = thrift::CommitSpecifier {
         id: commit_id,
         repo,
         ..Default::default()
     };
-    let bookmark: String = matches.value_of(ARG_NAME).expect("name is required").into();
-    let pushvars = get_pushvars(matches)?;
+    let bookmark: String = args.to.clone();
+    let pushvars = args.pushvar_args.clone().into_pushvars();
 
     let params = thrift::CommitRunHooksParams {
         bookmark: bookmark.clone(),
         pushvars,
         ..Default::default()
     };
-    let response = connection
+    let response = app
+        .connection
         .commit_run_hooks(&commit_specifier, &params)
         .await?;
     let outcomes = response
@@ -119,10 +113,10 @@ pub(super) async fn run(matches: &ArgMatches<'_>, connection: Connection) -> Res
             ))
         })
         .collect::<Result<_>>()?;
-    let output = Box::new(RunHooksOutput {
+    let output = RunHooksOutput {
         commit: original_commit_id.to_string(),
         bookmark,
         outcomes,
-    });
-    Ok(stream::once(async move { Ok(output as Box<dyn Render>) }).boxed())
+    };
+    app.target.render_one(&args, output).await
 }

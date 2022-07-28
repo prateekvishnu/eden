@@ -13,7 +13,8 @@
 //! handling, enqueuing and polling should be done by the callers.
 
 use anyhow::anyhow;
-use async_requests::types::{MegarepoAsynchronousRequestParams, MegarepoAsynchronousRequestResult};
+use async_requests::types::MegarepoAsynchronousRequestParams;
+use async_requests::types::MegarepoAsynchronousRequestResult;
 use context::CoreContext;
 use megarepo_api::MegarepoApi;
 use megarepo_error::MegarepoError;
@@ -58,7 +59,7 @@ async fn megarepo_add_sync_target(
         changesets_to_merge.insert(s, cs_id);
     }
     let cs_id = megarepo_api
-        .add_sync_target(&ctx, config, changesets_to_merge, params.message)
+        .add_sync_target(ctx, config, changesets_to_merge, params.message)
         .await?
         .as_ref()
         .into();
@@ -75,7 +76,7 @@ async fn megarepo_add_branching_sync_target(
 ) -> Result<thrift::MegarepoAddBranchingTargetResponse, MegarepoError> {
     let cs_id = megarepo_api
         .add_branching_sync_target(
-            &ctx,
+            ctx,
             params.target,
             ChangesetId::from_bytes(params.branching_point).map_err(MegarepoError::request)?,
             params.source_target,
@@ -103,7 +104,7 @@ async fn megarepo_change_target_config(
         ChangesetId::from_bytes(params.target_location).map_err(MegarepoError::request)?;
     let cs_id = megarepo_api
         .change_target_config(
-            &ctx,
+            ctx,
             params.target,
             params.new_version,
             target_location,

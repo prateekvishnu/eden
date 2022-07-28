@@ -5,37 +5,45 @@
  * GNU General Public License version 2.
  */
 
-use std::fmt::{self, Debug, Display};
+use std::fmt;
+use std::fmt::Debug;
+use std::fmt::Display;
 use std::hash::Hash;
-use std::{result, str::FromStr};
+use std::result;
+use std::str::FromStr;
 
 use abomonation_derive::Abomonation;
 use anyhow::Result;
 use async_trait::async_trait;
-use blobstore::{Blobstore, Loadable, LoadableError, Storable};
+use blobstore::Blobstore;
+use blobstore::Loadable;
+use blobstore::LoadableError;
 use context::CoreContext;
-use edenapi_types::{
-    BonsaiChangesetId as EdenapiBonsaiChangesetId, ContentId as EdenapiContentId,
-    FsnodeId as EdenapiFsnodeId,
-};
+use edenapi_types::BonsaiChangesetId as EdenapiBonsaiChangesetId;
+use edenapi_types::ContentId as EdenapiContentId;
+use edenapi_types::FsnodeId as EdenapiFsnodeId;
 use sql::mysql;
 
-use crate::{
-    blob::{Blob, BlobstoreValue},
-    bonsai_changeset::BonsaiChangeset,
-    content_chunk::ContentChunk,
-    content_metadata::ContentMetadata,
-    deleted_manifest_v2::DeletedManifestV2,
-    fastlog_batch::FastlogBatch,
-    file_contents::FileContents,
-    fsnode::Fsnode,
-    hash::{Blake2, Blake2Prefix},
-    rawbundle2::RawBundle2,
-    redaction_key_list::RedactionKeyList,
-    skeleton_manifest::SkeletonManifest,
-    thrift,
-    unode::{FileUnode, ManifestUnode},
-};
+use crate::blob::Blob;
+use crate::blob::BlobstoreValue;
+use crate::bonsai_changeset::BonsaiChangeset;
+use crate::content_chunk::ContentChunk;
+use crate::content_metadata::ContentMetadata;
+use crate::content_metadata_v2::ContentMetadataV2;
+use crate::deleted_manifest_v2::DeletedManifestV2;
+use crate::fastlog_batch::FastlogBatch;
+use crate::file_contents::FileContents;
+use crate::fsnode::Fsnode;
+use crate::hash::Blake2;
+use crate::hash::Blake2Prefix;
+use crate::rawbundle2::RawBundle2;
+use crate::redaction_key_list::RedactionKeyList;
+use crate::sharded_map::ShardedMapNode;
+use crate::skeleton_manifest::SkeletonManifest;
+use crate::thrift;
+use crate::unode::FileUnode;
+use crate::unode::ManifestUnode;
+use crate::ThriftConvert;
 
 // There is no NULL_HASH for typed hashes. Any places that need a null hash should use an
 // Option type, or perhaps a list as desired.
@@ -51,11 +59,17 @@ pub trait BlobstoreKey: FromStr<Err = anyhow::Error> {
     fn parse_blobstore_key(key: &str) -> Result<Self>;
 }
 
-/// An identifier used throughout Mononoke.
-pub trait MononokeId: BlobstoreKey + Debug + Copy + Eq + Hash + Sync + Send + 'static {
-    /// Blobstore value type associated with given MononokeId type
-    type Value: BlobstoreValue<Key = Self>;
+pub trait IdContext {
+    type Id;
+    fn id_from_data(data: impl AsRef<[u8]>) -> Self::Id;
+}
 
+/// An identifier used throughout Mononoke.
+pub trait MononokeId:
+    BlobstoreKey + Loadable + ThriftConvert + Debug + Copy + Eq + Hash + Sync + Send + 'static
+where
+    <Self as Loadable>::Value: BlobstoreValue<Key = Self>,
+{
     /// Return a stable hash fingerprint that can be used for sampling
     fn sampling_fingerprint(&self) -> u64;
 }
@@ -94,6 +108,10 @@ pub struct ContentChunkId(Blake2);
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
 pub struct ContentMetadataId(Blake2);
 
+/// An identifier for mapping from ContentId to ContentMetadata
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
+pub struct ContentMetadataV2Id(Blake2);
+
 /// An identifier for raw bundle2 contents in Mononoke
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
 pub struct RawBundle2Id(Blake2);
@@ -112,7 +130,7 @@ pub struct DeletedManifestV2Id(Blake2);
 
 /// An identifier for a sharded map node used in deleted manifest v2
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
-pub struct ShardedMapNodeId(Blake2);
+pub struct ShardedMapNodeDMv2Id(Blake2);
 
 /// An identifier for an fsnode
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
@@ -168,18 +186,6 @@ macro_rules! impl_typed_hash_no_context {
                 Self(blake2)
             }
 
-            // (this is public because downstream code wants to be able to deserialize these nodes)
-            pub fn from_thrift(h: $thrift_typed) -> $crate::private::anyhow::Result<Self> {
-                // This assumes that a null hash is never serialized. This should always be the
-                // case.
-                match h.0 {
-                    $crate::private::thrift::IdType::Blake2(blake2) => Ok(Self::new($crate::private::Blake2::from_thrift(blake2)?)),
-                    $crate::private::thrift::IdType::UnknownField(x) => $crate::private::anyhow::bail!($crate::private::ErrorKind::InvalidThrift(
-                        stringify!($typed).into(),
-                        format!("unknown id type field: {}", x)
-                    )),
-                }
-            }
 
             #[cfg(test)]
             pub(crate) fn from_byte_array(arr: [u8; 32]) -> Self {
@@ -209,9 +215,40 @@ macro_rules! impl_typed_hash_no_context {
                 self.to_hex().into_iter().take(8).collect()
             }
 
-            // (this is public because downstream code wants to be able to serialize these nodes)
+            pub fn from_thrift(h: $thrift_typed) -> $crate::private::anyhow::Result<Self> {
+                $crate::ThriftConvert::from_thrift(h)
+            }
+
             pub fn into_thrift(self) -> $thrift_typed {
+                $crate::ThriftConvert::into_thrift(self)
+            }
+        }
+
+        impl $crate::ThriftConvert for $typed {
+            const NAME: &'static str = stringify!($typed);
+            type Thrift = $thrift_typed;
+
+            fn from_thrift(h: Self::Thrift) -> $crate::private::anyhow::Result<Self> {
+                // This assumes that a null hash is never serialized. This should always be the
+                // case.
+                match h.0 {
+                    $crate::private::thrift::IdType::Blake2(blake2) => Ok(Self::new($crate::private::Blake2::from_thrift(blake2)?)),
+                    $crate::private::thrift::IdType::UnknownField(x) => $crate::private::anyhow::bail!($crate::private::ErrorKind::InvalidThrift(
+                        stringify!($typed).into(),
+                        format!("unknown id type field: {}", x)
+                    )),
+                }
+            }
+            fn into_thrift(self) -> Self::Thrift {
                 $thrift_typed($crate::private::thrift::IdType::Blake2(self.0.into_thrift()))
+            }
+            // Ids are special, their bytes serialization is NOT the thrift bytes serialization
+            // as that is an union. Instead, it is simply the serialization of their blake2.
+            fn from_bytes(b: &$crate::private::Bytes) -> Result<Self> {
+                Self::from_bytes(b)
+            }
+            fn into_bytes(self) -> $crate::private::Bytes {
+                self.into()
             }
         }
 
@@ -301,6 +338,7 @@ macro_rules! impl_typed_hash_no_context {
                 D: $crate::private::Deserializer<'de>,
             {
                 use std::str::FromStr;
+                use std::result::Result::*;
 
                 let hex = deserializer.deserialize_string($crate::private::Blake2HexVisitor)?;
                 match $crate::private::Blake2::from_str(hex.as_str()) {
@@ -313,14 +351,16 @@ macro_rules! impl_typed_hash_no_context {
     }
 }
 
-macro_rules! impl_typed_hash_loadable_storable {
+#[macro_export]
+macro_rules! impl_typed_hash_loadable {
     {
         hash_type => $typed: ident,
+        value_type => $value_type: ty,
     } => {
         #[async_trait]
         impl Loadable for $typed
         {
-            type Value = <$typed as MononokeId>::Value;
+            type Value = $value_type;
 
             async fn load<'a, B: Blobstore>(
                 &'a self,
@@ -337,22 +377,6 @@ macro_rules! impl_typed_hash_loadable_storable {
             }
         }
 
-        #[async_trait]
-        impl Storable for Blob<$typed>
-        {
-            type Key = $typed;
-
-            async fn store<'a, B: Blobstore>(
-                self,
-                ctx: &'a CoreContext,
-                blobstore: &'a B,
-            ) -> Result<Self::Key> {
-                let id = *self.id();
-                let bytes = self.into();
-                blobstore.put(ctx, id.blobstore_key(), bytes).await?;
-                Ok(id)
-            }
-        }
     }
 }
 
@@ -388,36 +412,44 @@ macro_rules! impl_typed_context {
             }
         }
 
+        impl $crate::typed_hash::IdContext for $typed_context {
+            type Id = $typed;
+            fn id_from_data(data: impl AsRef<[u8]>) -> $typed {
+                let mut context = $typed_context::new();
+                context.update(data);
+                context.finish()
+            }
+        }
     }
 }
 
+#[macro_export]
 macro_rules! impl_typed_hash {
     {
         hash_type => $typed: ident,
         thrift_hash_type => $thrift_hash_type: path,
-        value_type => $value_type: ident,
+        value_type => $value_type: ty,
         context_type => $typed_context: ident,
         context_key => $key: expr,
     } => {
-        impl_typed_hash_no_context! {
+        $crate::impl_typed_hash_no_context! {
             hash_type => $typed,
             thrift_type => $thrift_hash_type,
             blobstore_key => $key,
         }
 
-        impl_typed_hash_loadable_storable! {
+        $crate::impl_typed_hash_loadable! {
             hash_type => $typed,
+            value_type => $value_type,
         }
 
-        impl_typed_context! {
+        $crate::impl_typed_context! {
             hash_type => $typed,
             context_type => $typed_context,
             context_key => $key,
         }
 
         impl MononokeId for $typed {
-            type Value = $value_type;
-
             #[inline]
             fn sampling_fingerprint(&self) -> u64 {
                 self.0.sampling_fingerprint()
@@ -503,19 +535,11 @@ impl_typed_hash! {
     context_key => "deletedmanifest2",
 }
 
-// Manual implementations for ShardedMapNodeId because it has a generic type
-// so we can't implement MononokeId for it
-impl_typed_hash_no_context! {
-    hash_type => ShardedMapNodeId,
-    thrift_type => thrift::ShardedMapNodeId,
-    // TODO(yancouto): ShardedMapNode shouldn't depend on something that explicitly
-    // mentions dfm.
-    blobstore_key => "deletedmanifest2.mapnode",
-}
-
-impl_typed_context! {
-    hash_type => ShardedMapNodeId,
-    context_type => ShardedMapNodeContext,
+impl_typed_hash! {
+    hash_type => ShardedMapNodeDMv2Id,
+    thrift_hash_type => thrift::ShardedMapNodeId,
+    value_type => ShardedMapNode<DeletedManifestV2Id>,
+    context_type => ShardedMapNodeDMv2Context,
     context_key => "deletedmanifest2.mapnode",
 }
 
@@ -551,8 +575,20 @@ impl_typed_hash_no_context! {
     blobstore_key => "content_metadata",
 }
 
-impl_typed_hash_loadable_storable! {
+impl_typed_hash_loadable! {
     hash_type => ContentMetadataId,
+    value_type => ContentMetadata,
+}
+
+impl_typed_hash_no_context! {
+    hash_type => ContentMetadataV2Id,
+    thrift_type => thrift::ContentMetadataV2Id,
+    blobstore_key => "content_metadata2",
+}
+
+impl_typed_hash_loadable! {
+    hash_type => ContentMetadataV2Id,
+    value_type => ContentMetadataV2,
 }
 
 impl_typed_hash! {
@@ -565,13 +601,24 @@ impl_typed_hash! {
 
 impl From<ContentId> for ContentMetadataId {
     fn from(content: ContentId) -> Self {
-        Self { 0: content.0 }
+        Self(content.0)
     }
 }
 
 impl MononokeId for ContentMetadataId {
-    type Value = ContentMetadata;
+    #[inline]
+    fn sampling_fingerprint(&self) -> u64 {
+        self.0.sampling_fingerprint()
+    }
+}
 
+impl From<ContentId> for ContentMetadataV2Id {
+    fn from(content_id: ContentId) -> Self {
+        Self(content_id.0)
+    }
+}
+
+impl MononokeId for ContentMetadataV2Id {
     #[inline]
     fn sampling_fingerprint(&self) -> u64 {
         self.0.sampling_fingerprint()
@@ -619,6 +666,7 @@ impl Display for ChangesetIdPrefix {
 #[cfg(test)]
 mod test {
     use super::*;
+    use bytes::Bytes;
     use quickcheck::quickcheck;
 
     quickcheck! {
@@ -638,6 +686,21 @@ mod test {
     }
 
     #[test]
+    fn thrift_convert_bytes_consistent_for_ids() {
+        let id = ShardedMapNodeDMv2Id::from_byte_array([1; 32]);
+        let bytes_1 = Bytes::from(id.clone());
+        let bytes_2 = ThriftConvert::into_bytes(id);
+        assert_eq!(bytes_1, bytes_2);
+        let rev_id_1_2: ShardedMapNodeDMv2Id = ThriftConvert::from_bytes(&bytes_1).unwrap();
+        let rev_id_1_1 = ShardedMapNodeDMv2Id::from_bytes(bytes_1).unwrap();
+        let rev_id_2_2: ShardedMapNodeDMv2Id = ThriftConvert::from_bytes(&bytes_2).unwrap();
+        let rev_id_2_1 = ShardedMapNodeDMv2Id::from_bytes(bytes_2).unwrap();
+        assert_eq!(rev_id_1_2, rev_id_1_1);
+        assert_eq!(rev_id_1_1, rev_id_2_2);
+        assert_eq!(rev_id_2_2, rev_id_2_1);
+    }
+
+    #[test]
     fn blobstore_key() {
         // These IDs are persistent, and this test is really to make sure that they don't change
         // accidentally.
@@ -647,7 +710,7 @@ mod test {
         let id = ContentId::new(Blake2::from_byte_array([1; 32]));
         assert_eq!(id.blobstore_key(), format!("content.blake2.{}", id));
 
-        let id = ShardedMapNodeId::from_byte_array([1; 32]);
+        let id = ShardedMapNodeDMv2Id::from_byte_array([1; 32]);
         assert_eq!(
             id.blobstore_key(),
             format!("deletedmanifest2.mapnode.blake2.{}", id)
@@ -686,6 +749,12 @@ mod test {
             format!("content_metadata.blake2.{}", id)
         );
 
+        let id = ContentMetadataV2Id::from_byte_array([1; 32]);
+        assert_eq!(
+            id.blobstore_key(),
+            format!("content_metadata2.blake2.{}", id)
+        );
+
         let id = FastlogBatchId::from_byte_array([1; 32]);
         assert_eq!(id.blobstore_key(), format!("fastlogbatch.blake2.{}", id));
 
@@ -708,7 +777,7 @@ mod test {
         let deserialized = serde_json::from_str(&serialized).unwrap();
         assert_eq!(id, deserialized);
 
-        let id = ShardedMapNodeId::from_byte_array([1; 32]);
+        let id = ShardedMapNodeDMv2Id::from_byte_array([1; 32]);
         let serialized = serde_json::to_string(&id).unwrap();
         let deserialized = serde_json::from_str(&serialized).unwrap();
         assert_eq!(id, deserialized);
@@ -749,6 +818,11 @@ mod test {
         assert_eq!(id, deserialized);
 
         let id = ContentMetadataId::from_byte_array([1; 32]);
+        let serialized = serde_json::to_string(&id).unwrap();
+        let deserialized = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(id, deserialized);
+
+        let id = ContentMetadataV2Id::from_byte_array([1; 32]);
         let serialized = serde_json::to_string(&id).unwrap();
         let deserialized = serde_json::from_str(&serialized).unwrap();
         assert_eq!(id, deserialized);

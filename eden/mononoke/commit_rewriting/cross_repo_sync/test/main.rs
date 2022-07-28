@@ -7,57 +7,82 @@
 
 //! Tests for the synced commits mapping.
 
-use anyhow::{anyhow, Error};
+use anyhow::anyhow;
+use anyhow::Error;
 use ascii::AsciiString;
 use assert_matches::assert_matches;
 use bytes::Bytes;
 use fbinit::FacebookInit;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use blobrepo::{save_bonsai_changesets, BlobRepo};
-use blobstore::{Loadable, Storable};
-use bookmarks::{BookmarkName, BookmarkUpdateReason};
+use blobrepo::save_bonsai_changesets;
+use blobrepo::BlobRepo;
+use blobstore::Loadable;
+use blobstore::Storable;
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
 use cacheblob::InProcessLease;
 use cloned::cloned;
 use context::CoreContext;
-use cross_repo_sync::{
-    update_mapping_with_version, validation::verify_working_copy, CommitSyncContext,
-    CommitSyncDataProvider, CommitSyncOutcome, ErrorKind,
-};
+use cross_repo_sync::update_mapping_with_version;
+use cross_repo_sync::validation::verify_working_copy;
+use cross_repo_sync::CommitSyncContext;
+use cross_repo_sync::CommitSyncDataProvider;
+use cross_repo_sync::CommitSyncOutcome;
+use cross_repo_sync::ErrorKind;
 use cross_repo_sync_test_utils::rebase_root_on_master;
+use fixtures::Linear;
+use fixtures::ManyFilesDirs;
 use fixtures::TestRepoFixture;
-use fixtures::{Linear, ManyFilesDirs};
-use futures::{future::join_all, FutureExt, TryStreamExt};
-use live_commit_sync_config::{TestLiveCommitSyncConfig, TestLiveCommitSyncConfigSource};
+use futures::future::join_all;
+use futures::FutureExt;
+use futures::TryStreamExt;
+use live_commit_sync_config::TestLiveCommitSyncConfig;
+use live_commit_sync_config::TestLiveCommitSyncConfigSource;
 use manifest::ManifestOps;
-use maplit::{btreemap, hashmap};
+use maplit::btreemap;
+use maplit::hashmap;
 use mercurial_derived_data::DeriveHgChangeset;
 use mercurial_types::HgChangesetId;
-use metaconfig_types::{
-    CommitSyncConfig, CommitSyncConfigVersion, CommonCommitSyncConfig,
-    DefaultSmallToLargeCommitSyncPathAction, SmallRepoCommitSyncConfig, SmallRepoPermanentConfig,
-};
-use mononoke_types::{
-    BlobstoreValue, BonsaiChangesetMut, ChangesetId, DateTime, FileChange, FileContents, FileType,
-    MPath, RepositoryId,
-};
+use metaconfig_types::CommitSyncConfig;
+use metaconfig_types::CommitSyncConfigVersion;
+use metaconfig_types::CommonCommitSyncConfig;
+use metaconfig_types::DefaultSmallToLargeCommitSyncPathAction;
+use metaconfig_types::SmallRepoCommitSyncConfig;
+use metaconfig_types::SmallRepoPermanentConfig;
+use mononoke_types::BlobstoreValue;
+use mononoke_types::BonsaiChangesetMut;
+use mononoke_types::ChangesetId;
+use mononoke_types::DateTime;
+use mononoke_types::FileChange;
+use mononoke_types::FileContents;
+use mononoke_types::FileType;
+use mononoke_types::MPath;
+use mononoke_types::RepositoryId;
 use pushrebase::PushrebaseError;
 use reachabilityindex::LeastCommonAncestorsHint;
 use skiplist::SkiplistIndex;
-use sorted_vector_map::{sorted_vector_map, SortedVectorMap};
+use sorted_vector_map::sorted_vector_map;
+use sorted_vector_map::SortedVectorMap;
 use sql_construct::SqlConstruct;
-use synced_commit_mapping::{
-    SqlSyncedCommitMapping, SyncedCommitMapping, SyncedCommitMappingEntry,
-};
+use synced_commit_mapping::SqlSyncedCommitMapping;
+use synced_commit_mapping::SyncedCommitMapping;
+use synced_commit_mapping::SyncedCommitMappingEntry;
 use test_repo_factory::TestRepoFactory;
-use tests_utils::{bookmark, resolve_cs_id, CreateCommitContext};
-use tunables::{with_tunables_async, MononokeTunables};
+use tests_utils::bookmark;
+use tests_utils::resolve_cs_id;
+use tests_utils::CreateCommitContext;
+use tunables::with_tunables_async;
+use tunables::MononokeTunables;
 
-use cross_repo_sync::{
-    types::Target, CandidateSelectionHint, CommitSyncRepos, CommitSyncer, PluralCommitSyncOutcome,
-};
+use cross_repo_sync::types::Target;
+use cross_repo_sync::CandidateSelectionHint;
+use cross_repo_sync::CommitSyncRepos;
+use cross_repo_sync::CommitSyncer;
+use cross_repo_sync::PluralCommitSyncOutcome;
 use sql::rusqlite::Connection as SqliteConnection;
 
 fn mpath(p: &str) -> MPath {
@@ -67,7 +92,7 @@ fn mpath(p: &str) -> MPath {
 async fn move_bookmark(ctx: &CoreContext, repo: &BlobRepo, bookmark: &str, cs_id: ChangesetId) {
     let bookmark = BookmarkName::new(bookmark).unwrap();
     let mut txn = repo.update_bookmark_transaction(ctx.clone());
-    txn.force_set(&bookmark, cs_id, BookmarkUpdateReason::TestMove, None)
+    txn.force_set(&bookmark, cs_id, BookmarkUpdateReason::TestMove)
         .unwrap();
     txn.commit().await.unwrap();
 }
@@ -138,7 +163,7 @@ async fn create_initial_commit_with_contents<'a>(
         .unwrap();
 
     let mut txn = repo.update_bookmark_transaction(ctx.clone());
-    txn.force_set(&bookmark, bcs_id, BookmarkUpdateReason::TestMove, None)
+    txn.force_set(&bookmark, bcs_id, BookmarkUpdateReason::TestMove)
         .unwrap();
     txn.commit().await.unwrap();
     bcs_id
@@ -172,7 +197,7 @@ async fn create_empty_commit(ctx: CoreContext, repo: &BlobRepo) -> ChangesetId {
         .unwrap();
 
     let mut txn = repo.update_bookmark_transaction(ctx.clone());
-    txn.force_set(&bookmark, bcs_id, BookmarkUpdateReason::TestMove, None)
+    txn.force_set(&bookmark, bcs_id, BookmarkUpdateReason::TestMove)
         .unwrap();
     txn.commit().await.unwrap();
     bcs_id
@@ -299,11 +324,11 @@ fn create_small_to_large_commit_syncer(
         },
         large_repo_id: large_repo.get_repoid(),
     };
-    let repos = CommitSyncRepos::new(small_repo.clone(), large_repo.clone(), &common_config)?;
+    let repos = CommitSyncRepos::new(small_repo, large_repo, &common_config)?;
     let commit_sync_config = create_commit_sync_config(small_repo_id, large_repo_id, prefix)?;
 
     let (sync_config, source) = TestLiveCommitSyncConfig::new_with_source();
-    source.add_config(commit_sync_config.clone());
+    source.add_config(commit_sync_config);
     source.add_common_config(common_config);
 
     let live_commit_sync_config = Arc::new(sync_config);
@@ -343,10 +368,10 @@ fn create_large_to_small_commit_syncer_and_config_source(
         },
         large_repo_id: large_repo.get_repoid(),
     };
-    let repos = CommitSyncRepos::new(large_repo.clone(), small_repo.clone(), &common_config)?;
+    let repos = CommitSyncRepos::new(large_repo, small_repo, &common_config)?;
 
     let (sync_config, source) = TestLiveCommitSyncConfig::new_with_source();
-    source.add_config(commit_sync_config.clone());
+    source.add_config(commit_sync_config);
     source.add_common_config(common_config);
 
     let live_commit_sync_config = Arc::new(sync_config);
@@ -506,7 +531,7 @@ async fn update_master_file(ctx: CoreContext, repo: &BlobRepo) -> ChangesetId {
         .unwrap();
 
     let mut txn = repo.update_bookmark_transaction(ctx.clone());
-    txn.force_set(&bookmark, bcs_id, BookmarkUpdateReason::TestMove, None)
+    txn.force_set(&bookmark, bcs_id, BookmarkUpdateReason::TestMove)
         .unwrap();
     txn.commit().await.unwrap();
     bcs_id
@@ -680,7 +705,7 @@ async fn megarepo_copy_file(
         .unwrap();
 
     let mut txn = repo.update_bookmark_transaction(ctx.clone());
-    txn.force_set(&bookmark, bcs_id, BookmarkUpdateReason::TestMove, None)
+    txn.force_set(&bookmark, bcs_id, BookmarkUpdateReason::TestMove)
         .unwrap();
     txn.commit().await.unwrap();
     bcs_id
@@ -930,7 +955,7 @@ async fn update_linear_1_file(ctx: CoreContext, repo: &BlobRepo) -> ChangesetId 
         .unwrap();
 
     let mut txn = repo.update_bookmark_transaction(ctx.clone());
-    txn.force_set(&bookmark, bcs_id, BookmarkUpdateReason::TestMove, None)
+    txn.force_set(&bookmark, bcs_id, BookmarkUpdateReason::TestMove)
         .unwrap();
     txn.commit().await.unwrap();
 
@@ -1339,7 +1364,7 @@ async fn test_sync_with_mapping_change(fb: FacebookInit) -> Result<(), Error> {
     .await?;
     assert_working_copy(
         &ctx,
-        &small_repo,
+        small_repo,
         new_mapping_small_cs_id,
         vec!["tools/somefile", "tools/newtool", "dir/file", "dir/newfile"],
     )
@@ -1386,7 +1411,7 @@ async fn test_sync_with_mapping_change(fb: FacebookInit) -> Result<(), Error> {
     .await?;
     assert_working_copy(
         &ctx,
-        &small_repo,
+        small_repo,
         old_mapping_small_cs_id,
         vec!["dir/file", "file", "tools/1.txt"],
     )
@@ -1475,7 +1500,7 @@ async fn test_sync_equivalent_wc_with_mapping_change(fb: FacebookInit) -> Result
     .await?;
     assert_working_copy(
         &ctx,
-        &small_repo,
+        small_repo,
         new_mapping_small_cs_id,
         vec!["tools/somefile", "tools/newtool", "dir/file", "dir/newfile"],
     )
@@ -1529,7 +1554,7 @@ async fn test_sync_equivalent_wc_with_mapping_change(fb: FacebookInit) -> Result
     .await?;
     assert_working_copy(
         &ctx,
-        &small_repo,
+        small_repo,
         old_mapping_small_cs_id,
         vec!["dir/file", "file", "tools/1.txt"],
     )
@@ -1835,7 +1860,7 @@ fn get_merge_sync_data_provider(
         small_repos: hashmap! {
             small_repo_id => small_repo_config.clone(),
         },
-        version_name: v1.clone(),
+        version_name: v1,
     };
     let commit_sync_config_v2 = CommitSyncConfig {
         large_repo_id,
@@ -1843,7 +1868,7 @@ fn get_merge_sync_data_provider(
         small_repos: hashmap! {
             small_repo_id => small_repo_config,
         },
-        version_name: v2.clone(),
+        version_name: v2,
     };
 
     let common_config = CommonCommitSyncConfig {
@@ -1857,8 +1882,8 @@ fn get_merge_sync_data_provider(
     };
 
     let (sync_config, source) = TestLiveCommitSyncConfig::new_with_source();
-    source.add_config(commit_sync_config_v1.clone());
-    source.add_config(commit_sync_config_v2.clone());
+    source.add_config(commit_sync_config_v1);
+    source.add_config(commit_sync_config_v2);
     source.add_common_config(common_config);
 
     let live_commit_sync_config = Arc::new(sync_config);
@@ -2160,7 +2185,7 @@ async fn test_no_accidental_preserved_roots(
             large_repo_id: commit_syncer.get_large_repo().get_repoid(),
             common_pushrebase_bookmarks: vec![BookmarkName::new("master")?],
             small_repos: hashmap! {
-                commit_syncer.get_small_repo().get_repoid() => small_repo_config.clone(),
+                commit_syncer.get_small_repo().get_repoid() => small_repo_config,
             },
             version_name: version.clone(),
         };
@@ -2176,7 +2201,7 @@ async fn test_no_accidental_preserved_roots(
         };
 
         let (sync_config, source) = TestLiveCommitSyncConfig::new_with_source();
-        source.add_config(commit_sync_config.clone());
+        source.add_config(commit_sync_config);
         source.add_common_config(common_config);
 
         let live_commit_sync_config = Arc::new(sync_config);

@@ -8,19 +8,25 @@
 //! Plain files, symlinks
 
 use super::errors::ErrorKind;
-use crate::{FileBytes, HgBlob, HgBlobNode, HgFileEnvelope, HgFileNodeId, MPath};
+use crate::FileBytes;
+use crate::HgBlob;
+use crate::HgBlobNode;
+use crate::HgFileEnvelope;
+use crate::HgFileNodeId;
+use crate::MPath;
 use anyhow::Result;
 use async_trait::async_trait;
-use blobstore::{Blobstore, Loadable, LoadableError};
+use blobstore::Blobstore;
+use blobstore::Loadable;
+use blobstore::LoadableError;
 use bytes::Bytes;
 use context::CoreContext;
 use itertools::Itertools;
 use mononoke_types::hash::Sha256;
-use std::{
-    collections::HashMap,
-    io::Write,
-    str::{self, FromStr},
-};
+use std::collections::HashMap;
+use std::io::Write;
+use std::str;
+use std::str::FromStr;
 
 #[async_trait]
 impl Loadable for HgFileNodeId {
@@ -86,8 +92,7 @@ impl File {
                 .enumerate()
                 .tuple_windows()
                 .find(|&((_, a), (_, b))| *a == META_MARKER[0] && *b == META_MARKER[1])
-                .map(|((idx, _), _)| idx + META_SZ * 2)
-                .unwrap_or(META_SZ); // XXX malformed if None - unterminated metadata
+                .map_or(META_SZ, |((idx, _), _)| idx + META_SZ * 2); // XXX malformed if None - unterminated metadata
 
             let metasz = *metasz;
             if metasz >= META_SZ * 2 {
@@ -135,7 +140,7 @@ impl File {
 
     pub fn copied_from(&self) -> Result<Option<(MPath, HgFileNodeId)>> {
         let buf = self.node.as_blob().as_slice();
-        Self::extract_copied_from(&buf)
+        Self::extract_copied_from(buf)
     }
 
     fn get_copied_from_with_keys(
@@ -150,7 +155,7 @@ impl File {
             .and_then(|rev| rev.parse().map(HgFileNodeId::new).ok());
         match (path, nodeid) {
             (Some(Ok(path)), Some(nodeid)) => Ok(Some((path, nodeid))),
-            (Some(Err(e)), _) => Err(e.context("invalid path in copy metadata").into()),
+            (Some(Err(e)), _) => Err(e.context("invalid path in copy metadata")),
             _ => Ok(None),
         }
     }
@@ -224,9 +229,11 @@ impl File {
             .get(VERSION)
             .and_then(|s| str::from_utf8(*s).ok())
             .map(|s| s.to_string())
-            .ok_or(ErrorKind::IncorrectLfsFileContent(
-                "VERSION mandatory field parsing failed in Lfs file content".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                ErrorKind::IncorrectLfsFileContent(
+                    "VERSION mandatory field parsing failed in Lfs file content".to_string(),
+                )
+            })?;
 
         let oid = contents
             .get(OID)
@@ -234,7 +241,7 @@ impl File {
             .and_then(|s| {
                 let prefix_len = SHA256_PREFIX.len();
 
-                let check = prefix_len <= s.len() && &s[..prefix_len].as_bytes() == &SHA256_PREFIX;
+                let check = prefix_len <= s.len() && s[..prefix_len].as_bytes() == SHA256_PREFIX;
                 if check {
                     Some(s[prefix_len..].to_string())
                 } else {
@@ -242,16 +249,20 @@ impl File {
                 }
             })
             .and_then(|s| Sha256::from_str(&s).ok())
-            .ok_or(ErrorKind::IncorrectLfsFileContent(
-                "OID mandatory field parsing failed in Lfs file content".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                ErrorKind::IncorrectLfsFileContent(
+                    "OID mandatory field parsing failed in Lfs file content".to_string(),
+                )
+            })?;
         let size = contents
             .get(SIZE)
             .and_then(|s| str::from_utf8(*s).ok())
             .and_then(|s| s.parse::<u64>().ok())
-            .ok_or(ErrorKind::IncorrectLfsFileContent(
-                "SIZE mandatory field parsing failed in Lfs file content".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                ErrorKind::IncorrectLfsFileContent(
+                    "SIZE mandatory field parsing failed in Lfs file content".to_string(),
+                )
+            })?;
         Ok((version, oid, size))
     }
 

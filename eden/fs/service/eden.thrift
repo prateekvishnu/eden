@@ -285,6 +285,63 @@ union FileAttributeDataOrError {
 }
 
 /**
+ * Some attributes are not available for certain types of files. For example,
+ * sha1 and size are not available for directories or symlinks. We use a value
+ * or error type for each of those attributes, so that when we can not provide
+ * an attribute we can give an explanation for why not.
+ */
+union Sha1OrError {
+  1: BinaryHash sha1;
+  2: EdenError error;
+}
+
+union SizeOrError {
+  1: i64 size;
+  2: EdenError error;
+}
+
+union SourceControlTypeOrError {
+  1: SourceControlType sourceControlType;
+  2: EdenError error;
+}
+
+/**
+ * Subset of attributes for a single file returned by getAttributesFromFiles()
+ *
+ * When an attribute was not requested the field will be a null optional value.
+ * If the attribute was requested, but there was an error computing that
+ * specific attribute we will return an Error type for that attribute.
+ */
+struct FileAttributeDataV2 {
+  1: optional Sha1OrError sha1;
+  2: optional SizeOrError size;
+  3: optional SourceControlTypeOrError sourceControlType;
+}
+
+/**
+ * Attributes for a file or information about error encountered when accessing
+ * file attributes.
+ * If there were errors fetching particular attributes those will be encapsulated
+ * in the AttributeOrError type. If there was a general error accessing a file
+ * there will be an error here.
+ */
+union FileAttributeDataOrErrorV2 {
+  1: FileAttributeDataV2 fileAttributeData;
+  2: EdenError error;
+}
+
+/**
+ * Mapping from entry name to requested attributes for each of the entries
+ * in a certain directory.
+ */
+union DirListAttributeDataOrError {
+  1: map<PathString, FileAttributeDataOrErrorV2> (
+    rust.type = "sorted_vector_map::SortedVectorMap",
+  ) dirListAttributeData;
+  2: EdenError error;
+}
+
+/**
  *
  * Ensure that all inflight working copy modification have completed.
  *
@@ -329,6 +386,22 @@ struct GetAttributesFromFilesParams {
  */
 struct GetAttributesFromFilesResult {
   1: list<FileAttributeDataOrError> res;
+}
+
+struct ReaddirParams {
+  1: PathString mountPoint;
+  2: list<PathString> directoryPaths;
+  3: unsigned64 requestedAttributes;
+  4: SyncBehavior sync;
+}
+
+/**
+ * List of attributes for the entries in the directories specified in
+ * directoryPaths. The ordering of the responses corresponds to the ordering
+ * the directoryPaths.
+ */
+struct ReaddirResult {
+  1: list<DirListAttributeDataOrError> dirLists;
 }
 
 /** reference a point in time in the journal.
@@ -754,6 +827,60 @@ struct InternalStats {
   9: optional CacheStats treeCacheStats;
 }
 
+/**
+ * Common timestamps for every trace event, used to measure durations and
+ * display wall clock time.
+ */
+struct TraceEventTimes {
+  // Nanoseconds since epoch.
+  1: i64 timestamp;
+  // Nanoseconds since arbitrary clock base, used for computing request
+  // durations between start and finish.
+  2: i64 monotonic_time_ns;
+}
+
+enum InodeType {
+  TREE = 0,
+  FILE = 1,
+}
+
+enum InodeEventType {
+  UNKNOWN = 0,
+  MATERIALIZE = 1,
+  LOAD = 2,
+}
+
+enum InodeEventProgress {
+  START = 0,
+  END = 1,
+  FAIL = 2,
+}
+
+struct InodeEvent {
+  2: i64 ino;
+  3: InodeType inodeType;
+  4: InodeEventType eventType;
+  // Duration is in microseconds (μs)
+  5: i64 duration;
+  6: InodeEventProgress progress;
+  7: TraceEventTimes times;
+  8: PathString path;
+}
+
+/**
+ * Parameters for the getRetroactiveInodeEvents() function.
+ */
+struct GetRetroactiveInodeEventsParams {
+  1: PathString mountPoint;
+}
+
+/**
+ * Return value for the getRetroactiveInodeEvents() function.
+ */
+struct GetRetroactiveInodeEventsResult {
+  1: list<InodeEvent> events;
+}
+
 struct FuseCall {
   // This field is deprecated because its use is not worth the TraceBus
   // storage. It may be brought back in some other form.
@@ -807,6 +934,15 @@ struct PrjfsCall {
   1: i32 commandId;
   2: i32 pid;
   3: PrjfsTraceCallType callType;
+}
+
+/**
+ * Metadata about an in-progress Thrift request.
+ */
+struct ThriftRequestMetadata {
+  1: i64 requestId;
+  2: string method;
+  3: pid_t clientPid;
 }
 
 struct GetConfigParams {
@@ -985,6 +1121,9 @@ struct FaultDefinition {
   5: i64 delayMilliseconds;
   6: optional string errorType;
   7: optional string errorMessage;
+  // If kill is true the fault will exit the process ungracefully.
+  // block, delay, and errorMessage will be ignored if kill is true.
+  8: bool kill;
 }
 
 struct RemoveFaultArg {
@@ -1094,6 +1233,16 @@ struct RemoveRecursivelyParams {
 
 struct SynchronizeWorkingCopyParams {
   1: SyncBehavior sync;
+}
+
+struct EnsureMaterializedParams {
+  1: PathString mountPoint;
+  2: list<PathString> paths;
+  // Materialize on the background and do not block.
+  3: bool background = false;
+  // Also materialize symlink target if the target is also in the same mount
+  4: bool followSymlink = false;
+  5: SyncBehavior sync;
 }
 
 service EdenService extends fb303_core.BaseService {
@@ -1324,6 +1473,19 @@ service EdenService extends fb303_core.BaseService {
   ) throws (1: EdenError ex);
 
   /**
+   * Returns the requested file attributes for each of the entries in the
+   * specified directories. . and .. are not included in the entry list.
+   *
+   * sha1 and size are not available for directories and symlinks, error values
+   * will be returned for those attributes for entries of those types.
+   *
+   * Note: may return stale data if synchronizeWorkingCopy isn't called, and if
+   * the SyncBehavior specify a 0 timeout. see the documentation for both of
+   * these for more details.
+   */
+  ReaddirResult readdir(1: ReaddirParams params) throws (1: EdenError ex);
+
+  /**
    * DEPRECATED: Use globFiles().
    *
    * Note: may return stale data if synchronizeWorkingCopy isn't called, see the
@@ -1544,6 +1706,11 @@ service EdenService extends fb303_core.BaseService {
   list<PrjfsCall> debugOutstandingPrjfsCalls(1: PathString mountPoint);
 
   /**
+   * Get the list of outstanding Thrift requests
+   */
+  list<ThriftRequestMetadata> debugOutstandingThriftRequests();
+
+  /**
    * Start recording performance metrics such as files read
    *
    * This will return a structure containing unique id identifying this recording.
@@ -1697,6 +1864,16 @@ service EdenService extends fb303_core.BaseService {
   list<TracePoint> getTracePoints();
 
   /**
+   * Gets a list of inode events stored in a specified EdenMount's
+   * ActivityBuffer. Used for retroactive debugging by the `eden trace inode
+   * --retroactive` command. Currently only supports inode materialize events
+   * but we intend to generalize this to more inode event types later.
+   */
+  GetRetroactiveInodeEventsResult getRetroactiveInodeEvents(
+    1: GetRetroactiveInodeEventsParams params,
+  ) throws (1: EdenError ex);
+
+  /**
    * Configure a new fault in Eden's fault injection framework.
    *
    * This throws an exception if the fault injection framework was not enabled
@@ -1734,6 +1911,19 @@ service EdenService extends fb303_core.BaseService {
    * load every subtree before unlinking it.
    */
   void removeRecursively(1: RemoveRecursivelyParams params) throws (
+    1: EdenError ex,
+  );
+
+  /**
+   * Eagerly materialize a list of paths, which can improve the latency of random reads.
+   * If the path is a file, materialize the file.
+   * If the path is a directory, recursively materialize its children.
+   * If the path is a symlink, materialize its target if followSymlink option is set.
+   *
+   * This method should be used carefully, as EdenFS will copy the file contents into the overlay,
+   * consuming disk space. Also, materialized files slow down checkout and status operations.
+   */
+  void ensureMaterialized(1: EnsureMaterializedParams params) throws (
     1: EdenError ex,
   );
 }

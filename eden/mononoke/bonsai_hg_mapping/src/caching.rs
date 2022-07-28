@@ -5,25 +5,37 @@
  * GNU General Public License version 2.
  */
 
-use super::{BonsaiHgMapping, BonsaiHgMappingEntry, BonsaiOrHgChangesetIds};
+use super::BonsaiHgMapping;
+use super::BonsaiHgMappingEntry;
+use super::BonsaiOrHgChangesetIds;
 use abomonation_derive::Abomonation;
-use anyhow::{anyhow, Error, Result};
+use anyhow::anyhow;
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
 use bonsai_hg_mapping_entry_thrift as thrift;
 use bytes::Bytes;
 use cachelib::VolatileLruCachePool;
-use caching_ext::{
-    get_or_fill_chunked, CacheDisposition, CacheTtl, CachelibHandler, EntityStore,
-    KeyedEntityStore, MemcacheEntity, MemcacheHandler,
-};
+use caching_ext::get_or_fill_chunked;
+use caching_ext::CacheDisposition;
+use caching_ext::CacheTtl;
+use caching_ext::CachelibHandler;
+use caching_ext::EntityStore;
+use caching_ext::KeyedEntityStore;
+use caching_ext::MemcacheEntity;
+use caching_ext::MemcacheHandler;
 use context::CoreContext;
 use fbinit::FacebookInit;
 use fbthrift::compact_protocol;
-use memcache::{KeyGen, MemcacheClient};
-use mercurial_types::{HgChangesetId, HgNodeHash};
-use mononoke_types::{ChangesetId, RepositoryId};
+use memcache::KeyGen;
+use memcache::MemcacheClient;
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgNodeHash;
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
 use stats::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tunables::tunables;
 
@@ -239,7 +251,7 @@ impl BonsaiHgMapping for CachingBonsaiHgMapping {
 }
 
 fn get_cache_key(repo_id: RepositoryId, cs: &BonsaiOrHgChangesetId) -> String {
-    format!("{}.{:?}", repo_id.prefix(), cs).to_string()
+    format!("{}.{:?}", repo_id.prefix(), cs)
 }
 
 impl MemcacheEntity for BonsaiHgMappingCacheEntry {

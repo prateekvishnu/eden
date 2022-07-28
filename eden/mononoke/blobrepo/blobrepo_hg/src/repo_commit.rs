@@ -5,38 +5,58 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Context, Error, Result};
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use cloned::cloned;
-use futures::{
-    channel::oneshot,
-    future::{self, BoxFuture, FutureExt, TryFutureExt},
-    stream::{self, BoxStream, TryStreamExt},
-    StreamExt,
-};
-use futures_ext::{future::TryShared, FbTryFutureExt};
+use futures::channel::oneshot;
+use futures::future;
+use futures::future::BoxFuture;
+use futures::future::FutureExt;
+use futures::future::TryFutureExt;
+use futures::stream;
+use futures::stream::BoxStream;
+use futures::stream::TryStreamExt;
+use futures::StreamExt;
+use futures_ext::future::TryShared;
+use futures_ext::FbTryFutureExt;
 use futures_stats::TimedTryFutureExt;
 use scuba_ext::MononokeScubaSampleBuilder;
 use stats::prelude::*;
-use std::collections::{HashMap, HashSet};
-use std::mem;
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::Mutex;
 
-use ::manifest::{find_intersection_of_diffs, Entry};
+use ::manifest::find_intersection_of_diffs;
+use ::manifest::Entry;
 pub use blobrepo_common::changed_files::compute_changed_files;
-use blobstore::{Blobstore, ErrorKind as BlobstoreError, Loadable};
+use blobstore::Blobstore;
+use blobstore::ErrorKind as BlobstoreError;
+use blobstore::Loadable;
+use bonsai_hg_mapping::BonsaiHgMappingRef;
 use context::CoreContext;
-use mercurial_types::{
-    blobs::{
-        fetch_manifest_envelope, ChangesetMetadata, HgBlobChangeset, HgBlobEnvelope,
-        HgChangesetContent,
-    },
-    nodehash::{HgFileNodeId, HgManifestId},
-    HgChangesetId, HgNodeHash, HgParents, MPath, RepoPath, NULL_HASH,
-};
-use mononoke_types::{self, BlobstoreKey, BonsaiChangeset, ChangesetId};
+use mercurial_types::blobs::fetch_manifest_envelope;
+use mercurial_types::blobs::ChangesetMetadata;
+use mercurial_types::blobs::HgBlobChangeset;
+use mercurial_types::blobs::HgBlobEnvelope;
+use mercurial_types::blobs::HgChangesetContent;
+use mercurial_types::nodehash::HgFileNodeId;
+use mercurial_types::nodehash::HgManifestId;
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgNodeHash;
+use mercurial_types::HgParents;
+use mercurial_types::MPath;
+use mercurial_types::RepoPath;
+use mercurial_types::NULL_HASH;
+use mononoke_types;
+use mononoke_types::BlobstoreKey;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::ChangesetId;
+use repo_blobstore::RepoBlobstoreRef;
 
 use crate::errors::*;
-use crate::BlobRepo;
 use repo_blobstore::RepoBlobstore;
 
 define_stats! {
@@ -84,7 +104,11 @@ impl ChangesetHandle {
         }
     }
 
-    pub fn ready_cs_handle(ctx: CoreContext, repo: BlobRepo, hg_cs: HgChangesetId) -> Self {
+    pub fn ready_cs_handle(
+        ctx: CoreContext,
+        repo: impl RepoBlobstoreRef + BonsaiHgMappingRef + Clone + Send + Sync + 'static,
+        hg_cs: HgChangesetId,
+    ) -> Self {
         let (trigger, can_be_parent) = oneshot::channel();
         let can_be_parent = can_be_parent
             .map_err(|e| format_err!("can_be_parent: {:?}", e))
@@ -99,7 +123,7 @@ impl ChangesetHandle {
                     .get_bonsai_from_hg(&ctx, hg_cs)
                     .await?
                     .ok_or(ErrorKind::BonsaiMappingNotFound(hg_cs))?;
-                let bonsai_cs = csid.load(&ctx, repo.blobstore()).await?;
+                let bonsai_cs = csid.load(&ctx, repo.repo_blobstore()).await?;
                 Ok::<_, Error>(bonsai_cs)
             }
         };
@@ -107,7 +131,7 @@ impl ChangesetHandle {
         let completion_future = async move {
             let (bonsai_cs, hg_cs) = future::try_join(
                 bonsai_cs,
-                hg_cs.load(&ctx, repo.blobstore()).map_err(Error::from),
+                hg_cs.load(&ctx, repo.repo_blobstore()).map_err(Error::from),
             )
             .await?;
             let _ = trigger.send((
@@ -198,7 +222,7 @@ impl UploadEntries {
 
                 // NOTE: Just fetch the envelope here, because we don't actually need the
                 // deserialized manifest: just the parents will do.
-                let envelope = fetch_manifest_envelope(&ctx, &self.blobstore, manifest_id)
+                let envelope = fetch_manifest_envelope(ctx, &self.blobstore, manifest_id)
                     .await
                     .with_context(|| {
                         format!(
@@ -356,15 +380,15 @@ impl UploadEntries {
 
         {
             let mut inner = this.inner.lock().expect("Lock poisoned");
-            let uploaded_entries = mem::replace(&mut inner.uploaded_entries, HashMap::new());
+            let uploaded_entries = std::mem::take(&mut inner.uploaded_entries);
 
             let uploaded_filenodes_cnt = uploaded_entries
                 .iter()
-                .filter(|&(ref path, _)| path.is_file())
+                .filter(|&(path, _)| path.is_file())
                 .count();
             let uploaded_manifests_cnt = uploaded_entries
                 .iter()
-                .filter(|&(ref path, _)| !path.is_file())
+                .filter(|&(path, _)| !path.is_file())
                 .count();
 
             STATS::finalize_uploaded.add_value(uploaded_entries.len() as i64);

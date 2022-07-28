@@ -5,19 +5,27 @@
  * GNU General Public License version 2.
  */
 
-use std::fmt::{self, Debug};
+use std::fmt;
+use std::fmt::Debug;
 
-use anyhow::{bail, Context, Result};
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Result;
 use bytes::Bytes;
 use fbthrift::compact_protocol;
-use quickcheck::{empty_shrinker, single_shrinker, Arbitrary, Gen};
+use quickcheck::empty_shrinker;
+use quickcheck::single_shrinker;
+use quickcheck::Arbitrary;
+use quickcheck::Gen;
 
-use crate::{
-    blob::{Blob, BlobstoreValue, ContentBlob},
-    errors::ErrorKind,
-    thrift,
-    typed_hash::{ContentChunkId, ContentId, ContentIdContext},
-};
+use crate::blob::Blob;
+use crate::blob::BlobstoreValue;
+use crate::blob::ContentBlob;
+use crate::errors::ErrorKind;
+use crate::thrift;
+use crate::typed_hash::ContentChunkId;
+use crate::typed_hash::ContentId;
+use crate::typed_hash::ContentIdContext;
 
 /// An enum representing contents for a file.
 #[derive(Clone, Eq, PartialEq)]
@@ -35,7 +43,7 @@ impl FileContents {
 
     pub(crate) fn from_thrift(fc: thrift::FileContents) -> Result<Self> {
         match fc {
-            thrift::FileContents::Bytes(bytes) => Ok(FileContents::Bytes(bytes.into())),
+            thrift::FileContents::Bytes(bytes) => Ok(FileContents::Bytes(bytes)),
             thrift::FileContents::Chunked(chunked) => {
                 let contents = ChunkedFileContents::from_thrift(chunked)?;
                 Ok(FileContents::Chunked(contents))
@@ -88,7 +96,7 @@ impl BlobstoreValue for FileContents {
 
     fn into_blob(self) -> ContentBlob {
         let id = match &self {
-            Self::Bytes(bytes) => Self::content_id_for_bytes(&bytes),
+            Self::Bytes(bytes) => Self::content_id_for_bytes(bytes),
             Self::Chunked(chunked) => chunked.content_id(),
         };
 

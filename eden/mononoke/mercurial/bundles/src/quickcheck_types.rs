@@ -13,13 +13,20 @@ use std::iter;
 use std::vec::IntoIter;
 
 #[cfg(test)]
-use anyhow::{Error, Result};
+use anyhow::Error;
+#[cfg(test)]
+use anyhow::Result;
 use bytes::Bytes;
 #[cfg(test)]
 use futures_old::stream;
-use quickcheck::{empty_shrinker, Arbitrary, Gen};
+use quickcheck::empty_shrinker;
+use quickcheck::Arbitrary;
+use quickcheck::Gen;
 
-use mercurial_types::{Delta, HgNodeHash, MPath, RevFlags};
+use mercurial_types::Delta;
+use mercurial_types::HgNodeHash;
+use mercurial_types::MPath;
+use mercurial_types::RevFlags;
 
 use crate::changegroup;
 
@@ -90,7 +97,7 @@ impl CgPartSequence {
     /// references at the moment.
     #[cfg(test)]
     pub fn to_stream(&self) -> stream::IterOk<IntoIter<Result<changegroup::Part>>, Error> {
-        let part_results: Vec<_> = self.as_iter().cloned().map(|x| Ok(x)).collect();
+        let part_results: Vec<_> = self.as_iter().cloned().map(Ok).collect();
         stream::iter_ok(part_results.into_iter())
     }
 

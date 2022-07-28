@@ -6,17 +6,28 @@
  */
 
 //! Utilities to generate reasonably looking stack of changesets
-use anyhow::{Error, Result};
-use blobrepo::{save_bonsai_changesets, BlobRepo};
+use anyhow::Error;
+use anyhow::Result;
+use blobrepo::save_bonsai_changesets;
+use blobrepo::BlobRepo;
 use blobstore::Storable;
 use context::CoreContext;
-use futures::{future, stream, TryStreamExt};
-use mononoke_types::{
-    BlobstoreValue, BonsaiChangesetMut, ChangesetId, DateTime, FileChange, FileContents, FileType,
-    MPath, MPathElement,
-};
-use rand::{seq::SliceRandom, Rng};
-use rand_distr::{Binomial, Uniform};
+use futures::future;
+use futures::stream;
+use futures::TryStreamExt;
+use mononoke_types::BlobstoreValue;
+use mononoke_types::BonsaiChangesetMut;
+use mononoke_types::ChangesetId;
+use mononoke_types::DateTime;
+use mononoke_types::FileChange;
+use mononoke_types::FileContents;
+use mononoke_types::FileType;
+use mononoke_types::MPath;
+use mononoke_types::MPathElement;
+use rand::seq::SliceRandom;
+use rand::Rng;
+use rand_distr::Binomial;
+use rand_distr::Uniform;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy)]
@@ -47,21 +58,11 @@ pub struct GenManifest {
     files: BTreeMap<MPathElement, String>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Default, Debug, Clone, Copy)]
 pub struct Size {
     pub width: usize,
     pub depth: usize,
     pub files: usize,
-}
-
-impl Default for Size {
-    fn default() -> Self {
-        Self {
-            width: 0,
-            depth: 0,
-            files: 0,
-        }
-    }
 }
 
 impl GenManifest {
@@ -126,7 +127,7 @@ impl GenManifest {
                 }
                 // generate changeset
                 let bonsai = BonsaiChangesetMut {
-                    parents: std::mem::replace(&mut parents, Vec::new()),
+                    parents: std::mem::take(&mut parents),
                     author: "author".to_string(),
                     author_date: DateTime::from_timestamp(0, 0).unwrap(),
                     committer: None,

@@ -7,12 +7,16 @@
 
 //! Helper library for rendering commit info
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::io::Write;
 
 use anyhow::Error;
-use chrono::{DateTime, FixedOffset, Local, TimeZone};
-use serde_derive::Serialize;
+use chrono::DateTime;
+use chrono::FixedOffset;
+use chrono::Local;
+use chrono::TimeZone;
+use serde::Serialize;
 use source_control::types as thrift;
 
 use crate::args::commit_id::map_commit_ids;
@@ -78,6 +82,7 @@ impl TryFrom<&thrift::CommitInfo> for CommitInfo {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn render_commit_summary(
     commit: &CommitInfo,
     requested: &str,
@@ -87,7 +92,7 @@ pub(crate) fn render_commit_summary(
     render_commit_id(
         Some(("Commit", "    ")),
         "\n",
-        &requested,
+        requested,
         &commit.ids,
         schemes,
         w,
@@ -118,7 +123,7 @@ pub(crate) fn render_commit_info(
     render_commit_id(
         Some(("Commit", "    ")),
         "\n",
-        &requested,
+        requested,
         &commit.ids,
         schemes,
         w,
@@ -135,7 +140,7 @@ pub(crate) fn render_commit_info(
             "\n",
             &format!("Parent {} of {}", i, requested),
             parent,
-            &schemes,
+            schemes,
             w,
         )?;
         write!(w, "\n")?;

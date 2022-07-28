@@ -5,38 +5,55 @@
  * GNU General Public License version 2.
  */
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::{anyhow, Error, Result};
+use anyhow::anyhow;
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
 use blobrepo::BlobRepo;
 use blobstore::Blobstore;
 use blobstore::BlobstoreBytes;
-use bookmarks::{BookmarkName, BookmarksRef};
+use bookmarks::BookmarkName;
+use bookmarks::BookmarksRef;
 use bytes::Bytes;
 use cacheblob::LeaseOps;
 use changesets::ChangesetsRef;
 use cloned::cloned;
 use context::CoreContext;
 use fbinit::FacebookInit;
+use fixtures::BranchEven;
+use fixtures::BranchUneven;
+use fixtures::BranchWide;
+use fixtures::Linear;
+use fixtures::ManyDiamonds;
+use fixtures::ManyFilesDirs;
+use fixtures::MergeEven;
+use fixtures::MergeUneven;
 use fixtures::TestRepoFixture;
-use fixtures::{
-    BranchEven, BranchUneven, BranchWide, Linear, ManyDiamonds, ManyFilesDirs, MergeEven,
-    MergeUneven, UnsharedMergeEven, UnsharedMergeUneven,
-};
+use fixtures::UnsharedMergeEven;
+use fixtures::UnsharedMergeUneven;
 use futures::future::BoxFuture;
-use futures_stats::{TimedFutureExt, TimedTryFutureExt};
+use futures_stats::TimedFutureExt;
+use futures_stats::TimedTryFutureExt;
 use lock_ext::LockExt;
 use maplit::hashmap;
-use mononoke_types::{ChangesetId, MPath, RepositoryId};
+use mononoke_types::ChangesetId;
+use mononoke_types::MPath;
+use mononoke_types::RepositoryId;
 use repo_blobstore::RepoBlobstoreRef;
-use repo_derived_data::{RepoDerivedDataArc, RepoDerivedDataRef};
+use repo_derived_data::RepoDerivedDataArc;
+use repo_derived_data::RepoDerivedDataRef;
 use tests_utils::CreateCommitContext;
-use tunables::{override_tunables, MononokeTunables};
+use tunables::override_tunables;
+use tunables::MononokeTunables;
 
-use derived_data_manager::{BonsaiDerivable, DerivationError};
-use derived_data_test_derived_generation::{make_test_repo_factory, DerivedGeneration};
+use derived_data_manager::BonsaiDerivable;
+use derived_data_manager::DerivationError;
+use derived_data_test_derived_generation::make_test_repo_factory;
+use derived_data_test_derived_generation::DerivedGeneration;
 
 async fn derive_for_master(
     ctx: &CoreContext,
@@ -69,43 +86,43 @@ async fn test_derive_fixtures(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
     let mut factory = make_test_repo_factory(fb);
 
-    let repo = factory.with_id(RepositoryId::new(1)).build()?;
+    let repo: BlobRepo = factory.with_id(RepositoryId::new(1)).build()?;
     BranchEven::initrepo(fb, &repo).await;
     derive_for_master(&ctx, &repo).await?;
 
-    let repo = factory.with_id(RepositoryId::new(2)).build()?;
+    let repo: BlobRepo = factory.with_id(RepositoryId::new(2)).build()?;
     BranchUneven::initrepo(fb, &repo).await;
     derive_for_master(&ctx, &repo).await?;
 
-    let repo = factory.with_id(RepositoryId::new(3)).build()?;
+    let repo: BlobRepo = factory.with_id(RepositoryId::new(3)).build()?;
     BranchWide::initrepo(fb, &repo).await;
     derive_for_master(&ctx, &repo).await?;
 
-    let repo = factory.with_id(RepositoryId::new(4)).build()?;
+    let repo: BlobRepo = factory.with_id(RepositoryId::new(4)).build()?;
     Linear::initrepo(fb, &repo).await;
     derive_for_master(&ctx, &repo).await?;
 
-    let repo = factory.with_id(RepositoryId::new(5)).build()?;
+    let repo: BlobRepo = factory.with_id(RepositoryId::new(5)).build()?;
     ManyFilesDirs::initrepo(fb, &repo).await;
     derive_for_master(&ctx, &repo).await?;
 
-    let repo = factory.with_id(RepositoryId::new(6)).build()?;
+    let repo: BlobRepo = factory.with_id(RepositoryId::new(6)).build()?;
     MergeEven::initrepo(fb, &repo).await;
     derive_for_master(&ctx, &repo).await?;
 
-    let repo = factory.with_id(RepositoryId::new(7)).build()?;
+    let repo: BlobRepo = factory.with_id(RepositoryId::new(7)).build()?;
     MergeUneven::initrepo(fb, &repo).await;
     derive_for_master(&ctx, &repo).await?;
 
-    let repo = factory.with_id(RepositoryId::new(8)).build()?;
+    let repo: BlobRepo = factory.with_id(RepositoryId::new(8)).build()?;
     UnsharedMergeEven::initrepo(fb, &repo).await;
     derive_for_master(&ctx, &repo).await?;
 
-    let repo = factory.with_id(RepositoryId::new(9)).build()?;
+    let repo: BlobRepo = factory.with_id(RepositoryId::new(9)).build()?;
     UnsharedMergeUneven::initrepo(fb, &repo).await;
     derive_for_master(&ctx, &repo).await?;
 
-    let repo = factory.with_id(RepositoryId::new(10)).build()?;
+    let repo: BlobRepo = factory.with_id(RepositoryId::new(10)).build()?;
     ManyDiamonds::initrepo(fb, &repo).await;
     derive_for_master(&ctx, &repo).await?;
 
@@ -117,7 +134,7 @@ async fn test_derive_fixtures(fb: FacebookInit) -> Result<()> {
 /// derived changesets do not have their parents derived).
 async fn test_gapped_derivation(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
-    let repo = make_test_repo_factory(fb).build()?;
+    let repo: BlobRepo = make_test_repo_factory(fb).build()?;
     Linear::initrepo(fb, &repo).await;
 
     let master = repo
@@ -174,7 +191,7 @@ async fn test_gapped_derivation(fb: FacebookInit) -> Result<()> {
 #[fbinit::test]
 async fn test_leases(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let repo = make_test_repo_factory(fb).build()?;
+    let repo: BlobRepo = make_test_repo_factory(fb).build()?;
     Linear::initrepo(fb, &repo).await;
 
     let master = repo
@@ -192,7 +209,7 @@ async fn test_leases(fb: FacebookInit) -> Result<(), Error> {
     );
 
     // take lease
-    assert_eq!(lease.try_add_put_lease(&lease_key).await?, true);
+    assert!(lease.try_add_put_lease(&lease_key).await?);
     assert_eq!(lease.try_add_put_lease(&lease_key).await?, false);
 
     let output = Arc::new(Mutex::new(None));
@@ -236,7 +253,7 @@ async fn test_leases(fb: FacebookInit) -> Result<(), Error> {
     assert_eq!(expected, result.generation,);
 
     // Take the lease again.
-    assert_eq!(lease.try_add_put_lease(&lease_key).await?, true);
+    assert!(lease.try_add_put_lease(&lease_key).await?);
 
     // This time it should succeed, as the lease won't be necessary.
     let result = repo
@@ -273,7 +290,7 @@ impl LeaseOps for FailingLease {
 #[fbinit::test]
 async fn test_always_failing_lease(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let repo = make_test_repo_factory(fb)
+    let repo: BlobRepo = make_test_repo_factory(fb)
         .with_derived_data_lease(|| Arc::new(FailingLease))
         .build()?;
     Linear::initrepo(fb, &repo).await;

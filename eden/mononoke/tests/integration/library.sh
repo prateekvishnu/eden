@@ -11,9 +11,20 @@ if [ -n "$FB_TEST_FIXTURES" ] && [ -f "$FB_TEST_FIXTURES/fb_library.sh" ]; then
   . "$FB_TEST_FIXTURES/fb_library.sh"
 fi
 
-ALLOWED_IDENTITY_TYPE="${FB_ALLOWED_IDENTITY_TYPE:-X509_SUBJECT_NAME}"
-ALLOWED_IDENTITY_DATA="${FB_ALLOWED_IDENTITY_DATA:-CN=localhost,O=Mononoke,C=US,ST=CA}"
-JSON_CLIENT_ID="${FB_JSON_CLIENT_ID:-[\"X509_SUBJECT_NAME:CN=localhost,O=Mononoke,C=US,ST=CA\"]}"
+PROXY_ID_TYPE="${FB_PROXY_ID_TYPE:-X509_SUBJECT_NAME}"
+PROXY_ID_DATA="${FB_PROXY_ID_DATA:-CN=proxy,O=Mononoke,C=US,ST=CA}"
+CLIENT0_ID_TYPE="${FB_CLIENT0_ID_TYPE:-X509_SUBJECT_NAME}"
+CLIENT0_ID_DATA="${FB_CLIENT0_ID_DATA:-CN=client0,O=Mononoke,C=US,ST=CA}"
+# shellcheck disable=SC2034
+CLIENT1_ID_TYPE="${FB_CLIENT1_ID_TYPE:-X509_SUBJECT_NAME}"
+# shellcheck disable=SC2034
+CLIENT1_ID_DATA="${FB_CLIENT1_ID_DATA:-CN=client1,O=Mononoke,C=US,ST=CA}"
+# shellcheck disable=SC2034
+CLIENT2_ID_TYPE="${FB_CLIENT2_ID_TYPE:-X509_SUBJECT_NAME}"
+# shellcheck disable=SC2034
+CLIENT2_ID_DATA="${FB_CLIENT2_ID_DATA:-CN=client2,O=Mononoke,C=US,ST=CA}"
+# shellcheck disable=SC2034
+JSON_CLIENT_ID="${FB_JSON_CLIENT_ID:-[\"X509_SUBJECT_NAME:CN=client0,O=Mononoke,C=US,ST=CA\"]}"
 
 if [[ -n "$DB_SHARD_NAME" ]]; then
   MONONOKE_DEFAULT_START_TIMEOUT=60
@@ -37,6 +48,8 @@ MONONOKE_SERVER_ADDR_FILE="$TESTTMP/mononoke_server_addr.txt"
 export LOCAL_CONFIGERATOR_PATH="$TESTTMP/configerator"
 mkdir -p "${LOCAL_CONFIGERATOR_PATH}"
 
+export ACL_FILE="$TESTTMP/acls.json"
+
 # The path for tunables. Do not write directly to this! Use merge_tunables instead.
 export MONONOKE_TUNABLES_PATH="${LOCAL_CONFIGERATOR_PATH}/mononoke_tunables.json"
 
@@ -51,6 +64,7 @@ COMMON_ARGS=(
   --local-configerator-path "${LOCAL_CONFIGERATOR_PATH}"
   --log-exclude-tag "futures_watchdog"
   --with-test-megarepo-configs-client=true
+  --acl-file "${ACL_FILE}"
 )
 
 export TEST_CERTDIR
@@ -122,16 +136,14 @@ function random_int() {
   echo $VAL
 }
 
-function sslcurl {
-  curl --noproxy localhost --cert "$TEST_CERTDIR/localhost.crt" --cacert "$TEST_CERTDIR/root-ca.crt" --key "$TEST_CERTDIR/localhost.key" "$@"
+function sslcurlas {
+  local name="$1"
+  shift
+  curl --noproxy localhost --cert "$TEST_CERTDIR/$name.crt" --cacert "$TEST_CERTDIR/root-ca.crt" --key "$TEST_CERTDIR/$name.key" "$@"
 }
 
-function ssldebuglfssend {
-  hg --config extensions.lfs= --config hostsecurity.localhost:verifycertsfile="$TEST_CERTDIR/root-ca.crt" \
-    --config auth.lfs.cert="$TEST_CERTDIR/localhost.crt" \
-    --config auth.lfs.key="$TEST_CERTDIR/localhost.key" \
-    --config auth.lfs.schemes=https \
-    --config auth.lfs.prefix=localhost debuglfssend "$@"
+function sslcurl {
+  sslcurlas proxy "$@"
 }
 
 function mononoke {
@@ -155,18 +167,21 @@ function mononoke {
 
   # Ignore specific Python warnings to make tests predictable.
   PYTHONWARNINGS="ignore:::requests,ignore::SyntaxWarning" \
-  GLOG_minloglevel=5 "$MONONOKE_SERVER" "$@" \
-  --scribe-logging-directory "$TESTTMP/scribe_logs" \
-  --ca-pem "$TEST_CERTDIR/root-ca.crt" \
-  --private-key "$TEST_CERTDIR/localhost.key" \
-  --cert "$TEST_CERTDIR/localhost.crt" \
-  --ssl-ticket-seeds "$TEST_CERTDIR/server.pem.seeds" \
-  --debug \
-  --listening-host-port "$BIND_ADDR" \
-  --bound-address-file "$MONONOKE_SERVER_ADDR_FILE" \
-  --mononoke-config-path "$TESTTMP/mononoke-config" \
-  --no-default-scuba-dataset \
-  "${COMMON_ARGS[@]}" >> "$TESTTMP/mononoke.out" 2>&1 &
+  GLOG_minloglevel=5 \
+    "$MONONOKE_SERVER" "$@" \
+    --scribe-logging-directory "$TESTTMP/scribe_logs" \
+    --ca-pem "$TEST_CERTDIR/root-ca.crt" \
+    --private-key "$TEST_CERTDIR/localhost.key" \
+    --cert "$TEST_CERTDIR/localhost.crt" \
+    --ssl-ticket-seeds "$TEST_CERTDIR/server.pem.seeds" \
+    --scs-client-cert="$TEST_CERTDIR/proxy.crt" \
+    --scs-client-private-key="$TEST_CERTDIR/proxy.key" \
+    --debug \
+    --listening-host-port "$BIND_ADDR" \
+    --bound-address-file "$MONONOKE_SERVER_ADDR_FILE" \
+    --mononoke-config-path "$TESTTMP/mononoke-config" \
+    --no-default-scuba-dataset \
+    "${COMMON_ARGS[@]}" >> "$TESTTMP/mononoke.out" 2>&1 &
   export MONONOKE_PID=$!
   echo "$MONONOKE_PID" >> "$DAEMON_PIDS"
 }
@@ -296,8 +311,6 @@ function mononoke_hg_sync_with_retry {
 }
 
 function mononoke_hg_sync_with_failure_handler {
-  sql_name="${TESTTMP}/hgrepos/repo_lock"
-
   GLOG_minloglevel=5 "$MONONOKE_HG_SYNC" \
     "${COMMON_ARGS[@]}" \
     --retry-num 1 \
@@ -305,27 +318,7 @@ function mononoke_hg_sync_with_failure_handler {
     --mononoke-config-path "$TESTTMP"/mononoke-config \
     --verify-server-bookmark-on-failure \
     --lock-on-failure \
-    --repo-lock-sqlite \
-    --repo-lock-db-address "$sql_name" \
      ssh://user@dummy/"$1" sync-once --start-id "$2"
-}
-
-function create_repo_lock_sqlite3_db {
-  cat >> "$TESTTMP"/repo_lock.sql <<SQL
-  CREATE TABLE IF NOT EXISTS repo_lock (
-    repo VARCHAR(255) PRIMARY KEY,
-    state INTEGER NOT NULL,
-    reason VARCHAR(255)
-  );
-SQL
-  mkdir -p "$TESTTMP"/hgrepos
-  sqlite3 "$TESTTMP/hgrepos/repo_lock" < "$TESTTMP"/repo_lock.sql
-}
-
-function init_repo_lock_sqlite3_db {
-  # State 2 is mononoke write
-  sqlite3 "$TESTTMP/hgrepos/repo_lock" \
-    "insert into repo_lock (repo, state, reason) values(CAST('repo' AS BLOB), 2, null)";
 }
 
 function create_books_sqlite3_db {
@@ -369,7 +362,7 @@ function mononoke_hg_sync_loop_regenerate {
     --retry-num 1 \
     --repo-id 0 \
     --mononoke-config-path "$TESTTMP"/mononoke-config \
-    ssh://user@dummy/"$repo" --generate-bundles sync-loop --start-id "$start_id" "$@"
+    ssh://user@dummy/"$repo" sync-loop --start-id "$start_id" "$@"
 }
 
 function mononoke_admin {
@@ -381,6 +374,12 @@ function mononoke_admin {
 
 function mononoke_newadmin {
   GLOG_minloglevel=5 "$MONONOKE_NEWADMIN" \
+    "${COMMON_ARGS[@]}" \
+    --mononoke-config-path "$TESTTMP"/mononoke-config "$@"
+}
+
+function mononoke_import {
+  GLOG_minloglevel=5 "$MONONOKE_IMPORT" \
     "${COMMON_ARGS[@]}" \
     --mononoke-config-path "$TESTTMP"/mononoke-config "$@"
 }
@@ -486,12 +485,10 @@ function mononoke_health {
 
 # Wait until a Mononoke server is available for this repo.
 function wait_for_mononoke {
-  export MONONOKE_SOCKET EDENAPI_URI
+  export MONONOKE_SOCKET
   wait_for_server "Mononoke" MONONOKE_SOCKET "$TESTTMP/mononoke.out" \
     "${MONONOKE_START_TIMEOUT:-"$MONONOKE_DEFAULT_START_TIMEOUT"}" "$MONONOKE_SERVER_ADDR_FILE" \
     mononoke_health
-
-  EDENAPI_URI="https://localhost:$MONONOKE_SOCKET/edenapi"
 }
 
 function flush_mononoke_bookmarks {
@@ -541,10 +538,14 @@ record=False
 [web]
 cacerts=$TEST_CERTDIR/root-ca.crt
 [auth]
-mononoke.cert=$TEST_CERTDIR/localhost.crt
-mononoke.key=$TEST_CERTDIR/localhost.key
+mononoke.cert=$TEST_CERTDIR/${OVERRIDE_CLIENT_CERT:-client0}.crt
+mononoke.key=$TEST_CERTDIR/${OVERRIDE_CLIENT_CERT:-client0}.key
 mononoke.prefix=mononoke://*
 mononoke.cn=localhost
+edenapi.cert=$TEST_CERTDIR/${OVERRIDE_CLIENT_CERT:-client0}.crt
+edenapi.key=$TEST_CERTDIR/${OVERRIDE_CLIENT_CERT:-client0}.key
+edenapi.prefix=localhost
+edenapi.cacerts=$TEST_CERTDIR/root-ca.crt
 EOF
 }
 
@@ -606,15 +607,21 @@ CONFIG
   fi
 
   cat >> common/common.toml <<CONFIG
+[internal_identity]
+identity_type = "SERVICE_IDENTITY"
+identity_data = "proxy"
+
 [redaction_config]
 blobstore = "$blobstorename"
 darkstorm_blobstore = "$blobstorename"
 redaction_sets_location = "scm/mononoke/redaction/redaction_sets"
 
-[[whitelist_entry]]
-identity_type = "$ALLOWED_IDENTITY_TYPE"
-identity_data = "${OVERRIDE_ALLOWED_IDDATA:-$ALLOWED_IDENTITY_DATA}"
+[[trusted_parties_allowlist]]
+identity_type = "$PROXY_ID_TYPE"
+identity_data = "$PROXY_ID_DATA"
+CONFIG
 
+  cat >> common/common.toml <<CONFIG
 ${ADDITIONAL_MONONOKE_COMMON_CONFIG}
 CONFIG
 
@@ -622,6 +629,25 @@ CONFIG
   setup_mononoke_storage_config "$REPOTYPE" "$blobstorename"
 
   setup_mononoke_repo_config "$REPONAME" "$blobstorename"
+
+  setup_acls
+}
+
+function setup_acls() {
+  if [[ ! -f "$ACL_FILE" ]]; then
+    cat > "$ACL_FILE" <<ACLS
+{
+  "repos": {
+    "default": {
+      "actions": {
+        "read": ["$CLIENT0_ID_TYPE:$CLIENT0_ID_DATA"],
+        "write": ["$CLIENT0_ID_TYPE:$CLIENT0_ID_DATA"]
+      }
+    }
+  }
+}
+ACLS
+  fi
 }
 
 function db_config() {
@@ -688,7 +714,7 @@ CONFIG
 
     local i
     for ((i=0; i<=MULTIPLEXED; i++)); do
-      mkdir -p "$blobstorepath/$i"
+      mkdir -p "$blobstorepath/$i/blobs"
       if [[ -n "${PACK_BLOB:-}" && $i -le "$PACK_BLOB" ]]; then
         echo "  { blobstore_id = $i, blobstore = { pack = { blobstore = { $underlyingstorage = { path = \"$blobstorepath/$i\" } } } } }," >> common/storage.toml
       else
@@ -697,7 +723,7 @@ CONFIG
     done
     echo ']' >> common/storage.toml
   else
-    mkdir -p "$blobstorepath"
+    mkdir -p "$blobstorepath/blobs"
     # Using FileBlob instead of SqlBlob as the backing blobstore for ephemeral
     # store since SqlBlob current doesn't support enumeration.
     cat >> common/storage.toml <<CONFIG
@@ -847,20 +873,9 @@ repo_id=$REPOID
 repo_name="$reponame"
 repo_config="$reponame"
 enabled=${ENABLED:-true}
+hipster_acl="${ACL_NAME:-default}"
 CONFIG
 
-
-if [[ -n "${HGSQL_NAME:-}" ]]; then
-  cat >> "repos/$reponame/server.toml" <<CONFIG
-hgsql_name="$HGSQL_NAME"
-CONFIG
-fi
-
-if [[ -n "${ACL_NAME:-}" ]]; then
-  cat >> "repo_definitions/$reponame/server.toml" <<CONFIG
-hipster_acl = "$ACL_NAME"
-CONFIG
-fi
 
 if [[ -n "${READ_ONLY_REPO:-}" ]]; then
   cat >> "repo_definitions/$reponame/server.toml" <<CONFIG
@@ -1000,13 +1015,6 @@ fi
 [hook_manager_params]
 disable_acl_checker=true
 CONFIG
-
-if [[ -n "${ENABLE_PRESERVE_BUNDLE2:-}" ]]; then
-  cat >> "repos/$reponame/server.toml" <<CONFIG
-[bundle2_replay_params]
-preserve_raw_bundle2 = true
-CONFIG
-fi
 
 if [[ -n "${DISALLOW_NON_PUSHREBASE:-}" ]]; then
   cat >> "repos/$reponame/server.toml" <<CONFIG
@@ -1201,11 +1209,6 @@ function bonsai_verify {
     --mononoke-config-path "$TESTTMP/mononoke-config" "${COMMON_ARGS[@]}" "$@"
 }
 
-function lfs_import {
-  GLOG_minloglevel=5 "$MONONOKE_LFS_IMPORT" --repo-id "$REPOID" \
-  --mononoke-config-path "$TESTTMP/mononoke-config" "${COMMON_ARGS[@]}" "$@"
-}
-
 function manual_scrub {
   GLOG_minloglevel=5 "$MONONOKE_MANUAL_SCRUB" \
   --mononoke-config-path "$TESTTMP/mononoke-config" "${COMMON_ARGS[@]}" "$@"
@@ -1215,14 +1218,19 @@ function s_client {
     /usr/local/fbcode/platform009/bin/openssl s_client \
         -connect "$(mononoke_address)" \
         -CAfile "${TEST_CERTDIR}/root-ca.crt" \
-        -cert "${TEST_CERTDIR}/localhost.crt" \
-        -key "${TEST_CERTDIR}/localhost.key" \
+        -cert "${TEST_CERTDIR}/client0.crt" \
+        -key "${TEST_CERTDIR}/client0.key" \
         -ign_eof "$@"
 }
 
 function scs {
   rm -f "$TESTTMP/scs_server_addr.txt"
-  GLOG_minloglevel=5 "$SCS_SERVER" "$@" \
+  GLOG_minloglevel=5 \
+    THRIFT_TLS_SRV_CERT="$TEST_CERTDIR/localhost.crt" \
+    THRIFT_TLS_SRV_KEY="$TEST_CERTDIR/localhost.key" \
+    THRIFT_TLS_CL_CA_PATH="$TEST_CERTDIR/root-ca.crt" \
+    THRIFT_TLS_TICKETS="$TEST_CERTDIR/server.pem.seeds" \
+    "$SCS_SERVER" "$@" \
     --host "$LOCALIP" \
     --port 0 \
     --log-level DEBUG \
@@ -1256,7 +1264,11 @@ function megarepo_async_worker {
 }
 
 function scsc {
-  GLOG_minloglevel=5 "$SCS_CLIENT" --host "$LOCALIP:$SCS_PORT" "$@"
+  GLOG_minloglevel=5 \
+    THRIFT_TLS_CL_CERT_PATH="$TEST_CERTDIR/client0.crt" \
+    THRIFT_TLS_CL_KEY_PATH="$TEST_CERTDIR/client0.key" \
+    THRIFT_TLS_CL_CA_PATH="$TEST_CERTDIR/root-ca.crt" \
+    "$SCS_CLIENT" --host "$LOCALIP:$SCS_PORT" "$@"
 }
 
 function lfs_health {
@@ -1363,7 +1375,9 @@ function lfs_server {
     "${MONONOKE_LFS_START_TIMEOUT:-"$MONONOKE_LFS_DEFAULT_START_TIMEOUT"}" "$bound_addr_file" \
     lfs_health "$poll" "$proto" "$bound_addr_file"
 
-  uri="${proto}://$listen_host:$LFS_PORT"
+  export LFS_HOST_PORT
+  LFS_HOST_PORT="$listen_host:$LFS_PORT"
+  uri="${proto}://$LFS_HOST_PORT"
   echo "$uri"
 
   cp "$log" "$log.saved"
@@ -1375,8 +1389,15 @@ function hgmn {
   hg --config paths.default="mononoke://$(mononoke_address)/$REPONAME" "$@"
 }
 
+# Run an hg binary configured with the settings require to talk to Mononoke
+# via EdenAPI
 function hgedenapi {
-  hgmn --config "edenapi.url=${EDENAPI_URI}" --config "auth.edenapi.prefix=localhost" --config "edenapi.enable=true" --config "remotefilelog.http=true" --config "remotefilelog.reponame=$REPONAME" --config "auth.edenapi.cert=$TEST_CERTDIR/localhost.crt" --config "auth.edenapi.key=$TEST_CERTDIR/localhost.key" --config "auth.edenapi.cacerts=$TEST_CERTDIR/root-ca.crt" "$@"
+  hgmn \
+    --config "edenapi.url=https://localhost:$MONONOKE_SOCKET/edenapi" \
+    --config "edenapi.enable=true" \
+    --config "remotefilelog.http=true" \
+    --config "remotefilelog.reponame=$REPONAME" \
+    "$@"
 }
 
 function hginit_treemanifest() {
@@ -1606,8 +1627,8 @@ getpackversion = 2
 http=True
 useruststore=True
 [auth]
-edenapi.cert=$TEST_CERTDIR/localhost.crt
-edenapi.key=$TEST_CERTDIR/localhost.key
+edenapi.cert=$TEST_CERTDIR/client0.crt
+edenapi.key=$TEST_CERTDIR/client0.key
 edenapi.prefix=localhost
 edenapi.schemes=https
 edenapi.cacerts=$TEST_CERTDIR/root-ca.crt
@@ -1815,10 +1836,10 @@ function git() {
   date="01/01/0000 00:00 +0000"
   name="mononoke"
   email="mononoke@mononoke"
-  GIT_COMMITTER_DATE="$date" \
+  GIT_COMMITTER_DATE="${GIT_COMMITTER_DATE:-$date}" \
   GIT_COMMITTER_NAME="$name" \
   GIT_COMMITTER_EMAIL="$email" \
-  GIT_AUTHOR_DATE="$date" \
+  GIT_AUTHOR_DATE="${GIT_AUTHOR_DATE:-$date}" \
   GIT_AUTHOR_NAME="$name" \
   GIT_AUTHOR_EMAIL="$email" \
   command git "$@"

@@ -29,9 +29,7 @@ from . import (
     fileset,
     git,
     match as matchmod,
-    mdiff,
     mutation,
-    obsolete as obsmod,
     patch,
     pathutil,
     phases,
@@ -435,7 +433,6 @@ class changectx(basectx):
                     self._repo._warnedworkdir = True
                 # we failed on our optimization pass
                 # this can happen when dirstate is broken
-                pass
             if len(changeid) == 20 and isinstance(changeid, bytes):
                 try:
                     self._node = changeid
@@ -2655,9 +2652,12 @@ class memctx(committablectx):
             repo, text, user, date, extra, loginfo=loginfo, mutinfo=mutinfo
         )
         self._node = None
-        parents = [(p or nullid) for p in parents]
-        p1, p2 = parents
-        self._parents = [changectx(self._repo, p) for p in (p1, p2)]
+        # The api for parents has changed over time. Let's normalize the inputs
+        # by filtering out nullid and None entries.
+        parents = [p for p in parents if p is not None and p.node() != nullid]
+        if len(parents) == 0:
+            parents = [repo[nullid]]
+        self._parents = parents
         self._filesset = set(files)
         if branch is not None:
             self._extra["branch"] = encoding.fromlocal(branch)
@@ -2686,7 +2686,7 @@ class memctx(committablectx):
         date=None,
         text=None,
         extra=None,
-        parentnodes=None,
+        parents=None,
         mutinfo=None,
         loginfo=None,
         editor=False,
@@ -2705,8 +2705,8 @@ class memctx(committablectx):
            require deep copying for the "amend" use-case.
         """
         repo = ctx.repo()
-        if parentnodes is None:
-            parentnodes = ([p.node() for p in ctx.parents()] + [nullid, nullid])[:2]
+        if parents is None:
+            parents = ctx.parents()
         if text is None:
             text = ctx.description()
         if user is None:
@@ -2720,7 +2720,20 @@ class memctx(committablectx):
         if loginfo is None:
             loginfo = getattr(ctx, "loginfo", lambda: None)()
 
-        def filectxfn(_repo, _ctx, path, ctx=ctx):
+        def filectxfn(_repo, _ctx, path, ctx=ctx, parents=parents):
+            # If the path is specifically manipulated by this commit, load this
+            # commit's version. Otherwise load the parents version. Note,
+            # self._parents[0] may be different from ctx.p1(), which is why we
+            # have to reference it specifically instead of going through ctx.
+            if path in ctx.files():
+                ctx = ctx
+            elif len(parents) > 0:
+                ctx = parents[0]
+                if len(parents) > 1 and path not in ctx and path in parents[1]:
+                    ctx = parents[1]
+            else:
+                return None
+
             if path in ctx:
                 return ctx[path]
             else:
@@ -2729,7 +2742,7 @@ class memctx(committablectx):
 
         mctx = cls(
             repo,
-            parents=parentnodes,
+            parents=parents,
             text=text,
             files=ctx.files(),
             filectxfn=filectxfn,
@@ -2767,17 +2780,23 @@ class memctx(committablectx):
         man = pctx.manifest().copy()
 
         for f in self._status.modified:
-            p1node = nullid
-            p2node = nullid
-            p = pctx[f].parents()  # if file isn't in pctx, check p2?
-            if len(p) > 0:
-                p1node = p[0].filenode()
-                if len(p) > 1:
-                    p2node = p[1].filenode()
-            man[f] = revlog.hash(self[f].data(), p1node, p2node)
+            if git.isgitformat(self._repo):
+                man[f] = git.hashobj(b"blob", self[f].data())
+            else:
+                p1node = nullid
+                p2node = nullid
+                p = pctx[f].parents()  # if file isn't in pctx, check p2?
+                if len(p) > 0:
+                    p1node = p[0].filenode()
+                    if len(p) > 1:
+                        p2node = p[1].filenode()
+                man[f] = revlog.hash(self[f].data(), p1node, p2node)
 
         for f in self._status.added:
-            man[f] = revlog.hash(self[f].data(), nullid, nullid)
+            if git.isgitformat(self._repo):
+                man[f] = git.hashobj(b"blob", self[f].data())
+            else:
+                man[f] = revlog.hash(self[f].data(), nullid, nullid)
 
         for f in self._status.removed:
             if f in man:
@@ -2789,12 +2808,8 @@ class memctx(committablectx):
     def _status(self):
         """Calculate exact status from ``files`` specified at construction"""
         man1 = self.p1().manifest()
-        p2 = self._parents[1]
-        # "1 < len(self._parents)" can't be used for checking
-        # existence of the 2nd parent, because "memctx._parents" is
-        # explicitly initialized by the list, of which length is 2.
-        if p2.node() != nullid:
-            man2 = p2.manifest()
+        if len(self._parents) == 2:
+            man2 = self._parents[1].manifest()
             managing = lambda f: f in man1 or f in man2
         else:
             managing = lambda f: f in man1
@@ -3022,10 +3037,11 @@ class metadataonlyctx(committablectx):
             parents = originalctx.parents()
         else:
             parents = [repo[p] for p in parents if p is not None]
+        self._parents = [p for p in parents if p.node() != nullid]
         parents = parents[:]
         while len(parents) < 2:
             parents.append(repo[nullid])
-        p1, p2 = self._parents = parents
+        p1, p2 = parents
 
         # sanity check to ensure that our parent's manifest has not changed
         # from our original parent's manifest to ensure the caller is not
@@ -3076,11 +3092,8 @@ class metadataonlyctx(committablectx):
         and parents manifests.
         """
         man1 = self.p1().manifest()
-        p2 = self._parents[1]
-        # "1 < len(self._parents)" can't be used for checking
-        # existence of the 2nd parent, because "metadataonlyctx._parents" is
-        # explicitly initialized by the list, of which length is 2.
-        if p2.node() != nullid:
+        if len(self._parents) > 1:
+            p2 = self._parents[1]
             man2 = p2.manifest()
             managing = lambda f: f in man1 or f in man2
         else:

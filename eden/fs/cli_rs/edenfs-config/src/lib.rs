@@ -7,10 +7,14 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use anyhow::Context;
+use anyhow::Result;
+use serde::Deserialize;
+use serde::Serialize;
 use stack_config::StackConfig;
-use tracing::{event, trace, Level};
+use tracing::event;
+use tracing::trace;
+use tracing::Level;
 
 use edenfs_error::EdenFsError;
 
@@ -22,13 +26,38 @@ pub struct Core {
 }
 
 #[derive(Serialize, Deserialize, StackConfig, Debug)]
-pub struct EdenFsConfig {
-    #[stack(nested)]
-    core: Core,
+#[serde(rename_all = "kebab-case")]
+pub struct PrefetchProfiles {
+    #[stack(default)]
+    pub prefetching_enabled: bool,
+
+    #[stack(default)]
+    pub predictive_prefetching_enabled: bool,
 
     #[stack(merge = "merge_table")]
     #[serde(flatten)]
-    other: toml::value::Table,
+    pub other: toml::value::Table,
+}
+
+#[derive(Serialize, Deserialize, StackConfig, Debug)]
+pub struct EdenFsConfig {
+    #[stack(nested)]
+    #[serde(skip_serializing_if = "skip_core_serialization")]
+    pub core: Core,
+
+    #[serde(rename = "prefetch-profiles")]
+    pub prefetch_profiles: PrefetchProfiles,
+
+    #[stack(merge = "merge_table")]
+    #[serde(flatten)]
+    /// A catch-all field for unused configuration fields. If you need
+    /// to use any configurations, define them above instead of reading from
+    /// this field.
+    pub other: toml::value::Table,
+}
+
+fn skip_core_serialization(core: &Core) -> bool {
+    core.eden_directory.is_none()
 }
 
 fn merge_table(lhs: &mut toml::value::Table, rhs: toml::value::Table) {
@@ -105,7 +134,7 @@ fn load_system_rcs(loader: &mut EdenFsConfigLoader, etc_dir: &Path) -> Result<()
     Ok(())
 }
 
-fn load_user(loader: &mut EdenFsConfigLoader, home_dir: &Path) -> Result<()> {
+pub fn load_user(loader: &mut EdenFsConfigLoader, home_dir: &Path) -> Result<()> {
     let home_rc = home_dir.join(".edenrc");
     load_path(loader, &home_rc)
 }

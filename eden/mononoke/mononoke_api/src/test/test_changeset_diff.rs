@@ -8,7 +8,9 @@
 use std::ops::Deref;
 use std::str::FromStr;
 
-use anyhow::{anyhow, Context, Error};
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use fbinit::FacebookInit;
 use fixtures::ManyFilesDirs;
@@ -16,10 +18,13 @@ use fixtures::TestRepoFixture;
 use maplit::btreeset;
 use pretty_assertions::assert_eq;
 
-use crate::{
-    ChangesetDiffItem, ChangesetFileOrdering, ChangesetPathDiffContext, CoreContext, HgChangesetId,
-    Mononoke, MononokePath,
-};
+use crate::ChangesetDiffItem;
+use crate::ChangesetFileOrdering;
+use crate::ChangesetPathDiffContext;
+use crate::CoreContext;
+use crate::HgChangesetId;
+use crate::Mononoke;
+use crate::MononokePath;
 use tests_utils::CreateCommitContext;
 
 #[fbinit::test]
@@ -43,7 +48,9 @@ async fn test_diff_with_moves(fb: FacebookInit) -> Result<(), Error> {
     let repo = mononoke
         .repo(ctx.clone(), "test")
         .await?
-        .expect("repo exists");
+        .expect("repo exists")
+        .build()
+        .await?;
     let commit_with_move_ctx = repo
         .changeset(commit_with_move)
         .await?
@@ -91,7 +98,9 @@ async fn test_diff_with_multiple_copies(fb: FacebookInit) -> Result<(), Error> {
     let repo = mononoke
         .repo(ctx.clone(), "test")
         .await?
-        .expect("repo exists");
+        .expect("repo exists")
+        .build()
+        .await?;
     let commit_with_copies_ctx = repo
         .changeset(commit_with_copies)
         .await?
@@ -146,7 +155,9 @@ async fn test_diff_with_multiple_moves(fb: FacebookInit) -> Result<(), Error> {
     let repo = mononoke
         .repo(ctx.clone(), "test")
         .await?
-        .expect("repo exists");
+        .expect("repo exists")
+        .build()
+        .await?;
     let commit_with_moves_ctx = repo
         .changeset(commit_with_moves)
         .await?
@@ -205,7 +216,12 @@ async fn test_diff_with_dirs(fb: FacebookInit) -> Result<(), Error> {
         vec![("test".to_string(), ManyFilesDirs::getrepo(fb).await)],
     )
     .await?;
-    let repo = mononoke.repo(ctx, "test").await?.expect("repo exists");
+    let repo = mononoke
+        .repo(ctx, "test")
+        .await?
+        .expect("repo exists")
+        .build()
+        .await?;
 
     // Case one: dirs added
     let cs_id = HgChangesetId::from_str("d261bc7900818dea7c86935b3fb17a33b2e3a6b4")?;
@@ -317,7 +333,9 @@ async fn test_ordered_diff(fb: FacebookInit) -> Result<(), Error> {
     let repo = mononoke
         .repo(ctx.clone(), "test")
         .await?
-        .expect("repo exists");
+        .expect("repo exists")
+        .build()
+        .await?;
     let commit_ctx = repo
         .changeset(commit)
         .await?
@@ -385,7 +403,7 @@ async fn test_ordered_diff(fb: FacebookInit) -> Result<(), Error> {
         .chain(del_file_list.iter())
         .map(Deref::deref)
         .collect::<Vec<_>>();
-    all_file_list.sort();
+    all_file_list.sort_unstable();
 
     let mut commit2 = CreateCommitContext::new(&ctx, &blobrepo, vec![commit]);
     for file in mod_file_list.iter() {
@@ -442,7 +460,7 @@ async fn test_ordered_diff(fb: FacebookInit) -> Result<(), Error> {
     // Diff over two commits of trees.
     let diff = commit2_ctx
         .diff(
-            &root_ctx,
+            root_ctx,
             false, /* include_copies_renames */
             None,  /* path_restrictions */
             btreeset! {ChangesetDiffItem::TREES},
@@ -465,7 +483,7 @@ async fn test_ordered_diff(fb: FacebookInit) -> Result<(), Error> {
     ]);
     let diff = commit2_ctx
         .diff(
-            &root_ctx,
+            root_ctx,
             false, /* include_copies_renames */
             path_restrictions.clone(),
             btreeset! {ChangesetDiffItem::FILES},
@@ -479,7 +497,7 @@ async fn test_ordered_diff(fb: FacebookInit) -> Result<(), Error> {
 
     let diff = commit2_ctx
         .diff(
-            &root_ctx,
+            root_ctx,
             false, /* include_copies_renames */
             path_restrictions,
             btreeset! {ChangesetDiffItem::FILES},
@@ -520,7 +538,9 @@ async fn test_ordered_root_diff(fb: FacebookInit) -> Result<(), Error> {
     let repo = mononoke
         .repo(ctx.clone(), "test")
         .await?
-        .expect("repo exists");
+        .expect("repo exists")
+        .build()
+        .await?;
     let commit_ctx = repo
         .changeset(commit)
         .await?

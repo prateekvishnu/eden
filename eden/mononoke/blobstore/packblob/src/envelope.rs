@@ -7,16 +7,21 @@
 
 use crate::pack;
 
-use anyhow::{format_err, Context, Error};
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
 use blobstore::SizeMetadata;
 use bufsize::SizeCounter;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use fbthrift::{
-    compact_protocol::{self, CompactProtocolSerializer},
-    serialize::Serialize as ThriftSerialize,
-};
+use bytes::Buf;
+use bytes::BufMut;
+use bytes::Bytes;
+use bytes::BytesMut;
+use fbthrift::compact_protocol;
+use fbthrift::compact_protocol::CompactProtocolSerializer;
+use fbthrift::serialize::Serialize as ThriftSerialize;
 use mononoke_types::BlobstoreBytes;
-use packblob_thrift::{StorageEnvelope, StorageFormat};
+use packblob_thrift::StorageEnvelope;
+use packblob_thrift::StorageFormat;
 use std::mem::size_of;
 
 enum HeaderType {
@@ -102,12 +107,9 @@ impl TryFrom<BlobstoreBytes> for PackEnvelope {
     }
 }
 
-impl Into<BlobstoreBytes> for PackEnvelope {
-    fn into(self) -> BlobstoreBytes {
-        let data = compact_serialize_with_header(
-            HeaderType::PackBlobCompactFormat.into(),
-            &self.0.clone(),
-        );
+impl From<PackEnvelope> for BlobstoreBytes {
+    fn from(p: PackEnvelope) -> Self {
+        let data = compact_serialize_with_header(HeaderType::PackBlobCompactFormat.into(), &p.0);
         BlobstoreBytes::from_bytes(data)
     }
 }

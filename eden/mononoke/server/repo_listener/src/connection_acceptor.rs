@@ -7,57 +7,80 @@
 
 use hostname::get_hostname;
 use hyper::server::conn::Http;
-use session_id::generate_session_id;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Error, Result};
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use bytes::Bytes;
 use cached_config::ConfigStore;
+use connection_security_checker::ConnectionSecurityChecker;
 use edenapi_service::EdenApi;
 use failure_ext::SlogKVError;
 use fbinit::FacebookInit;
-use futures::{channel::oneshot, future::Future, select_biased};
+use futures::channel::oneshot;
+use futures::future::Future;
+use futures::select_biased;
 use futures_01_ext::BoxStream;
 use futures_ext::FbFutureExt;
-use futures_old::{stream, sync::mpsc, Stream};
+use futures_old::stream;
+use futures_old::sync::mpsc;
+use futures_old::Stream;
 use futures_util::compat::Stream01CompatExt;
-use futures_util::future::{AbortHandle, FutureExt};
-use futures_util::stream::{StreamExt, TryStreamExt};
+use futures_util::future::AbortHandle;
+use futures_util::future::FutureExt;
+use futures_util::stream::StreamExt;
+use futures_util::stream::TryStreamExt;
 use lazy_static::lazy_static;
 use metaconfig_types::CommonConfig;
-use openssl::ssl::{Ssl, SslAcceptor};
-use permission_checker::{MononokeIdentity, MononokeIdentitySet};
+use openssl::ssl::Ssl;
+use openssl::ssl::SslAcceptor;
+use permission_checker::AclProvider;
+use permission_checker::MononokeIdentity;
+use permission_checker::MononokeIdentitySet;
 use rate_limiting::RateLimitEnvironment;
 use scribe_ext::Scribe;
 use scuba_ext::MononokeScubaSampleBuilder;
-use slog::{debug, error, info, warn, Logger};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, TcpStream};
+use slog::debug;
+use slog::error;
+use slog::info;
+use slog::warn;
+use slog::Logger;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio_openssl::SslStream;
-use tokio_util::codec::{FramedRead, FramedWrite};
+use tokio_util::codec::FramedRead;
+use tokio_util::codec::FramedWrite;
 
 use cmdlib::monitoring::ReadyFlagService;
 use metadata::Metadata;
 use qps::Qps;
 use quiet_stream::QuietShutdownStream;
-use sshrelay::{IoStream, SshDecoder, SshEncoder, SshMsg, Stdio};
+use sshrelay::IoStream;
+use sshrelay::SshDecoder;
+use sshrelay::SshEncoder;
+use sshrelay::SshMsg;
+use sshrelay::Stdio;
 use stats::prelude::*;
 
 use crate::errors::ErrorKind;
 use crate::http_service::MononokeHttpService;
 use crate::repo_handlers::RepoHandler;
-use crate::request_handler::{create_conn_logger, request_handler};
-use crate::security_checker::ConnectionsSecurityChecker;
+use crate::request_handler::create_conn_logger;
+use crate::request_handler::request_handler;
 use crate::wireproto_sink::WireprotoSink;
 
 define_stats! {
@@ -104,10 +127,11 @@ pub async fn connection_acceptor(
     cslb_config: Option<String>,
     wireproto_scuba: MononokeScubaSampleBuilder,
     bound_addr_path: Option<PathBuf>,
+    acl_provider: &dyn AclProvider,
 ) -> Result<()> {
     let enable_http_control_api = common_config.enable_http_control_api;
 
-    let security_checker = ConnectionsSecurityChecker::new(fb, common_config).await?;
+    let security_checker = ConnectionSecurityChecker::new(acl_provider, &common_config).await?;
     let addr: SocketAddr = sockname
         .parse()
         .with_context(|| format!("could not parse '{}'", sockname))?;
@@ -152,6 +176,7 @@ pub async fn connection_acceptor(
         config_store: config_store.clone(),
         qps,
         wireproto_scuba,
+        common_config,
     });
 
     loop {
@@ -179,7 +204,7 @@ pub struct Acceptor {
     pub fb: FacebookInit,
     pub tls_acceptor: SslAcceptor,
     pub repo_handlers: HashMap<String, RepoHandler>,
-    pub security_checker: ConnectionsSecurityChecker,
+    pub security_checker: ConnectionSecurityChecker,
     pub rate_limiter: Option<RateLimitEnvironment>,
     pub scribe: Scribe,
     pub logger: Logger,
@@ -190,6 +215,7 @@ pub struct Acceptor {
     pub config_store: ConfigStore,
     pub qps: Option<Arc<Qps>>,
     pub wireproto_scuba: MononokeScubaSampleBuilder,
+    pub common_config: CommonConfig,
 }
 
 /// Details for a socket we've just opened.
@@ -293,28 +319,12 @@ pub async fn handle_wireproto<R, W>(
     conn: AcceptedConnection,
     framed: FramedConn<R, W>,
     reponame: String,
-    metadata: Option<Metadata>,
-    client_debug: bool,
+    metadata: Metadata,
 ) -> Result<()>
 where
     R: AsyncRead + Send + std::marker::Unpin + 'static,
     W: AsyncWrite + Send + std::marker::Unpin + 'static,
 {
-    let metadata = if let Some(metadata) = metadata {
-        metadata
-    } else {
-        // Most likely client is not trusted. Use TLS connection
-        // cert as identity.
-        Metadata::new(
-            Some(&generate_session_id().to_string()),
-            conn.is_trusted,
-            (*conn.identities).clone(),
-            client_debug,
-            Some(conn.pending.addr.ip()),
-        )
-        .await
-    };
-
     let metadata = Arc::new(metadata);
 
     let ChannelConn {

@@ -48,8 +48,8 @@ std::optional<overlay::OverlayDir> TreeOverlay::loadAndRemoveOverlayDir(
 
 void TreeOverlay::saveOverlayDir(
     InodeNumber inodeNumber,
-    const overlay::OverlayDir& odir) {
-  return store_.saveTree(inodeNumber, odir);
+    overlay::OverlayDir&& odir) {
+  return store_.saveTree(inodeNumber, std::move(odir));
 }
 
 #ifndef _WIN32
@@ -99,6 +99,10 @@ void TreeOverlay::removeChild(
     InodeNumber parent,
     PathComponentPiece childName) {
   return store_.removeChild(parent, childName);
+}
+
+bool TreeOverlay::hasChild(InodeNumber parent, PathComponentPiece childName) {
+  return store_.hasChild(parent, childName);
 }
 
 void TreeOverlay::renameChild(

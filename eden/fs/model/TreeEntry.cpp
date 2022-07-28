@@ -24,17 +24,47 @@ using namespace folly;
 using namespace folly::io;
 
 EntryAttributes::EntryAttributes(
-    folly::Try<Hash20> contentsHash,
-    folly::Try<uint64_t> fileLength,
-    folly::Try<TreeEntryType> fileType)
+    std::optional<folly::Try<Hash20>> contentsHash,
+    std::optional<folly::Try<uint64_t>> fileLength,
+    std::optional<folly::Try<TreeEntryType>> fileType)
     : sha1(std::move(contentsHash)),
       size(std::move(fileLength)),
       type(std::move(fileType)) {}
 
-EntryAttributes::EntryAttributes(
-    BlobMetadata blobMetadata,
-    TreeEntryType fileType)
-    : sha1(blobMetadata.sha1), size(blobMetadata.size), type(fileType) {}
+template <typename T>
+bool checkValueEqual(
+    const std::optional<folly::Try<T>>& lhs,
+    const std::optional<folly::Try<T>>& rhs) {
+  if (!lhs.has_value() || !rhs.has_value()) {
+    return lhs.has_value() == rhs.has_value();
+  }
+  if (lhs.value().hasException() || rhs.value().hasException()) {
+    return lhs.value().hasException() == rhs.value().hasException();
+  }
+  return lhs.value().value() == rhs.value().value();
+}
+
+bool operator==(const EntryAttributes& lhs, const EntryAttributes& rhs) {
+  return checkValueEqual(lhs.sha1, rhs.sha1) &&
+      checkValueEqual(lhs.size, rhs.size) &&
+      checkValueEqual(lhs.type, rhs.type);
+}
+
+bool operator!=(const EntryAttributes& lhs, const EntryAttributes& rhs) {
+  return !(lhs == rhs);
+}
+
+bool operator==(
+    const folly::Try<EntryAttributes>& lhs,
+    const folly::Try<EntryAttributes>& rhs) {
+  if (lhs.hasException()) {
+    return rhs.hasException();
+  }
+  if (rhs.hasException()) {
+    return lhs.hasException();
+  }
+  return rhs.value() == lhs.value();
+}
 
 mode_t modeFromTreeEntryType(TreeEntryType ft) {
   switch (ft) {
@@ -110,15 +140,6 @@ std::ostream& operator<<(std::ostream& os, TreeEntryType type) {
   }
 
   return os << "TreeEntryType::" << int(type);
-}
-
-bool operator==(const TreeEntry& entry1, const TreeEntry& entry2) {
-  return (entry1.getHash() == entry2.getHash()) &&
-      (entry1.getType() == entry2.getType());
-}
-
-bool operator!=(const TreeEntry& entry1, const TreeEntry& entry2) {
-  return !(entry1 == entry2);
 }
 
 size_t TreeEntry::serializedSize(PathComponentPiece name) const {

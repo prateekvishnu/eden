@@ -5,7 +5,8 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Error};
+use anyhow::format_err;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use cloned::cloned;
 use context::CoreContext;
@@ -16,7 +17,8 @@ use mercurial_types::HgChangesetId;
 use mononoke_types::ChangesetId;
 use slog::info;
 
-use megarepolib::common::{create_save_and_generate_hg_changeset, ChangesetArgs};
+use megarepolib::common::create_save_and_generate_hg_changeset;
+use megarepolib::common::ChangesetArgs;
 
 async fn fail_on_path_conflicts(
     ctx: &CoreContext,
@@ -30,7 +32,7 @@ async fn fail_on_path_conflicts(
         repo.bonsai_hg_mapping().get_bonsai_from_hg(ctx, hg_cs_id_2)
     )?;
     let collisions =
-        get_colliding_paths_between_commits(&ctx, &repo, bcs_1.unwrap(), bcs_2.unwrap()).await?;
+        get_colliding_paths_between_commits(ctx, repo, bcs_1.unwrap(), bcs_2.unwrap()).await?;
     if !collisions.is_empty() {
         Err(format_err!(
             "There are paths present in both parents: {:?} ...",

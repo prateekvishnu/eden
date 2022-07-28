@@ -12,28 +12,40 @@
 
 use std::fs::File;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use anyhow::{Context, Error};
+use anyhow::Context;
+use anyhow::Error;
 use clap::Parser;
 use cloned::cloned;
 use cmdlib::helpers::serve_forever;
 use cmdlib_logging::ScribeLoggingArgs;
+use connection_security_checker::ConnectionSecurityChecker;
 use fb303_core::server::make_BaseService_server;
 use fbinit::FacebookInit;
 use futures::future::FutureExt;
 use megarepo_api::MegarepoApi;
-use mononoke_api::{CoreContext, Mononoke, MononokeApiEnvironment, WarmBookmarksCacheDerivedData};
-use mononoke_app::args::{HooksAppExtension, ShutdownTimeoutArgs};
+use mononoke_api::CoreContext;
+use mononoke_api::Mononoke;
+use mononoke_api::MononokeApiEnvironment;
+use mononoke_api::WarmBookmarksCacheDerivedData;
+use mononoke_app::args::HooksAppExtension;
+use mononoke_app::args::ShutdownTimeoutArgs;
 use mononoke_app::MononokeAppBuilder;
 use panichandler::Fate;
+use permission_checker::DefaultAclProvider;
 use slog::info;
 use source_control::server::make_SourceControlService_server;
-use srserver::service_framework::{
-    BuildModule, ContextPropModule, Fb303Module, ProfileModule, ServiceFramework, ThriftStatsModule,
-};
-use srserver::{ThriftServer, ThriftServerBuilder};
+use srserver::service_framework::BuildModule;
+use srserver::service_framework::ContextPropModule;
+use srserver::service_framework::Fb303Module;
+use srserver::service_framework::ProfileModule;
+use srserver::service_framework::ServiceFramework;
+use srserver::service_framework::ThriftStatsModule;
+use srserver::ThriftServer;
+use srserver::ThriftServerBuilder;
 use tokio::task;
 
 mod commit_id;
@@ -45,6 +57,7 @@ mod into_response;
 mod metadata;
 mod methods;
 mod monitoring;
+mod repo_filter;
 mod scuba_common;
 mod scuba_params;
 mod scuba_response;
@@ -60,6 +73,8 @@ struct ScsServerArgs {
     shutdown_timeout_args: ShutdownTimeoutArgs,
     #[clap(flatten)]
     scribe_logging_args: ScribeLoggingArgs,
+    #[clap(flatten)]
+    repo_filter_args: repo_filter::RepoFilterArgs,
     /// Thrift host
     #[clap(long, short = 'H', default_value = "::")]
     host: String,
@@ -99,6 +114,7 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
         warm_bookmarks_cache_enabled: true,
         warm_bookmarks_cache_scuba_sample_builder,
         skiplist_enabled: true,
+        repo_filter: args.repo_filter_args.filter_repos,
     };
 
     let mononoke = Arc::new(runtime.block_on(Mononoke::new(&api_env, app.repo_configs().clone()))?);
@@ -119,13 +135,20 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
             make_BaseService_server(proto, facebook::BaseServiceImpl::new(will_exit.clone()))
         }
     };
+    let acl_provider = DefaultAclProvider::new(fb);
+    let security_checker = runtime.block_on(ConnectionSecurityChecker::new(
+        acl_provider,
+        &app.repo_configs().common,
+    ))?;
     let source_control_server = source_control_impl::SourceControlServiceImpl::new(
         fb,
         mononoke.clone(),
         megarepo_api,
         logger.clone(),
-        scuba_builder.clone(),
+        scuba_builder,
         args.scribe_logging_args.get_scribe(fb)?,
+        security_checker,
+        &app.repo_configs().common,
     );
     let service = {
         move |proto| {
@@ -183,7 +206,7 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
     serve_forever(
         runtime,
         monitoring_forever.map(Result::<(), Error>::Ok),
-        &logger,
+        logger,
         move || will_exit.store(true, Ordering::Relaxed),
         args.shutdown_timeout_args.shutdown_grace_period,
         async {

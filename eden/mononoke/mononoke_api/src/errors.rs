@@ -5,11 +5,16 @@
  * GNU General Public License version 2.
  */
 
+use blame::BlameError;
 use blobstore::LoadableError;
-use bookmarks_movement::{describe_hook_rejections, BookmarkMovementError, HookRejection};
+use bookmarks_movement::describe_hook_rejections;
+use bookmarks_movement::BookmarkMovementError;
+use bookmarks_movement::HookRejection;
 use derived_data::DeriveError;
 use itertools::Itertools;
 use megarepo_error::MegarepoError;
+use pushrebase::PushrebaseError;
+use repo_authorization::AuthorizationError;
 use std::backtrace::Backtrace;
 use std::convert::Infallible;
 use std::error::Error as StdError;
@@ -52,12 +57,8 @@ pub enum MononokeError {
     InvalidRequest(String),
     #[error("unresolved path conflicts in merge:\n {}", .conflict_paths.iter().join("\n"))]
     MergeConflicts { conflict_paths: Vec<MononokePath> },
-    #[error("permission denied: {mode} access to repo {reponame} not permitted for {identities}")]
-    PermissionDenied {
-        mode: String,
-        identities: String,
-        reponame: String,
-    },
+    #[error("Conflicts while pushrebasing: {0:?}")]
+    PushrebaseConflicts(Vec<pushrebase::PushrebaseConflict>),
     #[error(
         "permission denied: access to repo {reponame} on behalf of {service_identity} not permitted for {identities}"
     )]
@@ -66,18 +67,12 @@ pub enum MononokeError {
         reponame: String,
         service_identity: String,
     },
-    #[error(
-        "permission denied: service {service_identity} is not permitted to {action} in {reponame}"
-    )]
-    ServiceRestricted {
-        service_identity: String,
-        action: String,
-        reponame: String,
-    },
     #[error("hooks failed:\n{}", describe_hook_rejections(.0.as_slice()))]
     HookFailure(Vec<HookRejection>),
     #[error("not available: {0}")]
     NotAvailable(String),
+    #[error("permission denied: {0}")]
+    AuthorizationError(String),
     #[error("internal error: {0}")]
     InternalError(#[source] InternalError),
 }
@@ -111,11 +106,42 @@ impl From<DeriveError> for MononokeError {
 
 impl From<BookmarkMovementError> for MononokeError {
     fn from(e: BookmarkMovementError) -> Self {
-        use BookmarkMovementError::*;
         match e {
-            HookFailure(rejections) => MononokeError::HookFailure(rejections),
-            Error(e) => MononokeError::InternalError(InternalError::from(e)),
+            BookmarkMovementError::AuthorizationError(e) => {
+                MononokeError::AuthorizationError(e.to_string())
+            }
+            BookmarkMovementError::HookFailure(rejections) => {
+                MononokeError::HookFailure(rejections)
+            }
+            BookmarkMovementError::PushrebaseError(PushrebaseError::Conflicts(conflicts)) => {
+                MononokeError::PushrebaseConflicts(conflicts)
+            }
+            BookmarkMovementError::Error(e) => MononokeError::InternalError(InternalError::from(e)),
             _ => MononokeError::InvalidRequest(e.to_string()),
+        }
+    }
+}
+
+impl From<AuthorizationError> for MononokeError {
+    fn from(e: AuthorizationError) -> Self {
+        match e {
+            AuthorizationError::PermissionDenied(e) => {
+                MononokeError::AuthorizationError(e.to_string())
+            }
+            AuthorizationError::Error(e) => MononokeError::InternalError(InternalError::from(e)),
+        }
+    }
+}
+
+impl From<BlameError> for MononokeError {
+    fn from(e: BlameError) -> Self {
+        use BlameError::*;
+        match e {
+            NoSuchPath(_) | IsDirectory(_) | Rejected(_) => {
+                MononokeError::InvalidRequest(e.to_string())
+            }
+            DeriveError(e) => MononokeError::from(e),
+            _ => MononokeError::from(anyhow::Error::from(e)),
         }
     }
 }

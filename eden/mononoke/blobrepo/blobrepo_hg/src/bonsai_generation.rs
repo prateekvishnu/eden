@@ -7,25 +7,38 @@
 
 use std::collections::HashSet;
 
-use anyhow::{Context, Error, Result};
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use cloned::cloned;
-use futures::stream::{self, StreamExt, TryStream, TryStreamExt};
+use futures::stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStream;
+use futures::stream::TryStreamExt;
 
-use blobstore::{Blobstore, Loadable};
+use blobstore::Blobstore;
+use blobstore::Loadable;
 use context::CoreContext;
-use manifest::{bonsai_diff, BonsaiDiffFileChange, ManifestOps};
-use mercurial_types::{
-    blobs::{HgBlobChangeset, HgBlobEnvelope},
-    HgFileEnvelope, HgFileNodeId, HgManifestId, MPath, RepoPath,
-};
-use mononoke_types::{
-    BlobstoreKey, BlobstoreValue, BonsaiChangeset, BonsaiChangesetMut, ChangesetId, FileChange,
-};
+use manifest::bonsai_diff;
+use manifest::BonsaiDiffFileChange;
+use manifest::ManifestOps;
+use mercurial_types::blobs::HgBlobChangeset;
+use mercurial_types::blobs::HgBlobEnvelope;
+use mercurial_types::HgFileEnvelope;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::HgManifestId;
+use mercurial_types::MPath;
+use mercurial_types::RepoPath;
+use mononoke_types::BlobstoreKey;
+use mononoke_types::BlobstoreValue;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::BonsaiChangesetMut;
+use mononoke_types::ChangesetId;
+use mononoke_types::FileChange;
 use repo_blobstore::RepoBlobstore;
 use sorted_vector_map::SortedVectorMap;
 
 use crate::errors::*;
-use crate::BlobRepo;
 
 /// Creates bonsai changeset from already created HgBlobChangeset.
 pub async fn create_bonsai_changeset_object(
@@ -33,13 +46,13 @@ pub async fn create_bonsai_changeset_object(
     cs: HgBlobChangeset,
     parent_manifests: Vec<HgManifestId>,
     bonsai_parents: Vec<ChangesetId>,
-    repo: &BlobRepo,
+    blobstore: &RepoBlobstore,
 ) -> Result<BonsaiChangeset, Error> {
     let file_changes = find_file_changes(
         ctx,
         cs.clone(),
         parent_manifests,
-        repo,
+        blobstore,
         bonsai_parents.clone(),
     )
     .await?;
@@ -88,13 +101,13 @@ pub async fn save_bonsai_changeset_object(
 
 fn find_bonsai_diff(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    blobstore: RepoBlobstore,
     cs: HgBlobChangeset,
     parent_manifests: HashSet<HgManifestId>,
 ) -> Result<impl TryStream<Ok = BonsaiDiffFileChange<HgFileNodeId>, Error = Error>> {
     Ok(bonsai_diff(
         ctx.clone(),
-        repo.get_blobstore(),
+        blobstore,
         cs.manifestid(),
         parent_manifests,
     ))
@@ -105,59 +118,63 @@ async fn find_file_changes(
     ctx: &CoreContext,
     cs: HgBlobChangeset,
     parent_manifests: Vec<HgManifestId>,
-    repo: &BlobRepo,
+    blobstore: &RepoBlobstore,
     bonsai_parents: Vec<ChangesetId>,
 ) -> Result<SortedVectorMap<MPath, FileChange>, Error> {
-    let diff: Result<_, Error> =
-        find_bonsai_diff(ctx, repo, cs, parent_manifests.iter().cloned().collect())
-            .context("While finding bonsai diff")?
-            .map_ok(|diff| {
-                cloned!(parent_manifests, bonsai_parents);
-                async move {
-                    match diff {
-                        BonsaiDiffFileChange::Changed(path, ty, entry_id) => {
-                            let file_node_id = HgFileNodeId::new(entry_id.into_nodehash());
-                            let envelope = file_node_id
-                                .load(ctx, repo.blobstore())
-                                .await
-                                .context("While fetching bonsai file changes")?;
-                            let size = envelope.content_size();
-                            let content_id = envelope.content_id();
+    let diff: Result<_, Error> = find_bonsai_diff(
+        ctx,
+        blobstore.clone(),
+        cs,
+        parent_manifests.iter().cloned().collect(),
+    )
+    .context("While finding bonsai diff")?
+    .map_ok(|diff| {
+        cloned!(parent_manifests, bonsai_parents);
+        async move {
+            match diff {
+                BonsaiDiffFileChange::Changed(path, ty, entry_id) => {
+                    let file_node_id = HgFileNodeId::new(entry_id.into_nodehash());
+                    let envelope = file_node_id
+                        .load(ctx, blobstore)
+                        .await
+                        .context("While fetching bonsai file changes")?;
+                    let size = envelope.content_size();
+                    let content_id = envelope.content_id();
 
-                            let copyinfo = get_copy_info(
-                                ctx.clone(),
-                                repo.clone(),
-                                bonsai_parents,
-                                path.clone(),
-                                envelope,
-                                parent_manifests,
-                            )
-                            .await
-                            .context("While fetching copy information")?;
-                            Ok((
-                                path,
-                                FileChange::tracked(content_id, ty, size as u64, copyinfo),
-                            ))
-                        }
-                        BonsaiDiffFileChange::ChangedReusedId(path, ty, entry_id) => {
-                            let file_node_id = HgFileNodeId::new(entry_id.into_nodehash());
-                            let envelope = file_node_id
-                                .load(ctx, repo.blobstore())
-                                .await
-                                .context("While fetching bonsai file changes")?;
-                            let size = envelope.content_size();
-                            let content_id = envelope.content_id();
-
-                            // Reused ID means copy info is *not* stored.
-                            Ok((path, FileChange::tracked(content_id, ty, size as u64, None)))
-                        }
-                        BonsaiDiffFileChange::Deleted(path) => Ok((path, FileChange::Deletion)),
-                    }
+                    let copyinfo = get_copy_info(
+                        ctx.clone(),
+                        blobstore.clone(),
+                        bonsai_parents,
+                        path.clone(),
+                        envelope,
+                        parent_manifests,
+                    )
+                    .await
+                    .context("While fetching copy information")?;
+                    Ok((
+                        path,
+                        FileChange::tracked(content_id, ty, size as u64, copyinfo),
+                    ))
                 }
-            })
-            .try_buffer_unordered(100) // TODO(stash): magic number?
-            .try_collect::<std::collections::BTreeMap<_, _>>()
-            .await;
+                BonsaiDiffFileChange::ChangedReusedId(path, ty, entry_id) => {
+                    let file_node_id = HgFileNodeId::new(entry_id.into_nodehash());
+                    let envelope = file_node_id
+                        .load(ctx, blobstore)
+                        .await
+                        .context("While fetching bonsai file changes")?;
+                    let size = envelope.content_size();
+                    let content_id = envelope.content_id();
+
+                    // Reused ID means copy info is *not* stored.
+                    Ok((path, FileChange::tracked(content_id, ty, size as u64, None)))
+                }
+                BonsaiDiffFileChange::Deleted(path) => Ok((path, FileChange::Deletion)),
+            }
+        }
+    })
+    .try_buffer_unordered(100) // TODO(stash): magic number?
+    .try_collect::<std::collections::BTreeMap<_, _>>()
+    .await;
 
     Ok(SortedVectorMap::from_iter(diff?))
 }
@@ -168,7 +185,7 @@ async fn find_file_changes(
 // we need to find a parent from which this filenode was copied.
 async fn get_copy_info(
     ctx: CoreContext,
-    repo: BlobRepo,
+    blobstore: RepoBlobstore,
     bonsai_parents: Vec<ChangesetId>,
     copy_from_path: MPath,
     envelope: HgFileEnvelope,
@@ -189,10 +206,10 @@ async fn get_copy_info(
 
             let get_bonsai_cs_copied_from =
                 |(bonsai_parent, parent_mf): (ChangesetId, HgManifestId)| {
-                    cloned!(ctx, repo);
+                    cloned!(ctx, blobstore);
                     async move {
                         let entry = parent_mf
-                            .find_entry(ctx, repo.get_blobstore(), Some(repopath.clone()))
+                            .find_entry(ctx, blobstore, Some(repopath.clone()))
                             .await
                             .ok()?;
                         if entry?.into_leaf()?.1 == copyfromnode {

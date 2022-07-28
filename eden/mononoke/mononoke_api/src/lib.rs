@@ -12,18 +12,22 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{anyhow, Context, Error};
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Error;
 pub use bookmarks::BookmarkName;
-use ephemeral_blobstore::BubbleId;
-use ephemeral_blobstore::RepoEphemeralStore;
-use futures::{stream, Future, StreamExt};
+use futures::stream;
+use futures::StreamExt;
 use futures_watchdog::WatchdogExt;
+use metaconfig_parser::RepoConfigs;
 use mononoke_types::RepositoryId;
 use repo_factory::RepoFactory;
 use scuba_ext::MononokeScubaSampleBuilder;
-use slog::{debug, info, o};
+use slog::debug;
+use slog::info;
+use slog::o;
 
-use metaconfig_parser::RepoConfigs;
+use crate::repo::RepoContextBuilder;
 
 pub mod changeset;
 pub mod changeset_path;
@@ -31,10 +35,7 @@ pub mod changeset_path_diff;
 pub mod errors;
 pub mod file;
 pub mod path;
-pub mod permissions;
 pub mod repo;
-pub mod repo_draft;
-pub mod repo_write;
 pub mod sparse_profile;
 pub mod specifiers;
 pub mod tree;
@@ -43,34 +44,56 @@ mod xrepo;
 #[cfg(test)]
 mod test;
 
-pub use crate::changeset::{
-    ChangesetContext, ChangesetDiffItem, ChangesetFileOrdering, ChangesetHistoryOptions, Generation,
-};
-pub use crate::changeset_path::{
-    unified_diff, ChangesetPathContentContext, ChangesetPathHistoryOptions, CopyInfo, PathEntry,
-    UnifiedDiff, UnifiedDiffMode,
-};
+pub use crate::changeset::ChangesetContext;
+pub use crate::changeset::ChangesetDiffItem;
+pub use crate::changeset::ChangesetFileOrdering;
+pub use crate::changeset::ChangesetHistoryOptions;
+pub use crate::changeset::Generation;
+pub use crate::changeset_path::unified_diff;
+pub use crate::changeset_path::ChangesetPathContentContext;
+pub use crate::changeset_path::ChangesetPathHistoryOptions;
+pub use crate::changeset_path::CopyInfo;
+pub use crate::changeset_path::PathEntry;
+pub use crate::changeset_path::UnifiedDiff;
+pub use crate::changeset_path::UnifiedDiffMode;
 pub use crate::changeset_path_diff::ChangesetPathDiffContext;
 pub use crate::errors::MononokeError;
-pub use crate::file::{
-    headerless_unified_diff, FileContext, FileId, FileMetadata, FileType, HeaderlessUnifiedDiff,
-};
+pub use crate::file::headerless_unified_diff;
+pub use crate::file::FileContext;
+pub use crate::file::FileId;
+pub use crate::file::FileMetadata;
+pub use crate::file::FileType;
+pub use crate::file::HeaderlessUnifiedDiff;
 pub use crate::path::MononokePath;
-pub use crate::repo::{BookmarkFreshness, BookmarkInfo, Repo, RepoContext};
-pub use crate::repo_draft::create_changeset::{CreateChange, CreateChangeFile, CreateCopyInfo};
-pub use crate::repo_draft::RepoDraftContext;
-pub use crate::repo_write::land_stack::PushrebaseOutcome;
-pub use crate::repo_write::RepoWriteContext;
-pub use crate::specifiers::{
-    ChangesetId, ChangesetIdPrefix, ChangesetPrefixSpecifier, ChangesetSpecifier,
-    ChangesetSpecifierPrefixResolution, Globalrev, HgChangesetId, HgChangesetIdPrefix,
-};
-pub use crate::tree::{TreeContext, TreeEntry, TreeId, TreeSummary};
+pub use crate::repo::create_changeset::CreateChange;
+pub use crate::repo::create_changeset::CreateChangeFile;
+pub use crate::repo::create_changeset::CreateCopyInfo;
+pub use crate::repo::land_stack::PushrebaseOutcome;
+pub use crate::repo::BookmarkFreshness;
+pub use crate::repo::BookmarkInfo;
+pub use crate::repo::Repo;
+pub use crate::repo::RepoContext;
+pub use crate::specifiers::ChangesetId;
+pub use crate::specifiers::ChangesetIdPrefix;
+pub use crate::specifiers::ChangesetPrefixSpecifier;
+pub use crate::specifiers::ChangesetSpecifier;
+pub use crate::specifiers::ChangesetSpecifierPrefixResolution;
+pub use crate::specifiers::Globalrev;
+pub use crate::specifiers::HgChangesetId;
+pub use crate::specifiers::HgChangesetIdPrefix;
+pub use crate::tree::TreeContext;
+pub use crate::tree::TreeEntry;
+pub use crate::tree::TreeId;
+pub use crate::tree::TreeSummary;
 pub use crate::xrepo::CandidateSelectionHintArgs;
 
 // Re-export types that are useful for clients.
 pub use blame::CompatBlame;
-pub use context::{CoreContext, LoggingContainer, SessionContainer};
+pub use context::CoreContext;
+pub use context::LoggingContainer;
+pub use context::SessionContainer;
+
+use regex::Regex;
 
 /// An instance of Mononoke, which may manage multiple repositories.
 pub struct Mononoke {
@@ -82,12 +105,16 @@ impl Mononoke {
     /// Create a Mononoke instance.
     pub async fn new(env: &MononokeApiEnvironment, configs: RepoConfigs) -> Result<Self, Error> {
         let start = Instant::now();
-        let repos = stream::iter(
-            configs
-                .repos
-                .into_iter()
-                .filter(move |&(_, ref config)| config.enabled),
-        )
+
+        let repos = stream::iter(configs.repos.into_iter().filter(
+            move |&(ref name, ref config)| {
+                let is_matching_filter = env
+                    .repo_filter
+                    .as_ref()
+                    .map_or(true, |re| re.is_match(name.as_str()));
+                config.enabled && is_matching_filter
+            },
+        ))
         .map({
             move |(name, config)| async move {
                 let logger = &env.repo_factory.env.logger;
@@ -126,12 +153,12 @@ impl Mononoke {
         let mut repos = HashMap::new();
         let mut repos_by_ids = HashMap::new();
         for (name, repo) in repos_iter {
-            if !repos.insert(name.clone(), repo.clone()).is_none() {
+            if repos.insert(name.clone(), repo.clone()).is_some() {
                 return Err(anyhow!("repos with duplicate name '{}' found", name));
             }
 
             let repo_id = repo.blob_repo().get_repoid();
-            if !repos_by_ids.insert(repo_id, repo).is_none() {
+            if repos_by_ids.insert(repo_id, repo).is_some() {
                 return Err(anyhow!("repos with duplicate id '{}' found", repo_id));
             }
         }
@@ -142,82 +169,37 @@ impl Mononoke {
         })
     }
 
-    /// Start a request on a repository.
+    /// Start a request on a repository by name.
+    // Method is async and fallible as in the future this may involve
+    // instantiating the repo lazily.
     pub async fn repo(
         &self,
         ctx: CoreContext,
         name: impl AsRef<str>,
-    ) -> Result<Option<RepoContext>, MononokeError> {
-        self.repo_with_bubble(ctx, name, |_| async { Ok(None) })
-            .await
-    }
-
-    pub async fn repo_with_bubble<F, R>(
-        &self,
-        ctx: CoreContext,
-        name: impl AsRef<str>,
-        bubble_fetcher: F,
-    ) -> Result<Option<RepoContext>, MononokeError>
-    where
-        F: FnOnce(RepoEphemeralStore) -> R,
-        R: Future<Output = anyhow::Result<Option<BubbleId>>>,
-    {
+    ) -> Result<Option<RepoContextBuilder>, MononokeError> {
         match self.repos.get(name.as_ref()) {
             None => Ok(None),
-            Some(repo) => Ok(Some(
-                RepoContext::new_with_bubble(ctx, repo.clone(), bubble_fetcher).await?,
-            )),
+            Some(repo) => Ok(Some(RepoContextBuilder::new(ctx, repo.clone()))),
         }
     }
 
+    /// Start a request on a repository by id.
+    // Method is async and fallible as in the future this may involve
+    // instantiating the repo lazily.
     pub async fn repo_by_id(
         &self,
         ctx: CoreContext,
         repo_id: RepositoryId,
-    ) -> Result<Option<RepoContext>, MononokeError> {
+    ) -> Result<Option<RepoContextBuilder>, MononokeError> {
         match self.repos_by_ids.get(&repo_id) {
             None => Ok(None),
-            Some(repo) => Ok(Some(RepoContext::new(ctx, repo.clone()).await?)),
+            Some(repo) => Ok(Some(RepoContextBuilder::new(ctx, repo.clone()))),
         }
     }
 
     /// Get all known repository ids
     pub fn known_repo_ids(&self) -> Vec<RepositoryId> {
         self.repos.iter().map(|repo| repo.1.repoid()).collect()
-    }
-
-    /// Start a request on a repository bypassing the ACL check.
-    ///
-    /// Should be only used for internal usecases where we don't have external user with
-    /// identity.
-    pub async fn repo_bypass_acl_check(
-        &self,
-        ctx: CoreContext,
-        name: impl AsRef<str>,
-    ) -> Result<Option<RepoContext>, MononokeError> {
-        match self.repos.get(name.as_ref()) {
-            None => Ok(None),
-            Some(repo) => Ok(Some(
-                RepoContext::new_bypass_acl_check(ctx, repo.clone()).await?,
-            )),
-        }
-    }
-
-    /// Start a request on a repository bypassing the ACL check.
-    ///
-    /// Should be only used for internal usecases where we don't have external user with
-    /// identity.
-    pub async fn repo_by_id_bypass_acl_check(
-        &self,
-        ctx: CoreContext,
-        repo_id: RepositoryId,
-    ) -> Result<Option<RepoContext>, MononokeError> {
-        match self.repos_by_ids.get(&repo_id) {
-            None => Ok(None),
-            Some(repo) => Ok(Some(
-                RepoContext::new_bypass_acl_check(ctx, repo.clone()).await?,
-            )),
-        }
     }
 
     /// Returns an `Iterator` over all repo names.
@@ -232,7 +214,7 @@ impl Mononoke {
     pub fn repo_name_from_id(&self, repo_id: RepositoryId) -> Option<&String> {
         match self.repos_by_ids.get(&repo_id) {
             None => None,
-            Some(repo) => Some(&repo.name()),
+            Some(repo) => Some(repo.name()),
         }
     }
 
@@ -252,6 +234,7 @@ pub struct MononokeApiEnvironment {
     pub warm_bookmarks_cache_enabled: bool,
     pub warm_bookmarks_cache_scuba_sample_builder: MononokeScubaSampleBuilder,
     pub skiplist_enabled: bool,
+    pub repo_filter: Option<Regex>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -275,7 +258,8 @@ pub mod test_impl {
             ctx: CoreContext,
             repos: impl IntoIterator<Item = (String, BlobRepo)>,
         ) -> Result<Self, Error> {
-            use futures::stream::{FuturesOrdered, TryStreamExt};
+            use futures::stream::FuturesOrdered;
+            use futures::stream::TryStreamExt;
 
             let repos = repos
                 .into_iter()
@@ -302,7 +286,8 @@ pub mod test_impl {
             mapping: Arc<dyn SyncedCommitMapping>,
             lv_cfg: Arc<dyn LiveCommitSyncConfig>,
         ) -> Result<Self, Error> {
-            use futures::stream::{FuturesOrdered, TryStreamExt};
+            use futures::stream::FuturesOrdered;
+            use futures::stream::TryStreamExt;
 
             let repos = vec![small_repo, large_repo]
                 .into_iter()

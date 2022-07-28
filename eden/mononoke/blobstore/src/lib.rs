@@ -11,18 +11,30 @@ mod errors;
 pub mod macros;
 
 use abomonation_derive::Abomonation;
-use anyhow::{Context, Error, Result};
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
 use auto_impl::auto_impl;
 use bytes::Bytes;
 use clap::ArgEnum;
 use context::CoreContext;
-use serde_derive::{Deserialize, Serialize};
+use serde_derive::Deserialize;
+use serde_derive::Serialize;
 use std::collections::HashSet;
 use std::fmt;
 use std::io::Cursor;
-use std::ops::{Bound, RangeBounds, RangeFrom, RangeFull, RangeInclusive, RangeToInclusive};
-use strum_macros::{AsRefStr, Display, EnumIter, EnumString, IntoStaticStr};
+use std::ops::Bound;
+use std::ops::RangeBounds;
+use std::ops::RangeFrom;
+use std::ops::RangeFull;
+use std::ops::RangeInclusive;
+use std::ops::RangeToInclusive;
+use strum_macros::AsRefStr;
+use strum_macros::Display;
+use strum_macros::EnumIter;
+use strum_macros::EnumString;
+use strum_macros::IntoStaticStr;
 use thiserror::Error;
 use trait_alias::trait_alias;
 
@@ -33,9 +45,12 @@ pub use crate::errors::ErrorKind;
 // This module exists to namespace re-exported
 // imports, needed for macro exports.
 pub mod private {
-    pub use crate::{
-        Blobstore, BlobstoreBytes, BlobstoreGetData, Loadable, LoadableError, Storable,
-    };
+    pub use crate::Blobstore;
+    pub use crate::BlobstoreBytes;
+    pub use crate::BlobstoreGetData;
+    pub use crate::Loadable;
+    pub use crate::LoadableError;
+    pub use crate::Storable;
     pub use anyhow::Error;
     pub use async_trait::async_trait;
     pub use context::CoreContext;
@@ -77,6 +92,11 @@ impl BlobstoreGetData {
     #[inline]
     pub fn len(&self) -> usize {
         self.bytes.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
     }
 
     #[inline]
@@ -181,6 +201,11 @@ impl BlobstoreBytes {
     #[inline]
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     /// This should only be used by blobstore and From/Into<BlobstoreBytes> implementations.

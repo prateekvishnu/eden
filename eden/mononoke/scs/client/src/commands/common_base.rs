@@ -7,38 +7,35 @@
 
 //! Find common base of two commits
 
+use anyhow::bail;
+use anyhow::Result;
+use serde::Serialize;
+use source_control::types as thrift;
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use anyhow::{bail, Error};
-use clap::{App, AppSettings, ArgMatches, SubCommand};
-use futures::stream;
-use futures_util::stream::StreamExt;
-use serde_derive::Serialize;
-use source_control::types as thrift;
-
-use crate::args::commit_id::{
-    add_multiple_commit_id_args, add_scheme_args, get_commit_ids, get_request_schemes, get_schemes,
-    map_commit_ids, resolve_commit_ids,
-};
-use crate::args::repo::{add_repo_args, get_repo_specifier};
-use crate::connection::Connection;
+use crate::args::commit_id::map_commit_ids;
+use crate::args::commit_id::resolve_commit_ids;
+use crate::args::commit_id::CommitIdsArgs;
+use crate::args::commit_id::SchemeArgs;
+use crate::args::repo::RepoArgs;
 use crate::lib::commit_id::render_commit_id;
-use crate::render::{Render, RenderStream};
+use crate::render::Render;
+use crate::ScscApp;
 
-pub(super) const NAME: &str = "common-base";
-
-pub(super) fn make_subcommand<'a, 'b>() -> App<'a, 'b> {
-    let cmd = SubCommand::with_name(NAME)
-        .about("Finds a common base of two commits.")
-        .setting(AppSettings::ColoredHelp);
-    let cmd = add_repo_args(cmd);
-    let cmd = add_scheme_args(cmd);
-    add_multiple_commit_id_args(cmd)
+#[derive(clap::Parser)]
+/// Finds a common base of two commits.
+pub(super) struct CommandArgs {
+    #[clap(flatten)]
+    repo_args: RepoArgs,
+    #[clap(flatten)]
+    scheme_args: SchemeArgs,
+    #[clap(flatten)]
+    commit_ids_args: CommitIdsArgs,
 }
 
 #[derive(Serialize)]
-pub struct CommonBaseOutput {
+struct CommonBaseOutput {
     #[serde(skip)]
     pub requested: (String, String),
     pub exists: bool,
@@ -46,9 +43,11 @@ pub struct CommonBaseOutput {
 }
 
 impl Render for CommonBaseOutput {
-    fn render(&self, matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    type Args = CommandArgs;
+
+    fn render(&self, args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         if self.exists {
-            let schemes = get_schemes(matches);
+            let schemes = args.scheme_args.scheme_string_set();
             render_commit_id(None, "\n", "common base", &self.ids, &schemes, w)?;
             write!(w, "\n")?;
         } else {
@@ -61,40 +60,41 @@ impl Render for CommonBaseOutput {
         Ok(())
     }
 
-    fn render_json(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    fn render_json(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         Ok(serde_json::to_writer(w, self)?)
     }
 }
 
-pub(super) async fn run(
-    matches: &ArgMatches<'_>,
-    connection: Connection,
-) -> Result<RenderStream, Error> {
-    let repo = get_repo_specifier(matches).expect("repository is required");
-    let commit_ids = get_commit_ids(matches)?;
-    let ids = resolve_commit_ids(&connection, &repo, &commit_ids).await?;
-    if ids.len() > 2 || ids.is_empty() {
-        bail!("expected 1 or 2 commit_ids (got {})", commit_ids.len())
-    }
+pub(super) async fn run(app: ScscApp, args: CommandArgs) -> Result<()> {
+    let repo = args.repo_args.clone().into_repo_specifier();
+    let commit_ids = args.commit_ids_args.clone().into_commit_ids();
+    let ids = resolve_commit_ids(&app.connection, &repo, &commit_ids).await?;
+    let ids = match ids.as_slice() {
+        [id0, id1] => (id0.clone(), id1.clone()),
+        _ => bail!("expected 2 commit_ids (got {})", commit_ids.len()),
+    };
     let commit = thrift::CommitSpecifier {
         repo,
-        id: ids[0].clone(),
+        id: ids.0,
         ..Default::default()
     };
     let params = thrift::CommitCommonBaseWithParams {
-        other_commit_id: ids[1].clone(),
-        identity_schemes: get_request_schemes(&matches),
+        other_commit_id: ids.1,
+        identity_schemes: args.scheme_args.clone().into_request_schemes(),
         ..Default::default()
     };
-    let response = connection.commit_common_base_with(&commit, &params).await?;
+    let response = app
+        .connection
+        .commit_common_base_with(&commit, &params)
+        .await?;
     let ids = match &response.ids {
         Some(ids) => map_commit_ids(ids.values()),
         None => BTreeMap::new(),
     };
-    let output = Box::new(CommonBaseOutput {
+    let output = CommonBaseOutput {
         requested: (commit_ids[0].to_string(), commit_ids[1].to_string()),
         exists: response.exists,
         ids,
-    });
-    Ok(stream::once(async move { Ok(output as Box<dyn Render>) }).boxed())
+    };
+    app.target.render_one(&args, output).await
 }

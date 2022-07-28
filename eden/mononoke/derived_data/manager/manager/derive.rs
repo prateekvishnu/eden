@@ -5,33 +5,47 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::future;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use async_recursion::async_recursion;
 use blobstore::Loadable;
 use borrowed::borrowed;
 use cloned::cloned;
 use context::CoreContext;
-use futures::future::{try_join, FutureExt, TryFutureExt};
-use futures::stream::{self, FuturesUnordered, StreamExt, TryStreamExt};
-use futures::{join, select_biased};
-use futures_stats::{TimedFutureExt, TimedTryFutureExt};
+use futures::future::try_join;
+use futures::future::FutureExt;
+use futures::future::TryFutureExt;
+use futures::join;
+use futures::select_biased;
+use futures::stream;
+use futures::stream::FuturesUnordered;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use futures_stats::TimedFutureExt;
+use futures_stats::TimedTryFutureExt;
 use mononoke_types::ChangesetId;
 use slog::debug;
 use topo_sort::TopoSortedDagTraversal;
 
 use crate::context::DerivationContext;
-use crate::derivable::{BonsaiDerivable, DerivationDependencies};
+use crate::derivable::BonsaiDerivable;
+use crate::derivable::DerivationDependencies;
 use crate::error::DerivationError;
 use crate::manager::util::DiscoveryStats;
-use derived_data_service_if::types::{DerivationType, DeriveSingle};
+use derived_data_service_if::types::DerivationType;
+use derived_data_service_if::types::DeriveSingle;
 
-use super::{DerivationAssignment, DerivedDataManager};
+use super::DerivationAssignment;
+use super::DerivedDataManager;
 
 #[derive(Clone, Copy)]
 pub enum BatchDeriveOptions {
@@ -171,7 +185,7 @@ impl DerivedDataManager {
                 }
             }
         }
-        self.perform_single_derivation_locally(&ctx, &derivation_ctx, csid, discovery_stats)
+        self.perform_single_derivation_locally(ctx, derivation_ctx, csid, discovery_stats)
             .await
     }
 
@@ -714,7 +728,7 @@ impl DerivedDataManager {
                 .map(|bonsai| bonsai.get_changeset_id().to_string())
                 .collect::<Vec<_>>(),
         );
-        self.log_batch_derivation_start::<Derivable>(&ctx, &mut derived_data_scuba, csid_range);
+        self.log_batch_derivation_start::<Derivable>(ctx, &mut derived_data_scuba, csid_range);
         let (overall_stats, result) = async {
             let derivation_ctx_ref = &derivation_ctx;
             let (batch_stats, derived) = match batch_options {
@@ -782,9 +796,7 @@ impl DerivedDataManager {
                 let derivation_ctx_ref = &derivation_ctx;
                 let csids = stream::iter(derived.into_iter())
                     .map(|(csid, derived)| async move {
-                        derived
-                            .store_mapping(ctx, &derivation_ctx_ref, csid)
-                            .await?;
+                        derived.store_mapping(ctx, derivation_ctx_ref, csid).await?;
                         Ok::<_, Error>(csid)
                     })
                     .buffer_unordered(100)
@@ -803,7 +815,7 @@ impl DerivedDataManager {
             .await;
 
             self.log_mapping_insertion::<Derivable>(
-                &ctx,
+                ctx,
                 &mut derived_data_scuba,
                 None,
                 &persist_stats,
@@ -822,7 +834,7 @@ impl DerivedDataManager {
         .await;
 
         self.log_batch_derivation_end::<Derivable>(
-            &ctx,
+            ctx,
             &mut derived_data_scuba,
             csid_range,
             &overall_stats,
@@ -928,7 +940,7 @@ fn emergency_disabled(repo_name: &str, derivable_name: &str) -> bool {
 
     let disabled_for_type = tunables::tunables()
         .get_by_repo_derived_data_types_disabled(repo_name)
-        .unwrap_or(vec![]);
+        .unwrap_or_else(Vec::new);
 
     if disabled_for_type
         .iter()

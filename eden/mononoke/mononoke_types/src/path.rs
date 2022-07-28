@@ -8,23 +8,32 @@
 use ascii::AsciiString;
 use std::cmp;
 use std::collections::HashMap;
-use std::fmt::{self, Display};
-use std::io::{self, Write};
-use std::iter::{once, Once};
+use std::fmt;
+use std::fmt::Display;
+use std::io;
+use std::io::Write;
+use std::iter::once;
+use std::iter::Once;
 use std::slice::Iter;
 
-use anyhow::{bail, Context as _, Error, Result};
+use anyhow::bail;
+use anyhow::Context as _;
+use anyhow::Error;
+use anyhow::Result;
 use lazy_static::lazy_static;
-use quickcheck::{Arbitrary, Gen};
+use quickcheck::Arbitrary;
+use quickcheck::Gen;
 use quickcheck_arbitrary_derive::Arbitrary;
 use regex::bytes::Regex as BytesRegex;
 use regex::Regex;
-use serde_derive::{Deserialize, Serialize};
+use serde_derive::Deserialize;
+use serde_derive::Serialize;
 use smallvec::SmallVec;
 
 use crate::bonsai_changeset::BonsaiChangeset;
 use crate::errors::ErrorKind;
-use crate::hash::{Blake2, Context};
+use crate::hash::Blake2;
+use crate::hash::Context;
 use crate::thrift;
 
 // Filesystems on Linux commonly limit path *elements* to 255 bytes. Enforce this on MPaths as well
@@ -348,6 +357,15 @@ impl MPathElement {
 
         true
     }
+
+    /// Returns whether potential_suffix is a suffix of this path element.
+    /// For example, if the element is "file.extension", "n", "tension",
+    /// "extension", ".extension", "file.extension" are suffixes of the
+    /// basename, but "file" is not.
+    #[inline]
+    pub fn has_suffix(&self, potential_suffix: &[u8]) -> bool {
+        self.0.ends_with(potential_suffix)
+    }
 }
 
 // Regex for looking for invalid windows filenames
@@ -427,11 +445,7 @@ impl MPath {
     }
 
     pub fn from_thrift(mpath: thrift::MPath) -> Result<MPath> {
-        let elements: Result<Vec<_>> = mpath
-            .0
-            .into_iter()
-            .map(|elem| MPathElement::from_thrift(elem))
-            .collect();
+        let elements: Result<Vec<_>> = mpath.0.into_iter().map(MPathElement::from_thrift).collect();
         let elements = elements?;
 
         if elements.is_empty() {
@@ -990,7 +1004,7 @@ impl PrefixTrie {
                         true
                     }
                     Some(element) => {
-                        if let Some(child) = children.get_mut(&element) {
+                        if let Some(child) = children.get_mut(element) {
                             return child.add(iter);
                         }
                         children
@@ -1013,7 +1027,7 @@ impl PrefixTrie {
                 match iter.next() {
                     None => false,
                     Some(element) => {
-                        if let Some(child) = children.get(&element) {
+                        if let Some(child) = children.get(element) {
                             return child.contains_prefix(iter);
                         }
                         false
@@ -1083,7 +1097,7 @@ impl CaseConflictTrie {
         match iter.next() {
             None => Ok(()),
             Some(element) => {
-                if let Some(child) = self.children.get_mut(&element) {
+                if let Some(child) = self.children.get_mut(element) {
                     return child.add(iter).map_err(|mut e| {
                         e.elements.push(element.clone());
                         e
@@ -1102,7 +1116,7 @@ impl CaseConflictTrie {
 
                 self.children
                     .entry(element.clone())
-                    .or_insert(CaseConflictTrie::new())
+                    .or_insert_with(CaseConflictTrie::new)
                     .add(iter)
             }
         }
@@ -1116,12 +1130,12 @@ impl CaseConflictTrie {
         match iter.next() {
             None => true,
             Some(element) => {
-                let (found, remove) = match self.children.get_mut(&element) {
+                let (found, remove) = match self.children.get_mut(element) {
                     None => return false,
                     Some(child) => (child.remove(iter), child.is_empty()),
                 };
                 if remove {
-                    self.children.remove(&element);
+                    self.children.remove(element);
 
                     if let Some(lower) = element.to_lowercase_utf8() {
                         self.lowercase_to_original.remove(&lower);
@@ -1185,7 +1199,7 @@ impl<'a> CaseConflictTrieUpdate for &'a BonsaiChangeset {
                 }
             }
         }
-        return None;
+        None
     }
 }
 
@@ -1223,7 +1237,8 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use quickcheck::{quickcheck, TestResult};
+    use quickcheck::quickcheck;
+    use quickcheck::TestResult;
     use std::mem::size_of;
 
     #[test]
@@ -1256,7 +1271,7 @@ mod test {
         fn path_gen(p: MPath) -> bool {
             p.elements
                 .iter()
-                .map(|elem| MPathElement::verify(&elem.as_ref()))
+                .map(|elem| MPathElement::verify(elem.as_ref()))
                 .all(|res| res.is_ok())
         }
 
@@ -1369,10 +1384,7 @@ mod test {
         assert_eq!(foo.common_components(MPath::iter_opt(None)), 0);
 
         assert_eq!(foo_bar1.take_prefix_components(0).unwrap(), None);
-        assert_eq!(
-            foo_bar1.take_prefix_components(1).unwrap(),
-            Some(foo.clone())
-        );
+        assert_eq!(foo_bar1.take_prefix_components(1).unwrap(), Some(foo));
         assert_eq!(
             foo_bar1.take_prefix_components(2).unwrap(),
             Some(foo_bar1.clone())
@@ -1479,10 +1491,7 @@ mod test {
             MPath::new(mpath).unwrap()
         }
 
-        let mut trie: CaseConflictTrie = vec!["a/b/c", "a/d", "c/d/a"]
-            .into_iter()
-            .map(|p| m(p))
-            .collect();
+        let mut trie: CaseConflictTrie = vec!["a/b/c", "a/d", "c/d/a"].into_iter().map(m).collect();
 
         assert!(trie.add(&m("a/b/c")).is_ok());
         assert!(trie.add(&m("a/B/d")).is_err());
@@ -1571,5 +1580,37 @@ mod test {
         assert!(prefixes.contains_prefix(&path("a/b/c")));
         assert!(prefixes.contains_prefix(&path("x/y/z")));
         assert!(prefixes.contains_everything());
+    }
+
+    #[test]
+    fn has_suffix_suffix() {
+        let path = |path| MPath::new(path).unwrap();
+
+        // Assert that when the suffix equals the basename the result is
+        // correct.
+        assert!(&path("a/b/foo.bar").basename().has_suffix(b"foo.bar"));
+
+        // Assert that when the suffix contains is not the basename, the result
+        // is correct.
+        assert!(!&path("a/b/c").basename().has_suffix(b"b"));
+
+        // Assert when the potential suffix is a suffix the result is correct.
+        assert!(&path("a/b/c.bar").basename().has_suffix(b"r"));
+        assert!(&path("a/b/c.bar").basename().has_suffix(b"bar"));
+        assert!(&path("a/b/c.bar").basename().has_suffix(b".bar"));
+        assert!(&path("a/b/c.bar").basename().has_suffix(b"c.bar"));
+
+        // Assert when the potential suffix is not a suffix the result is
+        // correct.
+        assert!(!&path("a/b/file.bar").basename().has_suffix(b".baz"));
+        assert!(!&path("a/b/file.bar").basename().has_suffix(b"baz"));
+        assert!(!&path("a/b/c.bar").basename().has_suffix(b"c.baz"));
+
+        // Test case when potential suffix is longer than entire path.
+        assert!(
+            !&path("a/b/foo.bar")
+                .basename()
+                .has_suffix(b"file.very_very_very_long_extension")
+        );
     }
 }

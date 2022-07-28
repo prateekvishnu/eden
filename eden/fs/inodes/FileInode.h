@@ -7,7 +7,6 @@
 
 #pragma once
 #include <folly/Synchronized.h>
-#include <folly/futures/Future.h>
 #include <folly/futures/SharedPromise.h>
 #include <chrono>
 #include <optional>
@@ -15,6 +14,7 @@
 #include "eden/fs/inodes/InodeBase.h"
 #include "eden/fs/model/BlobMetadata.h"
 #include "eden/fs/model/Tree.h"
+#include "eden/fs/service/gen-cpp2/eden_types.h"
 #include "eden/fs/store/BlobCache.h"
 #include "eden/fs/store/IObjectStore.h"
 #include "eden/fs/store/ImportPriority.h"
@@ -162,12 +162,12 @@ class FileInode final : public InodeBaseMetadata<FileInodeState> {
       const InodeTimestamps& initialTimestamps);
 
 #ifndef _WIN32
-  folly::Future<struct stat> setattr(
+  ImmediateFuture<struct stat> setattr(
       const DesiredMetadata& desired,
       ObjectFetchContext& fetchContext) override;
 
   /// Throws InodeError EINVAL if inode is not a symbolic node.
-  folly::Future<std::string> readlink(
+  ImmediateFuture<std::string> readlink(
       ObjectFetchContext& fetchContext,
       CacheHint cacheHint = CacheHint::LikelyNeededAgain);
 
@@ -228,6 +228,7 @@ class FileInode final : public InodeBaseMetadata<FileInodeState> {
 #endif // !_WIN32
 
   void forceMetadataUpdate() override;
+
   /**
    * If this file is backed by a source control Blob, return the hash of the
    * Blob, or return std::nullopt if this file is materialized in the overlay.
@@ -245,7 +246,7 @@ class FileInode final : public InodeBaseMetadata<FileInodeState> {
    *
    * Note that this API generally should only be used for fairly small files.
    */
-  FOLLY_NODISCARD folly::Future<std::string> readAll(
+  FOLLY_NODISCARD ImmediateFuture<std::string> readAll(
       ObjectFetchContext& fetchContext,
       CacheHint cacheHint = CacheHint::LikelyNeededAgain);
 
@@ -268,18 +269,22 @@ class FileInode final : public InodeBaseMetadata<FileInodeState> {
    *
    * May throw exceptions on error.
    */
-  folly::Future<std::tuple<BufVec, bool>>
+  ImmediateFuture<std::tuple<BufVec, bool>>
   read(size_t size, off_t off, ObjectFetchContext& context);
 
-  folly::Future<size_t>
+  ImmediateFuture<size_t>
   write(BufVec&& buf, off_t off, ObjectFetchContext& fetchContext);
-  folly::Future<size_t>
+  ImmediateFuture<size_t>
   write(folly::StringPiece data, off_t off, ObjectFetchContext& fetchContext);
 
   void fsync(bool datasync);
 
-  FOLLY_NODISCARD folly::Future<folly::Unit>
+  FOLLY_NODISCARD ImmediateFuture<folly::Unit>
   fallocate(uint64_t offset, uint64_t length, ObjectFetchContext& fetchContext);
+
+  ImmediateFuture<folly::Unit> ensureMaterialized(
+      ObjectFetchContext& fetchContext,
+      bool followSymlink) override;
 
 #endif // !_WIN32
 
@@ -299,10 +304,12 @@ class FileInode final : public InodeBaseMetadata<FileInodeState> {
    *
    * The blob parameter is used when recursing.
    *
-   * Returns a Future with the result of fn(state_.wlock(), blob)
+   * Returns an ImmediateFuture with the result of fn(state_.wlock(), blob)
    */
-  template <typename ReturnType, typename Fn>
-  ReturnType runWhileDataLoaded(
+  template <typename Fn>
+  ImmediateFuture<
+      std::invoke_result_t<Fn, LockedState&&, std::shared_ptr<const Blob>>>
+  runWhileDataLoaded(
       LockedState state,
       BlobCache::Interest interest,
       ObjectFetchContext& fetchContext,
@@ -315,15 +322,16 @@ class FileInode final : public InodeBaseMetadata<FileInodeState> {
    *
    * fn(state) will be invoked when state->tag is MATERIALIZED_IN_OVERLAY.
    *
-   * Returns a Future with the result of fn(state_.wlock())
+   * Returns an ImmediateFuture with the result of fn(state_.wlock())
    */
   template <typename Fn>
-  typename folly::futures::detail::callableResult<LockedState, Fn>::Return
-  runWhileMaterialized(
+  ImmediateFuture<std::invoke_result_t<Fn, LockedState&&>> runWhileMaterialized(
       LockedState state,
       std::shared_ptr<const Blob> blob,
       Fn&& fn,
-      ObjectFetchContext& fetchContext);
+      ObjectFetchContext& fetchContext,
+      std::optional<std::chrono::system_clock::time_point> startTime =
+          std::nullopt);
 
   /**
    * Truncate the file and then call a function.
@@ -336,7 +344,7 @@ class FileInode final : public InodeBaseMetadata<FileInodeState> {
    * Returns the result of fn(state_.wlock())
    */
   template <typename Fn>
-  typename std::result_of<Fn(LockedState&&)>::type truncateAndRun(
+  typename std::invoke_result_t<Fn, LockedState&&> truncateAndRun(
       LockedState state,
       Fn&& fn);
 
@@ -351,7 +359,7 @@ class FileInode final : public InodeBaseMetadata<FileInodeState> {
    * runWhileMaterialized().  Most other callers should use
    * runWhileDataLoaded() or runWhileMaterialized() instead.
    */
-  FOLLY_NODISCARD folly::Future<std::shared_ptr<const Blob>> startLoadingData(
+  FOLLY_NODISCARD ImmediateFuture<std::shared_ptr<const Blob>> startLoadingData(
       LockedState state,
       BlobCache::Interest interest,
       ObjectFetchContext& fetchContext);
@@ -434,11 +442,6 @@ class FileInode final : public InodeBaseMetadata<FileInodeState> {
   ImmediateFuture<bool> isSameAsSlow(
       const Hash20& expectedBlobSha1,
       ObjectFetchContext& fetchContext);
-
-  /**
-   * Get the ObjectStore used by this FileInode to load non-materialized data.
-   */
-  ObjectStore* getObjectStore() const;
 
 #ifndef _WIN32
   /**

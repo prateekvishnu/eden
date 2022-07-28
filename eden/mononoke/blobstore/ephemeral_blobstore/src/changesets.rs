@@ -5,21 +5,30 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{bail, Result};
+use anyhow::bail;
+use anyhow::Result;
 use async_trait::async_trait;
 use blobstore::Loadable;
-use changesets::{ChangesetEntry, ChangesetInsert, Changesets, SortOrder};
+use changesets::ChangesetEntry;
+use changesets::ChangesetInsert;
+use changesets::Changesets;
+use changesets::SortOrder;
 use context::CoreContext;
 use derivative::Derivative;
-use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
+use futures::stream;
+use futures::stream::BoxStream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use futures::try_join;
 use itertools::Itertools;
-use mononoke_types::{
-    ChangesetId, ChangesetIdPrefix, ChangesetIdsResolvedFromPrefix, RepositoryId,
-};
+use mononoke_types::ChangesetId;
+use mononoke_types::ChangesetIdPrefix;
+use mononoke_types::ChangesetIdsResolvedFromPrefix;
+use mononoke_types::RepositoryId;
 use repo_blobstore::RepoBlobstore;
 use sorted_vector_map::SortedVectorMap;
-use sql::{queries, Connection};
+use sql::queries;
+use sql::Connection;
 use sql_ext::SqlConnections;
 
 use std::sync::Arc;
@@ -86,7 +95,7 @@ impl EphemeralChangesets {
         cs_ids: &[ChangesetId],
         connection: &Connection,
     ) -> Result<Vec<(ChangesetId, u64)>> {
-        Ok(SelectChangesets::query(connection, &self.repo_id, &self.bubble_id, &cs_ids).await?)
+        SelectChangesets::query(connection, &self.repo_id, &self.bubble_id, cs_ids).await
     }
 
     pub async fn fetch_gens(
@@ -122,12 +131,12 @@ impl EphemeralChangesets {
         ctx: &CoreContext,
         cs_ids: &[ChangesetId],
     ) -> Result<Vec<ChangesetEntry>> {
-        let gens = self.fetch_gens(&cs_ids).await?;
+        let gens = self.fetch_gens(cs_ids).await?;
         let changesets: Vec<_> = stream::iter(
             cs_ids
                 .iter()
                 .filter(|id| gens.get(id).is_some())
-                .map(|id| id.load(&ctx, &self.repo_blobstore))
+                .map(|id| id.load(ctx, &self.repo_blobstore))
                 .collect::<Vec<_>>(), // without this we get compile errors
         )
         .buffered(100)

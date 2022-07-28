@@ -27,7 +27,7 @@ import tempfile
 import time
 import traceback
 from enum import IntEnum
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union
 
 import bindings
 from edenscm import tracing
@@ -877,7 +877,7 @@ class ui(object):
         self.flush()
 
         # This will start the pager using the system terminal immediately.
-        util.mainio.start_pager(self._rcfg._rcfg)
+        util.mainio.start_pager(self._rcfg)
 
         # The Rust pager wants utf-8 unconditionally.
         encoding.outputencoding = "utf-8"

@@ -7,29 +7,20 @@
 
 //! Arguments for repository selection.
 
-use clap::{App, Arg, ArgMatches};
 use source_control::types as thrift;
 
-const ARG_REPO: &str = "REPO";
-
-/// Add arguments for specifying a repository.
-pub(crate) fn add_repo_args<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
-    app.arg(
-        Arg::with_name(ARG_REPO)
-            .short("R")
-            .long("repo")
-            .help("Repository name")
-            .takes_value(true)
-            .required(true),
-    )
+#[derive(clap::Args, Clone)]
+pub(crate) struct RepoArgs {
+    #[clap(long, short = 'R')]
+    /// Repository name
+    repo: String,
 }
 
-/// Get the specified repository as a thrift specifier.
-pub(crate) fn get_repo_specifier(matches: &ArgMatches) -> Option<thrift::RepoSpecifier> {
-    matches
-        .value_of(ARG_REPO)
-        .map(|name| thrift::RepoSpecifier {
-            name: name.to_string(),
+impl RepoArgs {
+    pub fn into_repo_specifier(self) -> thrift::RepoSpecifier {
+        thrift::RepoSpecifier {
+            name: self.repo,
             ..Default::default()
-        })
+        }
+    }
 }

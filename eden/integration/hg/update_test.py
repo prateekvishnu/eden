@@ -16,11 +16,13 @@ from typing import Dict, List, Optional, Set
 from eden.fs.cli import util
 from eden.integration.hg.lib.hg_extension_test_base import EdenHgTestCase, hg_test
 from eden.integration.lib import hgrepo
+from facebook.eden.constants import DIS_ENABLE_FLAGS
 from facebook.eden.ttypes import (
     EdenError,
     EdenErrorType,
     FaultDefinition,
     GetScmStatusParams,
+    SyncBehavior,
     UnblockFaultArg,
 )
 
@@ -43,6 +45,11 @@ class UpdateTest(EdenHgTestCase):
             "eden.fs.inodes.CheckoutAction": "DBG5",
             "eden.fs.inodes.CheckoutContext": "DBG5",
         }
+
+    def edenfs_extra_config(self) -> Optional[Dict[str, List[str]]]:
+        result = super().edenfs_extra_config() or {}
+        result.setdefault("experimental", []).append("allow-resume-checkout = true")
+        return result
 
     def populate_backing_repo(self, repo: hgrepo.HgRepository) -> None:
         repo.write_file("hello.txt", "hola")
@@ -463,11 +470,6 @@ class UpdateTest(EdenHgTestCase):
             p1.join()
             p2.join()
 
-    @unittest.skipIf(
-        "SANDCASTLE" in os.environ,
-        "This test seems to leave behind unkillable processes "
-        "on sandcastle.  Disable it for now.",
-    )
     def test_dir_locking(self) -> None:
         """
         Test performing checkouts that modify the directory foo/ while other
@@ -638,6 +640,37 @@ class UpdateTest(EdenHgTestCase):
         dir2listing = os.listdir(os.path.join(self.repo.path, "dir2"))
         self.assertEqual({"FILE1"}, set(dir2listing))
 
+    def test_change_casing_with_untracked(self) -> None:
+        self.repo.update(self.commit1)
+        self.repo.write_file("DIR2/FILE1", "one upper")
+        upper = self.repo.commit("Upper")
+
+        self.repo.remove_file("DIR2/FILE1")
+        self.repo.commit("Removed")
+
+        self.repo.write_file("dir2/file1", "one lower")
+        self.repo.commit("Lower")
+
+        self.repo.write_file("dir2/untracked", "untracked")
+
+        self.repo.update(upper)
+
+        # On Windows, due to the untracked file, the casing of the directory
+        # stays lower case, hence we do not expect "DIR2" to be present in the
+        # working copy.
+        dirname = "dir2" if sys.platform == "win32" else "DIR2"
+        self.assertIn(dirname, set(os.listdir(self.repo.path)))
+
+        if sys.platform == "win32":
+            self.assertEqual(
+                {"untracked", "FILE1"},
+                set(os.listdir(os.path.join(self.repo.path, "DIR2"))),
+            )
+            self.assertEqual(self.read_file("DIR2/untracked"), "untracked")
+
+        untrackedPath = "dir2/untracked"
+        self.assert_status({untrackedPath: "?"})
+
     def test_update_to_null_with_untracked_directory(self) -> None:
         self.mkdir("foo/subdir/bar")
         self.repo.update("null")
@@ -672,6 +705,82 @@ class UpdateTest(EdenHgTestCase):
         self.repo.update(self.commit3)
         self.read_dir("foo/subdir")
         self.repo.update(commit4)
+
+    def test_resume_interrupted_update(self) -> None:
+        """
+        Test resuming a hg checkout after Eden was killed mid-checkout
+        previously.
+        """
+        self.backing_repo.write_file("dir1/foo.txt", "Content 1")
+        self.backing_repo.write_file("dir2/bar.txt", "Content 1")
+        self.backing_repo.write_file("dir3/dog.txt", "Content 1")
+        bottom = self.backing_repo.commit("Add")
+        self.backing_repo.write_file("dir1/foo.txt", "Content 2")
+        self.backing_repo.write_file("dir2/bar.txt", "Content 2")
+        self.backing_repo.write_file("dir3/dog.txt", "Content 2")
+        middle = self.backing_repo.commit("Edit")
+        self.backing_repo.write_file("dir1/foo.txt", "Content 3")
+        self.backing_repo.write_file("dir2/bar.txt", "Content 3")
+        self.backing_repo.write_file("dir3/dog.txt", "Content 3")
+        top = self.backing_repo.commit("Edit again")
+        self.repo.update(top)
+
+        # Do no-op write to trigger materialization of dir2. This will force the
+        # checkout to process that inode, allowing us to hit the kill fault.
+        # At that point, dir1 will have been processed and be pointing to
+        # `bottom` while dir2 and dir3 won't have been processed, and be
+        # pointing at top still. After we recover, we'll verify that dir2 and
+        # dir3 were not materialized during the resumed checkout.
+        self.repo.write_file("dir2/bar.txt", "Content 3")
+
+        self.maxDiff = None
+        with self.eden.get_thrift_client_legacy() as client:
+            client.injectFault(
+                FaultDefinition(
+                    keyClass="TreeInode::checkout",
+                    keyValueRegex="dir2, 0",
+                    kill=True,
+                )
+            )
+
+            try:
+                self.repo.update(bottom)
+            except Exception:
+                pass
+            else:
+                self.fail("'hg update' should've failed if eden crashes")
+
+        # Restart eden
+        if self.eden._process is not None:
+            self.eden._process.wait()
+        self.eden = self.init_eden_client()
+        self.eden.start()
+
+        try:
+            self.repo.update(middle)
+        except hgrepo.HgError as ex:
+            self.assertIn(
+                "a previous checkout was interrupted - please 'hg checkout", str(ex)
+            )
+        else:
+            self.fail(
+                "'hg update' should've failed if eden previously crashed during checkout"
+            )
+
+        output = self.repo.update(bottom, clean=True)
+        self.assertEqual("update complete\n", output)
+
+        with self.eden.get_thrift_client_legacy() as client:
+            inode_status = client.debugInodeStatus(
+                self.repo.path.encode("utf8"),
+                b"",
+                flags=DIS_ENABLE_FLAGS,
+                sync=SyncBehavior(),
+            )
+            inodes = dict((i.path.decode("utf8"), i) for i in inode_status)
+            self.assertNotIn("dir1", inodes)
+            self.assertFalse(inodes["dir2"].materialized)
+            self.assertNotIn("dir3", inodes)
 
 
 @hg_test

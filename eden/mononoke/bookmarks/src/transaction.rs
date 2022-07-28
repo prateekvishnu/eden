@@ -7,7 +7,8 @@
 
 use std::sync::Arc;
 
-use anyhow::{Error, Result};
+use anyhow::Error;
+use anyhow::Result;
 use bookmarks_types::BookmarkName;
 use context::CoreContext;
 use futures::future::BoxFuture;
@@ -15,7 +16,7 @@ use mononoke_types::ChangesetId;
 use sql::Transaction;
 use thiserror::Error;
 
-use crate::log::{BookmarkUpdateReason, BundleReplay};
+use crate::log::BookmarkUpdateReason;
 
 #[derive(Debug, Error)]
 pub enum BookmarkTransactionError {
@@ -52,7 +53,6 @@ pub trait BookmarkTransaction: Send + Sync + 'static {
         new_cs: ChangesetId,
         old_cs: ChangesetId,
         reason: BookmarkUpdateReason,
-        bundle_replay: Option<&dyn BundleReplay>,
     ) -> Result<()>;
 
     /// Adds create() operation to the transaction set.
@@ -63,7 +63,6 @@ pub trait BookmarkTransaction: Send + Sync + 'static {
         bookmark: &BookmarkName,
         new_cs: ChangesetId,
         reason: BookmarkUpdateReason,
-        bundle_replay: Option<&dyn BundleReplay>,
     ) -> Result<()>;
 
     /// Adds force_set() operation to the transaction set.
@@ -74,7 +73,6 @@ pub trait BookmarkTransaction: Send + Sync + 'static {
         bookmark: &BookmarkName,
         new_cs: ChangesetId,
         reason: BookmarkUpdateReason,
-        bundle_replay: Option<&dyn BundleReplay>,
     ) -> Result<()>;
 
     /// Adds delete operation to the transaction set.
@@ -84,17 +82,12 @@ pub trait BookmarkTransaction: Send + Sync + 'static {
         bookmark: &BookmarkName,
         old_cs: ChangesetId,
         reason: BookmarkUpdateReason,
-        bundle_replay: Option<&dyn BundleReplay>,
     ) -> Result<()>;
 
     /// Adds force_delete operation to the transaction set.
     /// Deletes bookmark unconditionally.
-    fn force_delete(
-        &mut self,
-        bookmark: &BookmarkName,
-        reason: BookmarkUpdateReason,
-        bundle_replay: Option<&dyn BundleReplay>,
-    ) -> Result<()>;
+    fn force_delete(&mut self, bookmark: &BookmarkName, reason: BookmarkUpdateReason)
+    -> Result<()>;
 
     /// Adds a scratch bookmark update operation to the transaction set.
     /// Updates the changeset referenced by the bookmark, if it is already a scratch bookmark.
@@ -120,7 +113,6 @@ pub trait BookmarkTransaction: Send + Sync + 'static {
         bookmark: &BookmarkName,
         new_cs: ChangesetId,
         reason: BookmarkUpdateReason,
-        bundle_replay: Option<&dyn BundleReplay>,
     ) -> Result<()>;
 
     /// Commits the transaction. Future succeeds if transaction has been

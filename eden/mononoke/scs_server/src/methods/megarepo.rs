@@ -6,19 +6,25 @@
  */
 
 use crate::from_request::FromRequest;
-use anyhow::{anyhow, Result};
-use async_requests::tokens::{
-    MegarepoAddBranchingTargetToken, MegarepoAddTargetToken, MegarepoChangeTargetConfigToken,
-    MegarepoRemergeSourceToken, MegarepoSyncChangesetToken,
-};
-use async_requests::types::{ThriftParams, Token};
+use anyhow::anyhow;
+use anyhow::Result;
+use async_requests::tokens::MegarepoAddBranchingTargetToken;
+use async_requests::tokens::MegarepoAddTargetToken;
+use async_requests::tokens::MegarepoChangeTargetConfigToken;
+use async_requests::tokens::MegarepoRemergeSourceToken;
+use async_requests::tokens::MegarepoSyncChangesetToken;
+use async_requests::types::ThriftParams;
+use async_requests::types::Token;
 use context::CoreContext;
 use megarepo_config::SyncTargetConfig;
 use mononoke_api::ChangesetSpecifier;
+use mononoke_api::MononokeError;
 use mononoke_types::RepositoryId;
+use repo_authorization::RepoWriteOperation;
 use slog::warn;
 use source_control as thrift;
-use std::{collections::HashSet, time::Duration};
+use std::collections::HashSet;
+use std::time::Duration;
 
 use crate::errors;
 use crate::source_control_impl::SourceControlServiceImpl;
@@ -60,9 +66,21 @@ impl SourceControlServiceImpl {
             .repo_by_id(ctx.clone(), target_repo_id)
             .await
             .map_err(errors::invalid_request)?
-            .ok_or_else(|| errors::invalid_request(anyhow!("repo not found {}", target_repo_id)))?;
+            .ok_or_else(|| errors::invalid_request(anyhow!("repo not found {}", target_repo_id)))?
+            .build()
+            .await?;
+        // Check that source control service writes are enabled
+        target_repo.start_write()?;
         // Check that we are allowed to write to the target repo
-        target_repo.write().await?;
+        target_repo
+            .authorization_context()
+            .require_repo_write(
+                ctx,
+                target_repo.inner_repo(),
+                RepoWriteOperation::MegarepoSync,
+            )
+            .await
+            .map_err(MononokeError::from)?;
         Ok(())
     }
 

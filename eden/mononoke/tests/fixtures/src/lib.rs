@@ -7,30 +7,39 @@
 
 use anyhow::Error;
 use async_trait::async_trait;
-use blobrepo::{save_bonsai_changesets, BlobRepo};
-use bookmarks::{BookmarkName, BookmarkUpdateReason};
+use blobrepo::BlobRepo;
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
 use borrowed::borrowed;
 use bytes::Bytes;
 use context::CoreContext;
 use fbinit::FacebookInit;
 use filestore::StoreRequest;
-use futures::{future::try_join_all, stream};
+use futures::future::try_join_all;
+use futures::stream;
 use maplit::btreemap;
-use mercurial_derived_data::DeriveHgChangeset;
-use mercurial_types::{HgChangesetId, MPath};
+use mercurial_derived_data::MappedHgChangesetId;
+use mercurial_types::HgChangesetId;
+use mercurial_types::MPath;
 use mononoke_api_types::InnerRepo;
-use mononoke_types::{
-    BonsaiChangeset, BonsaiChangesetMut, ChangesetId, DateTime, FileChange, FileType, RepositoryId,
-};
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::BonsaiChangesetMut;
+use mononoke_types::ChangesetId;
+use mononoke_types::DateTime;
+use mononoke_types::FileChange;
+use mononoke_types::FileType;
+use mononoke_types::RepositoryId;
 use sorted_vector_map::SortedVectorMap;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use test_repo_factory::TestRepoFactory;
+use tests_utils::BasicTestRepo;
+use tests_utils::Repo;
 
 pub async fn store_files(
     ctx: &CoreContext,
     files: BTreeMap<&str, Option<&str>>,
-    repo: &BlobRepo,
+    repo: &impl Repo,
 ) -> SortedVectorMap<MPath, FileChange> {
     let mut res = BTreeMap::new();
 
@@ -41,8 +50,8 @@ pub async fn store_files(
                 let content = Bytes::copy_from_slice(content.as_bytes());
                 let size = content.len() as u64;
                 let metadata = filestore::store(
-                    repo.blobstore(),
-                    repo.filestore_config(),
+                    repo.repo_blobstore(),
+                    *repo.filestore_config(),
                     ctx,
                     &StoreRequest::new(size),
                     stream::once(async { Ok(content) }),
@@ -63,23 +72,23 @@ pub async fn store_files(
 
 async fn create_bonsai_changeset_from_test_data(
     fb: FacebookInit,
-    blobrepo: BlobRepo,
+    blobrepo: &impl Repo,
     files: BTreeMap<&str, Option<&str>>,
     commit_metadata: BTreeMap<&str, &str>,
 ) {
     let ctx = CoreContext::test_mock(fb);
-    let file_changes = store_files(&ctx, files, &blobrepo).await;
+    let file_changes = store_files(&ctx, files, blobrepo).await;
     let date: Vec<_> = commit_metadata
         .get("author_date")
         .unwrap()
-        .split(" ")
+        .split(' ')
         .map(|s| s.parse::<i64>().unwrap())
         .collect();
 
     let parents = commit_metadata
         .get("parents")
         .unwrap()
-        .split(" ")
+        .split(' ')
         .filter(|s| !s.is_empty())
         .map(|s| HgChangesetId::from_str(s).unwrap())
         .map(|p| {
@@ -111,11 +120,17 @@ async fn create_bonsai_changeset_from_test_data(
     .unwrap();
 
     let bcs_id = bcs.get_changeset_id();
-    save_bonsai_changesets(vec![bcs], ctx.clone(), &blobrepo)
+
+    changesets_creation::save_changesets(&ctx, blobrepo, vec![bcs])
         .await
         .unwrap();
 
-    let hg_cs = blobrepo.derive_hg_changeset(&ctx, bcs_id).await.unwrap();
+    let hg_cs = blobrepo
+        .repo_derived_data()
+        .derive::<MappedHgChangesetId>(&ctx, bcs_id)
+        .await
+        .map(|id| id.hg_changeset_id())
+        .unwrap();
 
     assert_eq!(
         hg_cs,
@@ -125,7 +140,7 @@ async fn create_bonsai_changeset_from_test_data(
 
 pub async fn set_bookmark(
     fb: FacebookInit,
-    blobrepo: BlobRepo,
+    blobrepo: &impl Repo,
     hg_cs_id: &str,
     bookmark: BookmarkName,
 ) {
@@ -136,14 +151,9 @@ pub async fn set_bookmark(
         .get_bonsai_from_hg(&ctx, hg_cs_id)
         .await
         .unwrap();
-    let mut txn = blobrepo.update_bookmark_transaction(ctx.clone());
-    txn.force_set(
-        &bookmark,
-        bcs_id.unwrap(),
-        BookmarkUpdateReason::TestMove,
-        None,
-    )
-    .unwrap();
+    let mut txn = blobrepo.bookmarks().create_transaction(ctx.clone());
+    txn.force_set(&bookmark, bcs_id.unwrap(), BookmarkUpdateReason::TestMove)
+        .unwrap();
     txn.commit().await.unwrap();
 }
 
@@ -151,8 +161,21 @@ pub async fn set_bookmark(
 pub trait TestRepoFixture {
     const REPO_NAME: &'static str;
 
-    async fn initrepo(fb: FacebookInit, blobrepo: &BlobRepo);
+    async fn initrepo(fb: FacebookInit, blobrepo: &impl Repo);
 
+    async fn get_test_repo(fb: FacebookInit) -> BasicTestRepo {
+        let repo: BasicTestRepo = TestRepoFactory::new(fb)
+            .unwrap()
+            .with_id(RepositoryId::new(0))
+            .with_name(Self::REPO_NAME.to_string())
+            .build()
+            .unwrap();
+        Self::initrepo(fb, &repo).await;
+        repo
+    }
+
+    // This method should be considered as deprecated. For new tests, please use `get_test_repo`
+    // instead.
     async fn getrepo(fb: FacebookInit) -> BlobRepo {
         Self::get_inner_repo(fb).await.blob_repo
     }
@@ -183,7 +206,7 @@ pub struct Linear;
 impl TestRepoFixture for Linear {
     const REPO_NAME: &'static str = "linear";
 
-    async fn initrepo(fb: FacebookInit, blobrepo: &BlobRepo) {
+    async fn initrepo(fb: FacebookInit, blobrepo: &impl Repo) {
         // The code below was partially autogenerated using generate_new_fixtures.par
         let files = btreemap! {
             "1" => Some("1\n"),
@@ -342,7 +365,7 @@ pub struct BranchEven;
 impl TestRepoFixture for BranchEven {
     const REPO_NAME: &'static str = "branch_even";
 
-    async fn initrepo(fb: FacebookInit, blobrepo: &BlobRepo) {
+    async fn initrepo(fb: FacebookInit, blobrepo: &impl Repo) {
         // The code below was partially autogenerated using generate_new_fixtures.par
         let files = btreemap! {
             "base" => Some("base\n"),
@@ -443,7 +466,7 @@ pub struct BranchUneven;
 impl TestRepoFixture for BranchUneven {
     const REPO_NAME: &'static str = "branch_uneven";
 
-    async fn initrepo(fb: FacebookInit, blobrepo: &BlobRepo) {
+    async fn initrepo(fb: FacebookInit, blobrepo: &impl Repo) {
         // The code below was partially autogenerated using generate_new_fixtures.par
         let files = btreemap! {
             "base" => Some("base\n"),
@@ -604,7 +627,7 @@ pub struct BranchWide;
 impl TestRepoFixture for BranchWide {
     const REPO_NAME: &'static str = "branch_wide";
 
-    async fn initrepo(fb: FacebookInit, blobrepo: &BlobRepo) {
+    async fn initrepo(fb: FacebookInit, blobrepo: &impl Repo) {
         // The code below was partially autogenerated using generate_new_fixtures.par
         let files = btreemap! {
             "1" => Some("1\n"),
@@ -705,7 +728,7 @@ pub struct MergeEven;
 impl TestRepoFixture for MergeEven {
     const REPO_NAME: &'static str = "merge_even";
 
-    async fn initrepo(fb: FacebookInit, blobrepo: &BlobRepo) {
+    async fn initrepo(fb: FacebookInit, blobrepo: &impl Repo) {
         // The code below was partially autogenerated using generate_new_fixtures.par
 
         // Common commit
@@ -826,7 +849,7 @@ pub struct ManyFilesDirs;
 impl TestRepoFixture for ManyFilesDirs {
     const REPO_NAME: &'static str = "many_files_dirs";
 
-    async fn initrepo(fb: FacebookInit, blobrepo: &BlobRepo) {
+    async fn initrepo(fb: FacebookInit, blobrepo: &impl Repo) {
         // The code below was partially autogenerated using generate_new_fixtures.par
         let files = btreemap! {
             "1" => Some("1\n"),
@@ -916,7 +939,7 @@ pub struct MergeUneven;
 impl TestRepoFixture for MergeUneven {
     const REPO_NAME: &'static str = "merge_uneven";
 
-    async fn initrepo(fb: FacebookInit, blobrepo: &BlobRepo) {
+    async fn initrepo(fb: FacebookInit, blobrepo: &impl Repo) {
         // The code below was partially autogenerated using generate_new_fixtures.par
 
         // Common commit
@@ -1102,7 +1125,7 @@ pub struct UnsharedMergeEven;
 impl TestRepoFixture for UnsharedMergeEven {
     const REPO_NAME: &'static str = "unshared_merge_even";
 
-    async fn initrepo(fb: FacebookInit, blobrepo: &BlobRepo) {
+    async fn initrepo(fb: FacebookInit, blobrepo: &impl Repo) {
         // The code below was partially autogenerated using generate_new_fixtures.par
         let files = btreemap! {
             "side" => Some("1\n"),
@@ -1286,7 +1309,7 @@ pub struct UnsharedMergeUneven;
 impl TestRepoFixture for UnsharedMergeUneven {
     const REPO_NAME: &'static str = "unshared_merge_uneven";
 
-    async fn initrepo(fb: FacebookInit, blobrepo: &BlobRepo) {
+    async fn initrepo(fb: FacebookInit, blobrepo: &impl Repo) {
         // The code below was partially autogenerated using generate_new_fixtures.par
         let files = btreemap! {
             "side" => Some("1\n"),
@@ -1530,8 +1553,8 @@ impl TestRepoFixture for UnsharedMergeUneven {
 }
 
 pub async fn save_diamond_commits(
-    ctx: CoreContext,
-    repo: BlobRepo,
+    ctx: &CoreContext,
+    repo: &impl Repo,
     parents: Vec<ChangesetId>,
 ) -> Result<ChangesetId, Error> {
     let first_bcs = create_bonsai_changeset(parents);
@@ -1547,10 +1570,10 @@ pub async fn save_diamond_commits(
     let fourth_bcs = create_bonsai_changeset(vec![second_bcs_id, third_bcs_id]);
     let fourth_bcs_id = fourth_bcs.get_changeset_id();
 
-    blobrepo::save_bonsai_changesets(
+    changesets_creation::save_changesets(
+        ctx,
+        repo,
         vec![first_bcs, second_bcs, third_bcs, fourth_bcs],
-        ctx.clone(),
-        &repo,
     )
     .await
     .map(move |()| fourth_bcs_id)
@@ -1616,28 +1639,25 @@ pub struct ManyDiamonds;
 impl TestRepoFixture for ManyDiamonds {
     const REPO_NAME: &'static str = "many_diamonds";
 
-    async fn initrepo(fb: FacebookInit, repo: &BlobRepo) {
+    async fn initrepo(fb: FacebookInit, repo: &impl Repo) {
         let ctx = CoreContext::test_mock(fb);
 
-        let mut last_bcs_id = save_diamond_commits(ctx.clone(), repo.clone(), vec![])
-            .await
-            .unwrap();
+        let mut last_bcs_id = save_diamond_commits(&ctx, repo, vec![]).await.unwrap();
 
         let diamond_stack_size = 50u8;
         for _ in 1..diamond_stack_size {
-            let new_bcs_id = save_diamond_commits(ctx.clone(), repo.clone(), vec![last_bcs_id])
+            let new_bcs_id = save_diamond_commits(&ctx, repo, vec![last_bcs_id])
                 .await
                 .unwrap();
             last_bcs_id = new_bcs_id;
         }
 
         let ctx = CoreContext::test_mock(fb);
-        let mut txn = repo.update_bookmark_transaction(ctx.clone());
+        let mut txn = repo.bookmarks().create_transaction(ctx.clone());
         txn.force_set(
             &BookmarkName::new("master").unwrap(),
             last_bcs_id,
             BookmarkUpdateReason::TestMove,
-            None,
         )
         .unwrap();
         txn.commit().await.unwrap();

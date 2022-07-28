@@ -11,19 +11,26 @@
 use std::cmp;
 use std::mem;
 
-use anyhow::{bail, format_err, Context, Error, Result};
+use anyhow::bail;
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use bytes_old::BytesMut;
 use slog::Logger;
 use std::str::FromStr;
 use tokio_io::codec::Decoder;
 
-use mercurial_types::{MPath, RevFlags};
+use mercurial_types::MPath;
+use mercurial_types::RevFlags;
 
 use crate::delta;
 use crate::errors::ErrorKind;
 use crate::utils::BytesExt;
 
-use super::{CgDeltaChunk, Part, Section};
+use super::CgDeltaChunk;
+use super::Part;
+use super::Section;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum CgVersion {
@@ -79,9 +86,9 @@ impl Part {
     ///
     /// When self does not contain a Section.
     pub fn section(&self) -> &Section {
-        match self {
-            &Part::CgChunk(ref section, _) => section,
-            &Part::SectionEnd(ref section) => section,
+        match *self {
+            Part::CgChunk(ref section, _) => section,
+            Part::SectionEnd(ref section) => section,
             _ => panic!("this Part does not contain a Section"),
         }
     }
@@ -289,14 +296,14 @@ impl CgUnpacker {
             CgVersion::Cg3Version => {
                 let bits = buf.drain_u16();
                 let flags = RevFlags::from_bits(bits)
-                    .ok_or(format_err!("unknown revlog flags: {}", bits))?;
+                    .ok_or_else(|| format_err!("unknown revlog flags: {}", bits))?;
                 Some(flags)
             }
         };
 
         let delta = delta::decode_delta(buf.split_to(chunk_len - Self::chunk_header_len(version)))?;
 
-        return Ok(Some(CgChunk::Delta(CgDeltaChunk {
+        Ok(Some(CgChunk::Delta(CgDeltaChunk {
             node,
             p1,
             p2,
@@ -304,7 +311,7 @@ impl CgUnpacker {
             linknode,
             delta,
             flags,
-        })));
+        })))
     }
 
     fn decode_filename(buf: &mut BytesMut) -> Result<DecodeRes<MPath>> {

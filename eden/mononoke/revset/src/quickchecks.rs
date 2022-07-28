@@ -32,12 +32,21 @@ mod test {
     use cloned::cloned;
     use context::CoreContext;
     use fbinit::FacebookInit;
-    use futures::{compat::Stream01CompatExt, stream::StreamExt as _, TryStreamExt};
-    use futures_ext::{BoxFuture, BoxStream, StreamExt};
-    use futures_old::{future::ok, Stream};
+    use futures::compat::Stream01CompatExt;
+    use futures::stream::StreamExt as _;
+    use futures::TryStreamExt;
+    use futures_ext::BoxFuture;
+    use futures_ext::BoxStream;
+    use futures_ext::StreamExt;
+    use futures_old::future::ok;
+    use futures_old::Stream;
     use mononoke_types::ChangesetId;
-    use quickcheck::{quickcheck, Arbitrary, Gen};
-    use rand::{seq::SliceRandom, thread_rng, Rng};
+    use quickcheck::quickcheck;
+    use quickcheck::Arbitrary;
+    use quickcheck::Gen;
+    use rand::seq::SliceRandom;
+    use rand::thread_rng;
+    use rand::Rng;
     use revset_test_helper::single_changeset_id;
     use skiplist::SkiplistIndex;
     use std::collections::HashSet;
@@ -97,31 +106,30 @@ mod test {
         pub fn as_hashes(&self) -> HashSet<ChangesetId> {
             let mut output: Vec<HashSet<ChangesetId>> = Vec::new();
             for entry in self.rp_entries.iter() {
-                match entry {
-                    &RevsetEntry::SingleNode(None) => panic!("You need to add_hashes first!"),
-                    &RevsetEntry::SingleNode(Some(hash)) => {
+                match *entry {
+                    RevsetEntry::SingleNode(None) => panic!("You need to add_hashes first!"),
+                    RevsetEntry::SingleNode(Some(hash)) => {
                         let mut item = HashSet::new();
                         item.insert(hash);
                         output.push(item)
                     }
-                    &RevsetEntry::SetDifference => {
+                    RevsetEntry::SetDifference => {
                         let keep = output.pop().expect("No keep for setdifference");
                         let remove = output.pop().expect("No remove for setdifference");
-                        output.push(keep.difference(&remove).map(|x| *x).collect())
+                        output.push(keep.difference(&remove).copied().collect())
                     }
-                    &RevsetEntry::Union(size) => {
+                    RevsetEntry::Union(size) => {
                         let idx = output.len() - size;
                         let mut inputs = output.split_off(idx).into_iter();
                         let first = inputs.next().expect("No first element");
-                        output.push(inputs.fold(first, |a, b| a.union(&b).map(|x| *x).collect()))
+                        output.push(inputs.fold(first, |a, b| a.union(&b).copied().collect()))
                     }
-                    &RevsetEntry::Intersect(size) => {
+                    RevsetEntry::Intersect(size) => {
                         let idx = output.len() - size;
                         let mut inputs = output.split_off(idx).into_iter();
                         let first = inputs.next().expect("No first element");
-                        output.push(
-                            inputs.fold(first, |a, b| a.intersection(&b).map(|x| *x).collect()),
-                        )
+                        output
+                            .push(inputs.fold(first, |a, b| a.intersection(&b).copied().collect()))
                     }
                 }
             }
@@ -140,15 +148,12 @@ mod test {
             for entry in self.rp_entries.iter() {
                 let next_node = ValidateNodeStream::new(
                     ctx.clone(),
-                    match entry {
-                        &RevsetEntry::SingleNode(None) => panic!("You need to add_hashes first!"),
-                        &RevsetEntry::SingleNode(Some(hash)) => single_changeset_id(
-                            ctx.clone(),
-                            Some(hash).expect(&format!("unknown {}", hash)),
-                            &repo,
-                        )
-                        .boxify(),
-                        &RevsetEntry::SetDifference => {
+                    match *entry {
+                        RevsetEntry::SingleNode(None) => panic!("You need to add_hashes first!"),
+                        RevsetEntry::SingleNode(Some(hash)) => {
+                            single_changeset_id(ctx.clone(), hash, &repo).boxify()
+                        }
+                        RevsetEntry::SetDifference => {
                             let keep = output.pop().expect("No keep for setdifference");
                             let remove = output.pop().expect("No remove for setdifference");
                             SetDifferenceNodeStream::new(
@@ -159,24 +164,21 @@ mod test {
                             )
                             .boxify()
                         }
-                        &RevsetEntry::Union(size) => {
+                        RevsetEntry::Union(size) => {
                             let idx = output.len() - size;
                             let inputs = output.split_off(idx);
-                            let nodestream =
-                                UnionNodeStream::new(ctx.clone(), &changeset_fetcher, inputs)
-                                    .boxify();
-                            nodestream
+
+                            UnionNodeStream::new(ctx.clone(), &changeset_fetcher, inputs).boxify()
                         }
-                        &RevsetEntry::Intersect(size) => {
+                        RevsetEntry::Intersect(size) => {
                             let idx = output.len() - size;
                             let inputs = output.split_off(idx);
-                            let nodestream = IntersectNodeStream::new(
+                            IntersectNodeStream::new(
                                 ctx.clone(),
                                 &repo.get_changeset_fetcher(),
                                 inputs,
                             )
-                            .boxify();
-                            nodestream
+                            .boxify()
                         }
                     },
                     &repo.get_changeset_fetcher().clone(),
@@ -463,7 +465,6 @@ mod test {
                         exclude
                     );
                 }
-                ()
             }
         };
     }
@@ -494,7 +495,9 @@ mod test {
         use futures::stream::TryStreamExt;
         use futures_ext::FutureExt;
         use futures_old::Future;
-        use futures_util::future::{try_join_all, FutureExt as NewFutureExt, TryFutureExt};
+        use futures_util::future::try_join_all;
+        use futures_util::future::FutureExt as NewFutureExt;
+        use futures_util::future::TryFutureExt;
 
         fn create_skiplist(
             ctx: CoreContext,

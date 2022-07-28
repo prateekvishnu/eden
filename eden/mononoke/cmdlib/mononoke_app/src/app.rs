@@ -6,33 +6,57 @@
  */
 
 use std::any::TypeId;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Result;
+use base_app::BaseApp;
 use blobstore::Blobstore;
-use blobstore_factory::{BlobstoreOptions, ReadOnlyStorage};
+use blobstore_factory::BlobstoreOptions;
+use blobstore_factory::ReadOnlyStorage;
 use cached_config::ConfigStore;
-use clap::{ArgMatches, Error as ClapError, FromArgMatches};
+use clap::ArgMatches;
+use clap::Error as ClapError;
+use clap::FromArgMatches;
 use context::CoreContext;
 use environment::MononokeEnvironment;
 use facet::AsyncBuildable;
 use fbinit::FacebookInit;
-use futures::stream::{self, StreamExt, TryStreamExt};
-use metaconfig_parser::{RepoConfigs, StorageConfigs};
-use metaconfig_types::{BlobConfig, BlobstoreId, Redaction, RepoConfig};
+use futures::stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use metaconfig_parser::RepoConfigs;
+use metaconfig_parser::StorageConfigs;
+use metaconfig_types::BlobConfig;
+use metaconfig_types::BlobstoreId;
+use metaconfig_types::Redaction;
+use metaconfig_types::RepoConfig;
 use mononoke_types::RepositoryId;
 use prefixblob::PrefixBlobstore;
-use redactedblobstore::{RedactedBlobstore, RedactedBlobstoreConfig, RedactionConfigBlobstore};
-use repo_factory::{RepoFactory, RepoFactoryBuilder};
+use redactedblobstore::RedactedBlobstore;
+use redactedblobstore::RedactedBlobstoreConfig;
+use redactedblobstore::RedactionConfigBlobstore;
+use repo_factory::RepoFactory;
+use repo_factory::RepoFactoryBuilder;
 use scuba_ext::MononokeScubaSampleBuilder;
+use slog::o;
 use slog::Logger;
 use sql_ext::facebook::MysqlOptions;
 use tokio::runtime::Handle;
 
-use crate::args::{ConfigArgs, ConfigMode, MultiRepoArgs, RepoArg, RepoArgs, RepoBlobstoreArgs};
-use crate::extension::{AppExtension, AppExtensionArgsBox, BoxedAppExtensionArgs};
+use crate::args::ConfigArgs;
+use crate::args::ConfigMode;
+use crate::args::MultiRepoArgs;
+use crate::args::RepoArg;
+use crate::args::RepoArgs;
+use crate::args::RepoBlobstoreArgs;
+use crate::extension::AppExtension;
+use crate::extension::AppExtensionArgsBox;
+use crate::extension::BoxedAppExtensionArgs;
 
 pub struct MononokeApp {
     pub fb: FacebookInit,
@@ -43,6 +67,12 @@ pub struct MononokeApp {
     storage_configs: StorageConfigs,
     repo_configs: RepoConfigs,
     repo_factory: RepoFactory,
+}
+
+impl BaseApp for MononokeApp {
+    fn subcommand(&self) -> Option<(&str, &ArgMatches)> {
+        self.args.subcommand()
+    }
 }
 
 impl MononokeApp {
@@ -102,12 +132,6 @@ impl MononokeApp {
 
     /// Returns the selected subcommand of the app (if this app
     /// has subcommands).
-    pub fn subcommand(&self) -> Option<(&str, &ArgMatches)> {
-        self.args.subcommand()
-    }
-
-    /// Returns the selected subcommand of the app (if this app
-    /// has subcommands).
     pub fn matches(&self) -> &ArgMatches {
         &self.args
     }
@@ -143,6 +167,11 @@ impl MononokeApp {
     /// The logger for this app.
     pub fn logger(&self) -> &Logger {
         &self.env.logger
+    }
+
+    /// Construct a logger for a specific repo.
+    pub fn repo_logger(&self, repo_name: &str) -> Logger {
+        self.env.logger.new(o!("repo" => repo_name.to_string()))
     }
 
     /// The mysql options for this app.

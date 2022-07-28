@@ -16,11 +16,14 @@ mod test {
 
                 use fbinit::FacebookInit;
                 use fixtures::TestRepoFixture;
-                use futures::{compat::Future01CompatExt, TryStreamExt};
-                use futures_old::{Future, Stream};
+                use futures::compat::Future01CompatExt;
+                use futures::TryStreamExt;
+                use futures_old::Future;
+                use futures_old::Stream;
 
                 use blobrepo_hg::BlobRepoHg;
-                use blobrepo_utils::{BonsaiMFVerify, BonsaiMFVerifyResult};
+                use blobrepo_utils::BonsaiMFVerify;
+                use blobrepo_utils::BonsaiMFVerifyResult;
                 use context::CoreContext;
 
                 use crate::$repo;
@@ -35,7 +38,7 @@ mod test {
                     let verify = BonsaiMFVerify {
                         ctx: ctx.clone(),
                         logger: ctx.logger().clone(),
-                        repo,
+                        repo: repo.clone(),
                         follow_limit: 1024,
                         ignores: HashSet::new(),
                         broken_merges_before: None,

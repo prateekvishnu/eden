@@ -5,30 +5,37 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{Context, Error};
+use anyhow::Context;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use blobrepo_hg::BlobRepoHg;
 use blobstore::Loadable;
 use bookmarks::BookmarkName;
 use cloned::cloned;
-use context::{CoreContext, PerfCounterType};
+use context::CoreContext;
+use context::PerfCounterType;
 use derived_data::BonsaiDerived;
 use derived_data_filenodes::FilenodesOnlyPublic;
 use filenodes::FilenodeResult;
-use futures::{
-    compat::Stream01CompatExt,
-    future::{self, TryFutureExt},
-    stream::{StreamExt, TryStreamExt},
-};
+use futures::compat::Stream01CompatExt;
+use futures::future;
+use futures::future::TryFutureExt;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use futures_stats::TimedFutureExt;
-use manifest::{Entry, ManifestOps};
+use manifest::Entry;
+use manifest::ManifestOps;
 use mercurial_derived_data::DeriveHgChangeset;
-use mercurial_types::{HgChangesetId, HgFileNodeId, RepoPath};
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::RepoPath;
 use metaconfig_types::CacheWarmupParams;
-use microwave::{self, SnapshotLocation};
+use microwave::SnapshotLocation;
 use mononoke_types::ChangesetId;
 use revset::AncestorsNodeStream;
-use slog::{debug, info, warn};
+use slog::debug;
+use slog::info;
+use slog::warn;
 use tokio::task;
 
 mod errors {
@@ -191,7 +198,7 @@ async fn do_cache_warmup(
         CacheWarmupTarget::Bookmark(bookmark) => repo
             .get_bonsai_bookmark(ctx.clone(), &bookmark)
             .await?
-            .ok_or_else(|| errors::ErrorKind::BookmarkNotFound(bookmark))?,
+            .ok_or(errors::ErrorKind::BookmarkNotFound(bookmark))?,
         CacheWarmupTarget::Changeset(bcs_id) => bcs_id,
     };
 
@@ -231,7 +238,7 @@ async fn do_cache_warmup(
 
 async fn microwave_preload(ctx: &CoreContext, repo: &BlobRepo, req: &CacheWarmupRequest) {
     if req.microwave_preload {
-        match microwave::prime_cache(&ctx, &repo, SnapshotLocation::Blobstore).await {
+        match microwave::prime_cache(ctx, repo, SnapshotLocation::Blobstore).await {
             Ok(_) => {
                 warn!(ctx.logger(), "microwave: successfully primed cache");
             }

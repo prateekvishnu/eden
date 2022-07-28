@@ -16,14 +16,16 @@ use edenapi::EdenApi;
 use hgcommits::DagCommits;
 use metalog::CommitOptions;
 use metalog::MetaLog;
+use tracing::instrument;
 use types::HgId;
 
 // TODO: move to a bookmarks crate
-fn convert_to_remote(bookmark: &str) -> String {
+pub fn convert_to_remote(bookmark: &str) -> String {
     return format!("remote/{}", bookmark);
 }
 
 /// Download commit data via lazy pull endpoint. Returns hash of bookmarks, if any.
+#[instrument(skip_all, fields(?bookmarks))]
 pub fn clone(
     edenapi: Arc<dyn EdenApi>,
     metalog: &mut MetaLog,

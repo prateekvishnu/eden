@@ -15,14 +15,14 @@ mod http_service;
 mod netspeedtest;
 mod repo_handlers;
 mod request_handler;
-mod security_checker;
 mod wireproto_sink;
 
 pub use crate::connection_acceptor::wait_for_connections_closed;
 
 use crate::connection_acceptor::connection_acceptor;
 use crate::repo_handlers::repo_handlers;
-use anyhow::{Context as _, Result};
+use anyhow::Context as _;
+use anyhow::Result;
 use blobstore_factory::ReadOnlyStorage;
 use cached_config::ConfigStore;
 use cmdlib::monitoring::ReadyFlagService;
@@ -31,13 +31,16 @@ use futures::channel::oneshot;
 use metaconfig_types::CommonConfig;
 use mononoke_api::Mononoke;
 use openssl::ssl::SslAcceptor;
+use permission_checker::AclProvider;
 use rate_limiting::RateLimitEnvironment;
 use scribe_ext::Scribe;
 use scuba_ext::MononokeScubaSampleBuilder;
-use slog::{o, Logger};
+use slog::o;
+use slog::Logger;
 use sql_ext::facebook::MysqlOptions;
 use std::path::PathBuf;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 const CONFIGERATOR_RATE_LIMITING_CONFIG: &str = "scm/mononoke/ratelimiting/ratelimits";
 
@@ -58,6 +61,7 @@ pub async fn create_repo_listeners<'a>(
     will_exit: Arc<AtomicBool>,
     cslb_config: Option<String>,
     bound_addr_file: Option<PathBuf>,
+    acl_provider: &dyn AclProvider,
 ) -> Result<()> {
     let rate_limiter = {
         let handle = config_store
@@ -95,6 +99,7 @@ pub async fn create_repo_listeners<'a>(
             false,
             None,
             rate_limiter.clone(),
+            &common_config,
         )
         .context("Error instantiating EdenAPI")?
     };
@@ -120,6 +125,7 @@ pub async fn create_repo_listeners<'a>(
             scuba
         },
         bound_addr_file,
+        acl_provider,
     )
     .await
 }

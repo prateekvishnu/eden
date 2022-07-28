@@ -9,26 +9,23 @@
 
 use std::io::Write;
 
-use anyhow::{bail, Error};
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
+use anyhow::bail;
+use anyhow::Result;
 use futures::stream;
-use futures_util::stream::{StreamExt, TryStreamExt};
-use serde_derive::Serialize;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use futures::Stream;
+use serde::Serialize;
 use source_control::types as thrift;
 
-use crate::args::commit_id::{
-    add_commit_id_args, add_scheme_args, get_commit_id, resolve_commit_id,
-};
-use crate::args::path::{add_optional_path_args, get_path};
-use crate::args::repo::{add_repo_args, get_repo_specifier};
+use crate::args::commit_id::resolve_commit_id;
+use crate::args::commit_id::CommitIdArgs;
+use crate::args::commit_id::SchemeArgs;
+use crate::args::repo::RepoArgs;
 use crate::connection::Connection;
-use crate::render::{Render, RenderStream};
+use crate::render::Render;
 use crate::util::byte_count_short;
-
-pub(super) const NAME: &str = "ls";
-
-const ARG_ALL: &str = "all";
-const ARG_LONG: &str = "long";
+use crate::ScscApp;
 
 const CHUNK_SIZE: i64 = source_control::TREE_LIST_MAX_LIMIT;
 
@@ -40,26 +37,24 @@ const CONCURRENT_ITEM_FETCHES: usize = 100;
 
 const MAX_LINK_NAME_LEN: i64 = 4096;
 
-pub(super) fn make_subcommand<'a, 'b>() -> App<'a, 'b> {
-    let cmd = SubCommand::with_name(NAME)
-        .about("List the contents of a directory")
-        .setting(AppSettings::ColoredHelp);
-    let cmd = add_repo_args(cmd);
-    let cmd = add_scheme_args(cmd);
-    let cmd = add_commit_id_args(cmd);
-    let cmd = add_optional_path_args(cmd);
-    let cmd = cmd
-        .arg(
-            Arg::with_name(ARG_ALL)
-                .short("a")
-                .help("Show hidden files (starting with '.')"),
-        )
-        .arg(
-            Arg::with_name(ARG_LONG)
-                .short("l")
-                .help("Show additional information for each entry"),
-        );
-    cmd
+#[derive(clap::Parser)]
+/// List the contents of a directory
+pub(super) struct CommandArgs {
+    #[clap(flatten)]
+    repo_args: RepoArgs,
+    #[clap(flatten)]
+    scheme_args: SchemeArgs,
+    #[clap(flatten)]
+    commit_id_args: CommitIdArgs,
+    #[clap(long, short, default_value = "")]
+    /// Path to list
+    path: String,
+    #[clap(long, short)]
+    /// Show hidden files (starting with '.')
+    all: bool,
+    #[clap(long, short)]
+    /// Show additional information for each entry
+    long: bool,
 }
 
 #[derive(Serialize)]
@@ -94,7 +89,7 @@ struct LsOutput {
 }
 
 impl LsOutput {
-    fn render_short(&self, w: &mut dyn Write) -> Result<(), Error> {
+    fn render_short(&self, w: &mut dyn Write) -> Result<()> {
         match self.entry {
             LsEntryOutput::Tree { .. } => write!(w, "{}/\n", self.name)?,
             LsEntryOutput::File { .. } => write!(w, "{}\n", self.name)?,
@@ -102,7 +97,7 @@ impl LsOutput {
         Ok(())
     }
 
-    fn render_long(&self, w: &mut dyn Write) -> Result<(), Error> {
+    fn render_long(&self, w: &mut dyn Write) -> Result<()> {
         match &self.entry {
             LsEntryOutput::Tree {
                 descendant_files_total_size,
@@ -145,9 +140,11 @@ impl LsOutput {
 }
 
 impl Render for LsOutput {
-    fn render(&self, matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
-        if !self.name.starts_with(".") || matches.is_present(ARG_ALL) {
-            if matches.is_present(ARG_LONG) {
+    type Args = CommandArgs;
+
+    fn render(&self, args: &Self::Args, w: &mut dyn Write) -> Result<()> {
+        if args.all || !self.name.starts_with('.') {
+            if args.long {
                 self.render_long(w)?;
             } else {
                 self.render_short(w)?;
@@ -156,7 +153,7 @@ impl Render for LsOutput {
         Ok(())
     }
 
-    fn render_json(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    fn render_json(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         Ok(serde_json::to_writer(w, self)?)
     }
 }
@@ -187,7 +184,7 @@ fn list_output(
     repo: thrift::RepoSpecifier,
     response: thrift::TreeListResponse,
     long: bool,
-) -> RenderStream {
+) -> impl Stream<Item = Result<LsOutput>> {
     stream::iter(response.entries)
         .map(move |entry| {
             let connection = connection.clone();
@@ -232,31 +229,26 @@ fn list_output(
                         bail!("malformed response format for '{}'", entry.name);
                     }
                 };
-                let output = Box::new(LsOutput {
+                Ok(LsOutput {
                     name: entry.name,
                     r#type: entry.r#type.to_string().to_lowercase(),
                     entry: entry_output,
-                });
-                Ok(output as Box<dyn Render>)
+                })
             }
         })
         .buffered(CONCURRENT_ITEM_FETCHES)
-        .boxed()
 }
 
-pub(super) async fn run(
-    matches: &ArgMatches<'_>,
-    connection: Connection,
-) -> Result<RenderStream, Error> {
-    let repo = get_repo_specifier(matches).expect("repository is required");
-    let commit_id = get_commit_id(matches)?;
-    let id = resolve_commit_id(&connection, &repo, &commit_id).await?;
+pub(super) async fn run(app: ScscApp, args: CommandArgs) -> Result<()> {
+    let repo = args.repo_args.clone().into_repo_specifier();
+    let commit_id = args.commit_id_args.clone().into_commit_id();
+    let id = resolve_commit_id(&app.connection, &repo, &commit_id).await?;
     let commit = thrift::CommitSpecifier {
         repo: repo.clone(),
         id,
         ..Default::default()
     };
-    let path = get_path(matches).unwrap_or_else(|| String::new());
+    let path = args.path.clone();
     let tree = thrift::TreeSpecifier::by_commit_path(thrift::CommitPathSpecifier {
         commit,
         path,
@@ -269,13 +261,13 @@ pub(super) async fn run(
         limit: CHUNK_SIZE,
         ..Default::default()
     };
-    let response = connection.tree_list(&tree, &params).await?;
+    let response = app.connection.tree_list(&tree, &params).await?;
     let count = response.count;
-    let long = matches.is_present(ARG_LONG);
-    let output = list_output(connection.clone(), repo.clone(), response, long).chain(
+    let long = args.long;
+    let output = list_output(app.connection.clone(), repo.clone(), response, long).chain(
         stream::iter((CHUNK_SIZE..count).step_by(CHUNK_SIZE as usize))
             .map({
-                let connection = connection.clone();
+                let connection = app.connection.clone();
                 move |offset| {
                     // Request subsequent chunks of the directory listing.
                     let params = thrift::TreeListParams {
@@ -289,7 +281,7 @@ pub(super) async fn run(
             .buffered(CONCURRENT_FETCHES)
             .then(move |response| {
                 let repo = repo.clone();
-                let connection = connection.clone();
+                let connection = app.connection.clone();
                 async move {
                     response.map(move |response| {
                         list_output(connection.clone(), repo.clone(), response, long)
@@ -298,5 +290,5 @@ pub(super) async fn run(
             })
             .try_flatten(),
     );
-    Ok(output.boxed())
+    app.target.render(&args, output).await
 }

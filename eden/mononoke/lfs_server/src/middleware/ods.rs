@@ -6,13 +6,16 @@
  */
 
 use gotham::state::State;
-use gotham_ext::middleware::{Middleware, PostResponseCallbacks};
+use gotham_ext::middleware::Middleware;
+use gotham_ext::middleware::PostResponseCallbacks;
+use hyper::Body;
+use hyper::Response;
 use hyper::StatusCode;
-use hyper::{Body, Response};
 use stats::prelude::*;
 use time_ext::DurationExt;
 
-use super::{LfsMethod, RequestContext};
+use super::LfsMethod;
+use super::RequestContext;
 
 define_stats! {
     prefix = "mononoke.lfs.request";
@@ -55,7 +58,7 @@ fn log_stats(state: &mut State, status: StatusCode) -> Option<()> {
     let ctx = state.try_borrow::<RequestContext>()?;
     let method = ctx.method?;
     let repo = ctx.repository.clone()?;
-    let repo_and_method = format!("{}.{}", &repo, method.to_string());
+    let repo_and_method = format!("{}.{}", &repo, method);
 
     let callbacks = state.try_borrow_mut::<PostResponseCallbacks>()?;
 
@@ -88,8 +91,7 @@ fn log_stats(state: &mut State, status: StatusCode) -> Option<()> {
         }
 
         if let Some(response_bytes_sent) = info.meta.as_ref().map(|m| m.body().bytes_sent) {
-            STATS::response_bytes_sent
-                .add_value(response_bytes_sent as i64, (repo_and_method.clone(),))
+            STATS::response_bytes_sent.add_value(response_bytes_sent as i64, (repo_and_method,))
         }
     });
 

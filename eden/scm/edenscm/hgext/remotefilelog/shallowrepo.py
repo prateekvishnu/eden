@@ -6,15 +6,11 @@
 # shallowrepo.py - shallow repository that uses remote filelogs
 from __future__ import absolute_import
 
-import os
-
-from bindings import manifest as rustmanifest
-from edenscm.mercurial import encoding, error, localrepo, match, progress, scmutil, util
+from edenscm.mercurial import error, match, progress, util
 from edenscm.mercurial.i18n import _
-from edenscm.mercurial.node import hex, nullid, nullrev
-from edenscm.mercurial.pycompat import iteritems
+from edenscm.mercurial.node import hex, nullid
 
-from . import constants, fileserverclient, remotefilectx, remotefilelog, shallowutil
+from . import fileserverclient, remotefilectx, remotefilelog
 from .repack import domaintenancerepack
 
 
@@ -142,8 +138,6 @@ def wraprepo(repo):
                 self._prefetch(revs, base, matcher)
 
         def _prefetch(self, revs, base=None, matcher=None):
-            mfl = self.manifestlog
-
             # Copy the skip set to start large and avoid constant resizing,
             # and since it's likely to be very similar to the prefetch set.
             files = set()

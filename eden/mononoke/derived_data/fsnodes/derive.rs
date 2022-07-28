@@ -5,31 +5,53 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use anyhow::{format_err, Context, Error, Result};
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use ascii::AsciiString;
-use blobstore::{Blobstore, Loadable};
+use blobstore::Blobstore;
+use blobstore::Loadable;
 use borrowed::borrowed;
 use cloned::cloned;
 use context::CoreContext;
 use derived_data_manager::DerivationContext;
 use digest::Digest;
-use filestore::{get_metadata, FetchKey};
+use filestore::get_metadata;
+use filestore::FetchKey;
 use futures::channel::mpsc;
-use futures::future::{BoxFuture, FutureExt};
-use futures::stream::{FuturesOrdered, FuturesUnordered, TryStreamExt};
-use manifest::{
-    derive_manifest_with_io_sender, derive_manifests_for_simple_stack_of_commits, Entry, LeafInfo,
-    ManifestChanges, TreeInfo,
-};
-use mononoke_types::fsnode::{Fsnode, FsnodeDirectory, FsnodeEntry, FsnodeFile, FsnodeSummary};
-use mononoke_types::hash::{Sha1, Sha256};
-use mononoke_types::{
-    BlobstoreKey, BlobstoreValue, ChangesetId, ContentId, ContentMetadata, FileType, FsnodeId,
-};
-use mononoke_types::{MPath, MPathElement};
+use futures::future::BoxFuture;
+use futures::future::FutureExt;
+use futures::stream::FuturesOrdered;
+use futures::stream::FuturesUnordered;
+use futures::stream::TryStreamExt;
+use manifest::derive_manifest_with_io_sender;
+use manifest::derive_manifests_for_simple_stack_of_commits;
+use manifest::Entry;
+use manifest::LeafInfo;
+use manifest::ManifestChanges;
+use manifest::TreeInfo;
+use mononoke_types::fsnode::Fsnode;
+use mononoke_types::fsnode::FsnodeDirectory;
+use mononoke_types::fsnode::FsnodeEntry;
+use mononoke_types::fsnode::FsnodeFile;
+use mononoke_types::fsnode::FsnodeSummary;
+use mononoke_types::hash::Sha1;
+use mononoke_types::hash::Sha256;
+use mononoke_types::BlobstoreKey;
+use mononoke_types::BlobstoreValue;
+use mononoke_types::ChangesetId;
+use mononoke_types::ContentId;
+use mononoke_types::ContentMetadata;
+use mononoke_types::FileType;
+use mononoke_types::FsnodeId;
+use mononoke_types::MPath;
+use mononoke_types::MPathElement;
 use sorted_vector_map::SortedVectorMap;
 
 use crate::FsnodeDerivationError;
@@ -44,14 +66,13 @@ pub(crate) async fn derive_fsnodes_stack(
 
     let content_ids = file_changes
         .iter()
-        .map(|(_cs_id, per_commit_file_changes)| {
+        .flat_map(|(_cs_id, per_commit_file_changes)| {
             per_commit_file_changes
                 .iter()
                 .filter_map(|(_mpath, content_id_and_file_type)| {
                     content_id_and_file_type.map(|(content_id, _file_type)| content_id)
                 })
         })
-        .flatten()
         .collect();
 
     let prefetched_content_metadata =
@@ -152,14 +173,8 @@ pub(crate) async fn derive_fsnode(
                 parents,
                 subentries: Default::default(),
             };
-            let (_, tree_id) = create_fsnode(
-                ctx,
-                &blobstore,
-                None,
-                prefetched_content_metadata,
-                tree_info,
-            )
-            .await?;
+            let (_, tree_id) =
+                create_fsnode(ctx, blobstore, None, prefetched_content_metadata, tree_info).await?;
             Ok(tree_id)
         }
     }
@@ -327,7 +342,7 @@ async fn create_fsnode(
             |fsnode_file| fsnode_file.content_sha1().to_hex(),
             |fsnode_dir| fsnode_dir.summary().simple_format_sha1.to_hex(),
         );
-        let bytes = digest.result().into();
+        let bytes = digest.finalize().into();
         Sha1::from_byte_array(bytes)
     };
     let simple_format_sha256 = {
@@ -337,7 +352,7 @@ async fn create_fsnode(
             |fsnode_file| fsnode_file.content_sha256().to_hex(),
             |fsnode_dir| fsnode_dir.summary().simple_format_sha256.to_hex(),
         );
-        let bytes = digest.result().into();
+        let bytes = digest.finalize().into();
         Sha256::from_byte_array(bytes)
     };
     let mut summary = FsnodeSummary {
@@ -399,20 +414,20 @@ where
     for (elem, entry) in dir.iter() {
         match entry {
             FsnodeEntry::File(file) => {
-                digest.input(get_file_hash(&file).as_bytes());
-                digest.input(match file.file_type() {
+                digest.update(get_file_hash(file).as_bytes());
+                digest.update(match file.file_type() {
                     FileType::Regular => b" file ",
                     FileType::Executable => b" exec ",
                     FileType::Symlink => b" link ",
                 });
             }
             FsnodeEntry::Directory(dir) => {
-                digest.input(get_dir_hash(&dir).as_bytes());
-                digest.input(b" tree ");
+                digest.update(get_dir_hash(dir).as_bytes());
+                digest.update(b" tree ");
             }
         }
-        digest.input(elem.as_ref());
-        digest.input(b"\0");
+        digest.update(elem.as_ref());
+        digest.update(b"\0");
     }
     digest
 }
@@ -436,7 +451,7 @@ async fn check_fsnode_leaf(
             )
             .into());
         }
-        let mut iter = leaf_info.parents.clone().into_iter();
+        let mut iter = leaf_info.parents.into_iter();
         let fsnode_file = iter.next().and_then(|first_elem| {
             if iter.all(|next_elem| next_elem == first_elem) {
                 Some(first_elem)
@@ -445,7 +460,7 @@ async fn check_fsnode_leaf(
             }
         });
         if let Some(fsnode_file) = fsnode_file {
-            Ok((None, fsnode_file.into()))
+            Ok((None, fsnode_file))
         } else {
             Err(FsnodeDerivationError::InvalidBonsai(
                 "no change is provided, but file content or type is different".to_string(),
@@ -459,10 +474,12 @@ async fn check_fsnode_leaf(
 mod test {
     use super::*;
     use crate::mapping::get_file_changes;
-    use derived_data_test_utils::{bonsai_changeset_from_hg, iterate_all_manifest_entries};
+    use derived_data_test_utils::bonsai_changeset_from_hg;
+    use derived_data_test_utils::iterate_all_manifest_entries;
     use fbinit::FacebookInit;
+    use fixtures::Linear;
+    use fixtures::ManyFilesDirs;
     use fixtures::TestRepoFixture;
-    use fixtures::{Linear, ManyFilesDirs};
     use repo_derived_data::RepoDerivedDataRef;
     use std::str::FromStr;
     use tokio::runtime::Runtime;
@@ -671,8 +688,8 @@ mod test {
                     "ad02b5a5f778d9ad6afd42fcc8e0b889254b5215 tree dir2\0",
                 );
                 let mut digest = sha1::Sha1::new();
-                digest.input(&text);
-                let bytes = digest.result().into();
+                digest.update(&text);
+                let bytes = digest.finalize().into();
                 Sha1::from_byte_array(bytes)
             };
             let simple_format_sha256 = {
@@ -683,8 +700,8 @@ mod test {
                     "583c3d388efb78eb9dec46626662d6657bb53706c1ee10770c0fb3e859bd36e1 tree dir2\0",
                 );
                 let mut digest = sha2::Sha256::new();
-                digest.input(&text);
-                let bytes = digest.result().into();
+                digest.update(&text);
+                let bytes = digest.finalize().into();
                 Sha256::from_byte_array(bytes)
             };
 

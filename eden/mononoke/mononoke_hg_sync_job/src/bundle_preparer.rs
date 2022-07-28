@@ -5,35 +5,45 @@
  * GNU General Public License version 2.
  */
 
-use crate::bundle_generator::{BookmarkChange, FilenodeVerifier};
-use crate::errors::{
-    ErrorKind::{BookmarkMismatchInBundleCombining, UnexpectedBookmarkMove},
-    PipelineError,
-};
-use crate::{bind_sync_err, BookmarkOverlay, CombinedBookmarkUpdateLogEntry, CommitsInBundle};
-use anyhow::{anyhow, Error};
-use blobrepo::BlobRepo;
-use bookmarks::{BookmarkName, BookmarkUpdateLogEntry, BookmarkUpdateReason};
+use crate::bind_sync_err;
+use crate::bundle_generator::BookmarkChange;
+use crate::bundle_generator::FilenodeVerifier;
+use crate::errors::ErrorKind::BookmarkMismatchInBundleCombining;
+use crate::errors::ErrorKind::UnexpectedBookmarkMove;
+use crate::errors::PipelineError;
+use crate::BookmarkOverlay;
+use crate::CombinedBookmarkUpdateLogEntry;
+use crate::CommitsInBundle;
+use crate::Repo;
+use anyhow::anyhow;
+use anyhow::Error;
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateLogEntry;
+use bookmarks::BookmarkUpdateReason;
 use changeset_fetcher::ArcChangesetFetcher;
+use changeset_fetcher::ChangesetFetcherArc;
 use cloned::cloned;
 use context::CoreContext;
-use futures::{
-    compat::Future01CompatExt,
-    future::{try_join, try_join_all, BoxFuture, FutureExt, TryFutureExt},
-    Future,
-};
+use futures::compat::Future01CompatExt;
+use futures::future::try_join;
+use futures::future::try_join_all;
+use futures::future::BoxFuture;
+use futures::future::FutureExt;
+use futures::future::TryFutureExt;
 use futures_watchdog::WatchdogExt;
 use getbundle_response::SessionLfsParams;
 use itertools::Itertools;
 use mercurial_derived_data::DeriveHgChangeset;
 use mercurial_types::HgChangesetId;
 use metaconfig_types::LfsParams;
-use mononoke_api_types::InnerRepo;
-use mononoke_hg_sync_job_helper_lib::{save_bytes_to_temp_file, write_to_named_temp_file};
-use mononoke_types::{datetime::Timestamp, ChangesetId};
+use mononoke_hg_sync_job_helper_lib::save_bytes_to_temp_file;
+use mononoke_hg_sync_job_helper_lib::write_to_named_temp_file;
+use mononoke_types::datetime::Timestamp;
+use mononoke_types::ChangesetId;
 use reachabilityindex::LeastCommonAncestorsHint;
 use regex::Regex;
-use slog::{info, warn};
+use slog::info;
+use slog::warn;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
@@ -47,7 +57,7 @@ pub struct PreparedBookmarkUpdateLogEntry {
 }
 
 pub struct BundlePreparer {
-    repo: BlobRepo,
+    repo: Repo,
     base_retry_delay_ms: u64,
     retry_num: usize,
     bundle_info: BundleInfo,
@@ -72,7 +82,7 @@ struct BundleInfo {
 
 impl BundlePreparer {
     pub async fn new_generate_bundles(
-        repo: InnerRepo,
+        repo: Repo,
         base_retry_delay_ms: u64,
         retry_num: usize,
         lfs_params: LfsParams,
@@ -81,9 +91,9 @@ impl BundlePreparer {
         use_hg_server_bookmark_value_if_mismatch: bool,
         push_vars: Option<HashMap<String, bytes::Bytes>>,
     ) -> Result<BundlePreparer, Error> {
-        let lca_hint: Arc<dyn LeastCommonAncestorsHint> = repo.skiplist_index;
+        let lca_hint: Arc<dyn LeastCommonAncestorsHint> = repo.skiplist_index.clone();
         Ok(BundlePreparer {
-            repo: repo.blob_repo,
+            repo,
             base_retry_delay_ms,
             retry_num,
             bundle_info: BundleInfo {
@@ -117,18 +127,18 @@ impl BundlePreparer {
         split_in_batches(
             ctx,
             &self.bundle_info.lca_hint,
-            &self.repo.get_changeset_fetcher(),
+            &self.repo.changeset_fetcher_arc(),
             entries,
         )
         .await
     }
 
-    pub fn prepare_bundles<'a>(
+    pub fn prepare_bundles(
         &self,
-        ctx: &'a CoreContext,
+        ctx: CoreContext,
         batches: Vec<BookmarkLogEntryBatch>,
         overlay: &mut crate::BookmarkOverlay,
-    ) -> impl Future<Output = Result<Vec<CombinedBookmarkUpdateLogEntry>, PipelineError>> + 'a {
+    ) -> BoxFuture<'static, Result<Vec<CombinedBookmarkUpdateLogEntry>, PipelineError>> {
         let mut futs = vec![];
         let push_vars = self.push_vars.clone();
 
@@ -143,7 +153,7 @@ impl BundlePreparer {
             let prepare_type = PrepareInfo {
                 lca_hint: lca_hint.clone(),
                 lfs_params: get_session_lfs_params(
-                    ctx,
+                    &ctx,
                     &batch.bookmark_name,
                     lfs_params.clone(),
                     bookmark_regex_force_lfs,
@@ -165,15 +175,18 @@ impl BundlePreparer {
 
         let futs = futs
             .into_iter()
-            .map(|(f, entries)| async move {
-                let f = tokio::spawn(f);
-                let res = f.map_err(Error::from).watched(ctx.logger()).await;
-                let res = match res {
-                    Ok(Ok(res)) => Ok(res),
-                    Ok(Err(err)) => Err(err),
-                    Err(err) => Err(err),
-                };
-                res.map_err(|err| bind_sync_err(&entries, err))
+            .map(|(f, entries)| {
+                let ctx = ctx.clone();
+                async move {
+                    let f = tokio::spawn(f);
+                    let res = f.map_err(Error::from).watched(ctx.logger()).await;
+                    let res = match res {
+                        Ok(Ok(res)) => Ok(res),
+                        Ok(Err(err)) => Err(err),
+                        Err(err) => Err(err),
+                    };
+                    res.map_err(|err| bind_sync_err(&entries, err))
+                }
             })
             .collect::<Vec<_>>();
         async move { try_join_all(futs).await }.boxed()
@@ -241,7 +254,7 @@ impl BundlePreparer {
 
             let bookmark_change = BookmarkChange::new(batch.from_cs_id, batch.to_cs_id)?;
             let bundle_timestamps_commits = retry::retry(
-                &ctx.logger(),
+                ctx.logger(),
                 {
                     |_| {
                         Self::try_prepare_bundle_timestamps_file(
@@ -292,7 +305,7 @@ impl BundlePreparer {
 
     async fn try_prepare_bundle_timestamps_file<'a>(
         ctx: &'a CoreContext,
-        repo: &'a BlobRepo,
+        repo: &'a Repo,
         prepare_info: PrepareInfo,
         hg_server_heads: &'a [ChangesetId],
         bookmark_change: &'a BookmarkChange,
@@ -576,11 +589,12 @@ mod test {
     use mononoke_types::RepositoryId;
     use skiplist::SkiplistIndex;
     use tests_utils::drawdag::create_from_dag;
+    use tests_utils::BasicTestRepo;
 
     #[fbinit::test]
     async fn test_split_in_batches_simple(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let repo: BlobRepo = test_repo_factory::build_empty(fb)?;
+        let repo: BasicTestRepo = test_repo_factory::build_empty(fb)?;
 
         let commits = create_from_dag(
             &ctx,
@@ -602,7 +616,7 @@ mod test {
             Some(commit),
         )];
         let res =
-            split_in_batches(&ctx, &sli, &repo.get_changeset_fetcher(), entries.clone()).await?;
+            split_in_batches(&ctx, &sli, &repo.changeset_fetcher_arc(), entries.clone()).await?;
 
         assert_eq!(res.len(), 1);
         assert_eq!(res[0].entries, entries);
@@ -616,7 +630,7 @@ mod test {
     #[fbinit::test]
     async fn test_split_in_batches_all_in_one_batch(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let repo: BlobRepo = test_repo_factory::build_empty(fb)?;
+        let repo: BasicTestRepo = test_repo_factory::build_empty(fb)?;
 
         let commits = create_from_dag(
             &ctx,
@@ -639,7 +653,7 @@ mod test {
             create_bookmark_log_entry(2, main.clone(), Some(commit_b), Some(commit_c)),
         ];
         let res =
-            split_in_batches(&ctx, &sli, &repo.get_changeset_fetcher(), entries.clone()).await?;
+            split_in_batches(&ctx, &sli, &repo.changeset_fetcher_arc(), entries.clone()).await?;
 
         assert_eq!(res.len(), 1);
         assert_eq!(res[0].entries, entries);
@@ -653,7 +667,7 @@ mod test {
     #[fbinit::test]
     async fn test_split_in_batches_different_bookmarks(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let repo: BlobRepo = test_repo_factory::build_empty(fb)?;
+        let repo: BasicTestRepo = test_repo_factory::build_empty(fb)?;
 
         let commits = create_from_dag(
             &ctx,
@@ -681,7 +695,7 @@ mod test {
             log_entry_3.clone(),
         ];
         let res =
-            split_in_batches(&ctx, &sli, &repo.get_changeset_fetcher(), entries.clone()).await?;
+            split_in_batches(&ctx, &sli, &repo.changeset_fetcher_arc(), entries.clone()).await?;
 
         assert_eq!(res.len(), 3);
         assert_eq!(res[0].entries, vec![log_entry_1]);
@@ -705,7 +719,7 @@ mod test {
     #[fbinit::test]
     async fn test_split_in_batches_non_forward_move(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let repo: BlobRepo = test_repo_factory::build_empty(fb)?;
+        let repo: BasicTestRepo = test_repo_factory::build_empty(fb)?;
 
         let commits = create_from_dag(
             &ctx,
@@ -733,7 +747,7 @@ mod test {
             log_entry_3.clone(),
         ];
         let res =
-            split_in_batches(&ctx, &sli, &repo.get_changeset_fetcher(), entries.clone()).await?;
+            split_in_batches(&ctx, &sli, &repo.changeset_fetcher_arc(), entries.clone()).await?;
 
         assert_eq!(res.len(), 2);
         assert_eq!(res[0].entries, vec![log_entry_1, log_entry_2]);
@@ -752,7 +766,7 @@ mod test {
     #[fbinit::test]
     async fn test_split_in_batches_weird_move(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let repo: BlobRepo = test_repo_factory::build_empty(fb)?;
+        let repo: BasicTestRepo = test_repo_factory::build_empty(fb)?;
 
         let commits = create_from_dag(
             &ctx,
@@ -774,7 +788,7 @@ mod test {
             create_bookmark_log_entry(1, main.clone(), Some(commit_b), Some(commit_c));
         let entries = vec![log_entry_1.clone(), log_entry_2.clone()];
         let res =
-            split_in_batches(&ctx, &sli, &repo.get_changeset_fetcher(), entries.clone()).await?;
+            split_in_batches(&ctx, &sli, &repo.changeset_fetcher_arc(), entries.clone()).await?;
 
         assert_eq!(res.len(), 2);
         assert_eq!(res[0].entries, vec![log_entry_1]);
@@ -793,7 +807,7 @@ mod test {
     #[fbinit::test]
     async fn test_maybe_adjust_batch(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let repo: BlobRepo = test_repo_factory::build_empty(fb)?;
+        let repo: BasicTestRepo = test_repo_factory::build_empty(fb)?;
 
         let commits = create_from_dag(
             &ctx,
@@ -816,7 +830,7 @@ mod test {
         let log_entry_3 =
             create_bookmark_log_entry(1, main.clone(), Some(commit_b), Some(commit_c));
 
-        let mut batch = BookmarkLogEntryBatch::new(log_entry_1.clone());
+        let mut batch = BookmarkLogEntryBatch::new(log_entry_1);
         batch.push(log_entry_2.clone());
         batch.push(log_entry_3.clone());
 
@@ -858,7 +872,7 @@ mod test {
         // Bookmark is not in the batch at all - in that case just do nothing and
         // return existing bundle
         let overlay = BookmarkOverlay::new(Arc::new(hashmap! {
-          main.clone() => commit_d,
+          main => commit_d,
         }));
         let adjusted = maybe_adjust_batch(&ctx, batch.clone(), &overlay)?;
         assert_eq!(Some(batch), adjusted);

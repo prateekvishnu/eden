@@ -5,38 +5,54 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Error, Result};
+use anyhow::anyhow;
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
-use blobstore::{
-    Blobstore, BlobstoreGetData, BlobstoreIsPresent, BlobstorePutOps, OverwriteStatus, PutBehaviour,
-};
-use blobstore_stats::{record_get_stats, record_is_present_stats, record_put_stats, OperationType};
+use blobstore::Blobstore;
+use blobstore::BlobstoreGetData;
+use blobstore::BlobstoreIsPresent;
+use blobstore::BlobstorePutOps;
+use blobstore::OverwriteStatus;
+use blobstore::PutBehaviour;
+use blobstore_stats::record_get_stats;
+use blobstore_stats::record_is_present_stats;
+use blobstore_stats::record_put_stats;
+use blobstore_stats::OperationType;
 use blobstore_sync_queue::OperationKey;
 use cloned::cloned;
-use context::{CoreContext, PerfCounterType, SessionClass};
-use futures::{
-    future::{self, join_all, select, Either as FutureEither, FutureExt},
-    pin_mut,
-    stream::{FuturesUnordered, StreamExt, TryStreamExt},
-};
+use context::CoreContext;
+use context::PerfCounterType;
+use context::SessionClass;
+use futures::future;
+use futures::future::join_all;
+use futures::future::select;
+use futures::future::Either as FutureEither;
+use futures::future::FutureExt;
+use futures::pin_mut;
+use futures::stream::FuturesUnordered;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use futures_stats::TimedFutureExt;
-use itertools::{Either, Itertools};
-use metaconfig_types::{BlobstoreId, MultiplexId};
+use itertools::Either;
+use itertools::Itertools;
+use metaconfig_types::BlobstoreId;
+use metaconfig_types::MultiplexId;
 use mononoke_types::BlobstoreBytes;
 use scuba_ext::MononokeScubaSampleBuilder;
-use std::{
-    borrow::Borrow,
-    collections::{hash_map::RandomState, HashMap, HashSet},
-    fmt,
-    future::Future,
-    hash::Hasher,
-    num::{NonZeroU64, NonZeroUsize},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::borrow::Borrow;
+use std::collections::hash_map::RandomState;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fmt;
+use std::future::Future;
+use std::hash::Hasher;
+use std::num::NonZeroU64;
+use std::num::NonZeroUsize;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use time_ext::DurationExt;
 use tokio::time::timeout;
@@ -224,17 +240,19 @@ impl MultiplexedBlobstoreBase {
             .map(|f| f.map(|v| (false, v)).left_future())
             .chain(
                 match write_mostly {
-                    ScrubWriteMostly::Scrub | ScrubWriteMostly::SkipMissing => Either::Left(
-                        // Generate queries
-                        multiplexed_get(
-                            ctx,
-                            self.write_mostly_blobstores.as_ref(),
-                            key,
-                            OperationType::ScrubGet,
-                            scuba,
+                    ScrubWriteMostly::Scrub | ScrubWriteMostly::SkipMissing => {
+                        Either::Left(
+                            // Generate queries
+                            multiplexed_get(
+                                ctx,
+                                self.write_mostly_blobstores.as_ref(),
+                                key,
+                                OperationType::ScrubGet,
+                                scuba,
+                            )
+                            .map(|f| f.map(|v| (true, v)).left_future()),
                         )
-                        .map(|f| f.map(|v| (true, v)).left_future()),
-                    ),
+                    }
                     ScrubWriteMostly::PopulateIfAbsent | ScrubWriteMostly::ScrubIfAbsent => {
                         Either::Right(
                             // No need to query, give None for each store
@@ -360,7 +378,6 @@ pub async fn inner_put(
         result.as_ref(),
         &key,
         ctx.metadata().session_id().as_str(),
-        OperationType::Put,
         size,
         Some(blobstore_id),
         blobstore,
@@ -501,11 +518,11 @@ async fn select_next_with_timeout<F1: Future, F2: Future>(
         Some(timer) => {
             pin_mut!(select_next_fut);
             match future::select(select_next_fut, timer).await {
-                FutureEither::Left((value, _)) => value.map(|res| Ok(res)),
+                FutureEither::Left((value, _)) => value.map(Ok),
                 FutureEither::Right(((), _)) => Some(Err(Timeout)),
             }
         }
-        None => select_next_fut.await.map(|res| Ok(res)),
+        None => select_next_fut.await.map(Ok),
     }
 }
 
@@ -626,7 +643,7 @@ impl Blobstore for MultiplexedBlobstoreBase {
                                 }
                                 return Ok(BlobstoreIsPresent::Present);
                             }
-                            present_counter = present_counter + 1;
+                            present_counter += 1;
                         }
                         (_, Ok(BlobstoreIsPresent::Absent)) => {
                             needed_not_present = needed_not_present.saturating_sub(1);
@@ -642,9 +659,10 @@ impl Blobstore for MultiplexedBlobstoreBase {
                             errors.insert(blobstore_id, error);
                         }
                         (blobstore_id, Ok(BlobstoreIsPresent::ProbablyNotPresent(err))) => {
-                            let err = err.context(format!(
+                            let err = err.context(
                                 "Received 'ProbablyNotPresent' from the underlying blobstore"
-                            ));
+                                    .to_string(),
+                            );
                             errors.insert(blobstore_id, err);
                         }
                     }
@@ -675,7 +693,7 @@ impl Blobstore for MultiplexedBlobstoreBase {
                     }
                     // some blobstores reported the blob is missing, others failed
                     else {
-                        let write_mostly_err = write_mostly_error(&blobstores, errors);
+                        let write_mostly_err = write_mostly_error(blobstores, errors);
                         if let ErrorKind::SomeFailedOthersNone(errors) = write_mostly_err {
                             let err = Error::from(ErrorKind::SomeFailedOthersNone(errors));
                             Ok(BlobstoreIsPresent::ProbablyNotPresent(err))
@@ -1042,7 +1060,6 @@ async fn multiplexed_is_present_one<'a>(
         result.as_ref(),
         key,
         ctx.metadata().session_id().as_str(),
-        OperationType::IsPresent,
         Some(blobstore_id),
         blobstore,
     );

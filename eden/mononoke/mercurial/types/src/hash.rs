@@ -5,15 +5,24 @@
  * GNU General Public License version 2.
  */
 
-use std::fmt::{self, Debug, Display};
+use std::fmt;
+use std::fmt::Debug;
+use std::fmt::Display;
 use std::str::FromStr;
 
 use abomonation_derive::Abomonation;
-use anyhow::{bail, Error, Result};
-use ascii::{AsciiStr, AsciiString};
-use faster_hex::{hex_decode, hex_encode};
-use quickcheck::{single_shrinker, Arbitrary, Gen};
-use serde_derive::{Deserialize, Serialize};
+use anyhow::bail;
+use anyhow::Error;
+use anyhow::Result;
+use ascii::AsciiStr;
+use ascii::AsciiString;
+use faster_hex::hex_decode;
+use faster_hex::hex_encode;
+use quickcheck::single_shrinker;
+use quickcheck::Arbitrary;
+use quickcheck::Gen;
+use serde_derive::Deserialize;
+use serde_derive::Serialize;
 use sha1::Digest;
 
 use crate::errors::ErrorKind;
@@ -38,9 +47,10 @@ impl Sha1 {
     pub fn from_bytes<B: AsRef<[u8]>>(bytes: B) -> Result<Sha1> {
         let bytes = bytes.as_ref();
         if bytes.len() != SHA1_HASH_LENGTH_BYTES {
-            bail!(ErrorKind::InvalidSha1Input(
-                format!("need exactly {} bytes", SHA1_HASH_LENGTH_BYTES).into()
-            ));
+            bail!(ErrorKind::InvalidSha1Input(format!(
+                "need exactly {} bytes",
+                SHA1_HASH_LENGTH_BYTES
+            )));
         } else {
             let mut ret = [0; SHA1_HASH_LENGTH_BYTES];
             ret.copy_from_slice(bytes);
@@ -108,9 +118,9 @@ pub struct Context(sha1::Sha1);
 impl<'a> From<&'a [u8]> for Sha1 {
     fn from(data: &[u8]) -> Sha1 {
         let mut sha1 = sha1::Sha1::new();
-        sha1.input(data);
+        sha1.update(data);
 
-        Sha1(sha1.result().into())
+        Sha1(sha1.finalize().into())
     }
 }
 
@@ -126,9 +136,10 @@ impl FromStr for Sha1 {
 
     fn from_str(s: &str) -> Result<Sha1> {
         if s.len() != SHA1_HASH_LENGTH_HEX {
-            bail!(ErrorKind::InvalidSha1Input(
-                format!("need exactly {} hex digits", SHA1_HASH_LENGTH_HEX).into()
-            ));
+            bail!(ErrorKind::InvalidSha1Input(format!(
+                "need exactly {} hex digits",
+                SHA1_HASH_LENGTH_HEX
+            )));
         }
 
         let mut ret = Sha1([0; SHA1_HASH_LENGTH_BYTES]);
@@ -156,7 +167,7 @@ impl Arbitrary for Sha1 {
     fn arbitrary(g: &mut Gen) -> Self {
         let mut bytes = [0; SHA1_HASH_LENGTH_BYTES];
         // The null hash is special, so give it a 5% chance of happening
-        if !(usize::arbitrary(g) % SHA1_HASH_LENGTH_BYTES < 1) {
+        if usize::arbitrary(g) % SHA1_HASH_LENGTH_BYTES >= 1 {
             for b in bytes.iter_mut() {
                 *b = u8::arbitrary(g);
             }
@@ -182,13 +193,10 @@ impl Sha1Prefix {
     pub fn from_bytes<B: AsRef<[u8]> + ?Sized>(bytes: &B) -> Result<Self> {
         let bytes = bytes.as_ref();
         if bytes.len() > SHA1_HASH_LENGTH_BYTES {
-            bail!(ErrorKind::InvalidSha1Input(
-                format!(
-                    "prefix needs to be less or equal to {} bytes",
-                    SHA1_HASH_LENGTH_BYTES
-                )
-                .into()
-            ))
+            bail!(ErrorKind::InvalidSha1Input(format!(
+                "prefix needs to be less or equal to {} bytes",
+                SHA1_HASH_LENGTH_BYTES
+            )))
         } else {
             static SHA1_MIN: [u8; SHA1_HASH_LENGTH_BYTES] = [0x00; SHA1_HASH_LENGTH_BYTES];
             static SHA1_MAX: [u8; SHA1_HASH_LENGTH_BYTES] = [0xff; SHA1_HASH_LENGTH_BYTES];
@@ -223,9 +231,9 @@ impl Sha1Prefix {
 
     pub fn to_hex(&self) -> AsciiString {
         let mut v_min_hex = &mut [0; SHA1_HASH_LENGTH_HEX][..];
-        hex_encode(self.0.as_ref(), &mut v_min_hex).expect("failed to hex encode");
-        let mut v_max_hex = &mut [0; SHA1_HASH_LENGTH_HEX][..];
-        hex_encode(self.1.as_ref(), &mut v_max_hex).expect("failed to hex encode");
+        hex_encode(self.0.as_ref(), v_min_hex).expect("failed to hex encode");
+        let v_max_hex = &mut [0; SHA1_HASH_LENGTH_HEX][..];
+        hex_encode(self.1.as_ref(), v_max_hex).expect("failed to hex encode");
         for i in 0..SHA1_HASH_LENGTH_HEX {
             if v_min_hex[i] != v_max_hex[i] {
                 v_min_hex = &mut v_min_hex[..i];
@@ -244,13 +252,10 @@ impl FromStr for Sha1Prefix {
     type Err = Error;
     fn from_str(s: &str) -> Result<Sha1Prefix> {
         if s.len() > SHA1_HASH_LENGTH_HEX {
-            bail!(ErrorKind::InvalidSha1Input(
-                format!(
-                    "prefix needs to be less or equal {} hex digits",
-                    SHA1_HASH_LENGTH_HEX
-                )
-                .into()
-            ));
+            bail!(ErrorKind::InvalidSha1Input(format!(
+                "prefix needs to be less or equal {} hex digits",
+                SHA1_HASH_LENGTH_HEX
+            )));
         }
         let min_tail: String = String::from_utf8(vec![b'0'; SHA1_HASH_LENGTH_HEX - s.len()])?;
         let max_tail: String = String::from_utf8(vec![b'f'; SHA1_HASH_LENGTH_HEX - s.len()])?;
@@ -286,22 +291,23 @@ impl Context {
     where
         T: AsRef<[u8]>,
     {
-        self.0.input(data.as_ref())
+        self.0.update(data.as_ref())
     }
 
     pub fn finish(self) -> Sha1 {
-        Sha1(self.0.result().into())
+        Sha1(self.0.finalize().into())
     }
 }
 
 #[cfg(test)]
 mod test {
-    use quickcheck::{quickcheck, TestResult};
+    use quickcheck::quickcheck;
+    use quickcheck::TestResult;
     use std::str::FromStr;
 
     use super::*;
 
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     const NILHASH: Sha1 = Sha1([0xda, 0x39, 0xa3, 0xee,
                                 0x5e, 0x6b, 0x4b, 0x0d,
                                 0x32, 0x55, 0xbf, 0xef,

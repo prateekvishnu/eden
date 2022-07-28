@@ -5,97 +5,124 @@
  * GNU General Public License version 2.
  */
 
-/// Mononoke pushrebase implementation. The main goal of pushrebase is to decrease push contention.
-/// Commits that client pushed are rebased on top of `onto_bookmark` on the server
-///
-///  Client
-///  ```text
-///     O <- `onto` on client, potentially outdated
-///     |
-///     O  O <- pushed set (in this case just one commit)
-///     | /
-///     O <- root
-///  ```
-///
-///  Server
-///  ```text
-///     O  <- update `onto` bookmark, pointing at the pushed commit
-///     |
-///     O  <- `onto` bookmark on the server before the push
-///     |
-///     O
-///     |
-///     O
-///     |
-///     O <- root
-///  ```
-///
-///  Terminology:
-///  *onto bookmark* - bookmark that is the destination of the rebase, for example "master"
-///
-///  *pushed set* - a set of commits that client has sent us.
-///  Note: all pushed set MUST be committed before doing pushrebase
-///  Note: pushed set MUST contain only one head
-///  Note: not all commits from pushed set maybe rebased on top of onto bookmark. See *rebased set*
-///
-///  *root* - parents of pushed set that are not in the pushed set (see graphs above)
-///
-///  *rebased set* - subset of pushed set that will be rebased on top of onto bookmark
-///  Note: Usually rebased set == pushed set. However in case of merges it may differ
-///
-/// Pushrebase supports hooks, which can be used to modify rebased Bonsai commits as well as
-/// sideload database updates in the transaction that moves forward the bookmark. See hooks.rs for
-/// more information on those;
-use anyhow::{format_err, Error, Result};
-use blobrepo::{save_bonsai_changesets, BlobRepo};
+//! Mononoke pushrebase implementation. The main goal of pushrebase is to decrease push contention.
+//! Commits that client pushed are rebased on top of `onto_bookmark` on the server
+//!
+//!  Client
+//!  ```text
+//!     O <- `onto` on client, potentially outdated
+//!     |
+//!     O  O <- pushed set (in this case just one commit)
+//!     | /
+//!     O <- root
+//!  ```
+//!
+//!  Server
+//!  ```text
+//!     O  <- update `onto` bookmark, pointing at the pushed commit
+//!     |
+//!     O  <- `onto` bookmark on the server before the push
+//!     |
+//!     O
+//!     |
+//!     O
+//!     |
+//!     O <- root
+//!  ```
+//!
+//!  Terminology:
+//!  *onto bookmark* - bookmark that is the destination of the rebase, for example "master"
+//!
+//!  *pushed set* - a set of commits that client has sent us.
+//!  Note: all pushed set MUST be committed before doing pushrebase
+//!  Note: pushed set MUST contain only one head
+//!  Note: not all commits from pushed set maybe rebased on top of onto bookmark. See *rebased set*
+//!
+//!  *root* - parents of pushed set that are not in the pushed set (see graphs above)
+//!
+//!  *rebased set* - subset of pushed set that will be rebased on top of onto bookmark
+//!  Note: Usually rebased set == pushed set. However in case of merges it may differ
+//!
+//! Pushrebase supports hooks, which can be used to modify rebased Bonsai commits as well as
+//! sideload database updates in the transaction that moves forward the bookmark. See hooks.rs for
+//! more information on those;
+
+use anyhow::format_err;
+use anyhow::Error;
+use anyhow::Result;
 use blobrepo_utils::convert_diff_result_into_file_change_for_diamond_merge;
 use blobstore::Loadable;
-use bookmarks::{BookmarkName, BookmarkUpdateReason, BundleReplay};
-use cloned::cloned;
+use bonsai_hg_mapping::BonsaiHgMappingRef;
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
+use bookmarks::BookmarksRef;
+use changeset_fetcher::ChangesetFetcherArc;
+use changesets::ChangesetsRef;
 use context::CoreContext;
-use derived_data::BonsaiDerived;
 use derived_data_filenodes::FilenodesOnlyPublic;
-use futures::{
-    compat::Stream01CompatExt,
-    future::{self, try_join, try_join_all, BoxFuture},
-    stream, FutureExt, StreamExt, TryFutureExt, TryStream, TryStreamExt,
-};
-use manifest::{bonsai_diff, BonsaiDiffFileChange, ManifestOps};
+use futures::compat::Stream01CompatExt;
+use futures::future;
+use futures::future::try_join;
+use futures::future::try_join_all;
+use futures::stream;
+use futures::FutureExt;
+use futures::StreamExt;
+use futures::TryFutureExt;
+use futures::TryStream;
+use futures::TryStreamExt;
+use manifest::bonsai_diff;
+use manifest::BonsaiDiffFileChange;
+use manifest::ManifestOps;
 use maplit::hashmap;
-use mercurial_bundle_replay_data::BundleReplayData;
 use mercurial_derived_data::DeriveHgChangeset;
-use mercurial_types::{HgChangesetId, HgFileNodeId, HgManifestId, MPath};
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::HgManifestId;
+use mercurial_types::MPath;
 use metaconfig_types::PushrebaseFlags;
-use mononoke_types::{
-    check_case_conflicts, BonsaiChangeset, ChangesetId, DateTime, FileChange, RawBundle2Id,
-    Timestamp,
-};
+use mononoke_types::check_case_conflicts;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::ChangesetId;
+use mononoke_types::DateTime;
+use mononoke_types::FileChange;
+use mononoke_types::Generation;
+use mononoke_types::Timestamp;
+use repo_blobstore::RepoBlobstoreArc;
+use repo_derived_data::RepoDerivedDataRef;
+use repo_identity::RepoIdentityRef;
 use revset::RangeNodeStream;
 use slog::info;
 use stats::prelude::*;
-use std::cmp::{max, Ordering};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::max;
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
+use trait_alias::trait_alias;
 use tunables::tunables;
 
-use pushrebase_hook::{
-    PushrebaseCommitHook, PushrebaseHook, PushrebaseTransactionHook, RebasedChangesets,
-};
+use pushrebase_hook::PushrebaseCommitHook;
+use pushrebase_hook::PushrebaseHook;
+use pushrebase_hook::PushrebaseTransactionHook;
+use pushrebase_hook::RebasedChangesets;
 
 define_stats! {
     prefix = "mononoke.pushrebase";
+    // Clowntown: This is actually nanoseconds (ns), not microseconds (us)
     critical_section_success_duration_us: dynamic_timeseries("{}.critical_section_success_duration_us", (reponame: String); Average, Sum, Count),
     critical_section_failure_duration_us: dynamic_timeseries("{}.critical_section_failure_duration_us", (reponame: String); Average, Sum, Count),
     critical_section_retries_failed: dynamic_timeseries("{}.critical_section_retries_failed", (reponame: String); Average, Sum),
+    commits_rebased: dynamic_timeseries("{}.commits_rebased", (reponame: String); Average, Sum, Count),
 }
 
 const MAX_REBASE_ATTEMPTS: usize = 100;
 
 pub const MUTATION_KEYS: &[&str] = &["mutpred", "mutuser", "mutdate", "mutop", "mutsplit"];
 
-pub const FAILUPUSHREBASE_EXTRA: &str = "failpushrebase";
+pub const FAIL_PUSHREBASE_EXTRA: &str = "failpushrebase";
 
 #[derive(Debug, Error)]
 pub enum PushrebaseInternalError {
@@ -148,68 +175,10 @@ pub enum PushrebaseError {
     Error(#[from] Error),
 }
 
-type CsIdConvertor =
-    Arc<dyn Fn(ChangesetId) -> BoxFuture<'static, Result<HgChangesetId>> + Send + Sync + 'static>;
-/// Struct that contains data for hg sync replay
-#[derive(Clone)]
-pub struct HgReplayData {
-    // Handle of the bundle2 id that was sent by the client and saved to the blobstore
-    bundle2_id: RawBundle2Id,
-    // Get hg changeset id from bonsai changeset id. Normally it should just do a simple lookup
-    // however it might return other hg changesets if push redirector is used
-    cs_id_convertor: CsIdConvertor,
-}
-
-impl HgReplayData {
-    pub fn new_with_simple_convertor(
-        ctx: CoreContext,
-        bundle2_id: RawBundle2Id,
-        repo: BlobRepo,
-    ) -> Self {
-        let cs_id_convertor: CsIdConvertor = Arc::new({
-            cloned!(ctx, repo);
-            move |cs_id| {
-                cloned!(ctx, repo);
-                async move { repo.derive_hg_changeset(&ctx, cs_id).await }.boxed()
-            }
-        });
-
-        Self {
-            bundle2_id,
-            cs_id_convertor,
-        }
-    }
-
-    pub fn override_convertor(&mut self, cs_id_convertor: CsIdConvertor) {
-        self.cs_id_convertor = cs_id_convertor;
-    }
-
-    pub async fn to_bundle_replay_data(
-        &self,
-        rebased_changesets: Option<&RebasedChangesets>,
-    ) -> Result<BundleReplayData> {
-        let bundle2_id = self.bundle2_id.clone();
-        if let Some(rebased_changesets) = rebased_changesets {
-            let timestamps = rebased_changesets.iter().map({
-                |(cs_id, (_, timestamp))| async move {
-                    let hg_cs_id = (self.cs_id_convertor)(*cs_id).await?;
-                    Ok::<_, Error>((hg_cs_id, *timestamp))
-                }
-            });
-            let timestamps = try_join_all(timestamps).await?.into_iter().collect();
-            Ok(BundleReplayData::new_with_timestamps(
-                bundle2_id, timestamps,
-            ))
-        } else {
-            Ok(BundleReplayData::new(bundle2_id))
-        }
-    }
-}
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct PushrebaseConflict {
-    left: MPath,
-    right: MPath,
+    pub left: MPath,
+    pub right: MPath,
 }
 
 impl PushrebaseConflict {
@@ -266,26 +235,36 @@ pub struct PushrebaseOutcome {
     pub pushrebase_distance: PushrebaseDistance,
 }
 
+#[trait_alias]
+pub trait Repo = BonsaiHgMappingRef
+    + BookmarksRef
+    + ChangesetsRef
+    + ChangesetFetcherArc
+    + RepoBlobstoreArc
+    + RepoDerivedDataRef
+    + RepoIdentityRef
+    + Send
+    + Sync;
+
 /// Does a pushrebase of a list of commits `pushed` onto `onto_bookmark`
 /// The commits from the pushed set should already be committed to the blobrepo
 /// Returns updated bookmark value.
 pub async fn do_pushrebase_bonsai(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &impl Repo,
     config: &PushrebaseFlags,
     onto_bookmark: &BookmarkName,
     pushed: &HashSet<BonsaiChangeset>,
-    maybe_hg_replay_data: Option<&HgReplayData>,
     prepushrebase_hooks: &[Box<dyn PushrebaseHook>],
 ) -> Result<PushrebaseOutcome, PushrebaseError> {
-    let head = find_only_head_or_fail(&pushed)?;
-    let roots = find_roots(&pushed);
+    let head = find_only_head_or_fail(pushed)?;
+    let roots = find_roots(pushed);
 
-    let root = find_closest_root(&ctx, &repo, &config, onto_bookmark, &roots).await?;
+    let root = find_closest_root(ctx, repo, config, onto_bookmark, &roots).await?;
 
     let (client_cf, client_bcs) = try_join(
-        find_changed_files(&ctx, &repo, root, head),
-        fetch_bonsai_range_ancestor_not_included(ctx, &repo, root, head),
+        find_changed_files(ctx, repo, root, head),
+        fetch_bonsai_range_ancestor_not_included(ctx, repo, root, head),
     )
     .await?;
 
@@ -293,7 +272,7 @@ pub async fn do_pushrebase_bonsai(
     // read. However if too many commits are pushed (e.g. when a new repo is merged-in) then
     // first read might be too slow. To prevent that the function below returns an error if too
     // many commits are missing filenodes.
-    check_filenodes_backfilled(&ctx, &repo, &head, config.not_generated_filenodes_limit).await?;
+    check_filenodes_backfilled(ctx, repo, &head, config.not_generated_filenodes_limit).await?;
 
     let res = rebase_in_loop(
         ctx,
@@ -304,7 +283,6 @@ pub async fn do_pushrebase_bonsai(
         root,
         client_cf,
         &client_bcs,
-        maybe_hg_replay_data,
         prepushrebase_hooks,
     )
     .await?;
@@ -314,11 +292,14 @@ pub async fn do_pushrebase_bonsai(
 
 async fn check_filenodes_backfilled<'a>(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &impl RepoDerivedDataRef,
     head: &ChangesetId,
     limit: u64,
 ) -> Result<(), Error> {
-    let underived = FilenodesOnlyPublic::count_underived(&ctx, &repo, &head, limit).await?;
+    let underived = repo
+        .repo_derived_data()
+        .count_underived::<FilenodesOnlyPublic>(ctx, *head, Some(limit))
+        .await?;
     if underived >= limit {
         Err(format_err!(
             "Too many commits do not have filenodes derived. This usually happens when \
@@ -332,20 +313,20 @@ async fn check_filenodes_backfilled<'a>(
 
 async fn rebase_in_loop(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &impl Repo,
     config: &PushrebaseFlags,
     onto_bookmark: &BookmarkName,
     head: ChangesetId,
     root: ChangesetId,
     client_cf: Vec<MPath>,
     client_bcs: &Vec<BonsaiChangeset>,
-    maybe_hg_replay_data: Option<&HgReplayData>,
     prepushrebase_hooks: &[Box<dyn PushrebaseHook>],
 ) -> Result<PushrebaseOutcome, PushrebaseError> {
+    let should_log = config.monitoring_bookmark.as_deref() == Some(onto_bookmark.as_str());
     let mut latest_rebase_attempt = root;
     let mut pushrebase_distance = PushrebaseDistance(0);
 
-    let repo_args = (repo.name().to_string(),);
+    let repo_args = (repo.repo_identity().name().to_string(),);
     for retry_num in 0..MAX_REBASE_ATTEMPTS {
         let retry_num = PushrebaseRetryNum(retry_num);
 
@@ -357,11 +338,11 @@ async fn rebase_in_loop(
 
         let start_critical_section = Instant::now();
         let (hooks, bookmark_val) =
-            try_join(hooks, get_bookmark_value(&ctx, &repo, onto_bookmark)).await?;
+            try_join(hooks, get_bookmark_value(ctx, repo, onto_bookmark)).await?;
 
         let server_bcs = fetch_bonsai_range_ancestor_not_included(
-            &ctx,
-            &repo,
+            ctx,
+            repo,
             latest_rebase_attempt,
             bookmark_val.unwrap_or(root),
         )
@@ -383,8 +364,8 @@ async fn rebase_in_loop(
         }
 
         let server_cf = find_changed_files(
-            &ctx,
-            &repo,
+            ctx,
+            repo,
             latest_rebase_attempt,
             bookmark_val.unwrap_or(root),
         )
@@ -394,14 +375,13 @@ async fn rebase_in_loop(
         intersect_changed_files(server_cf, client_cf.clone())?;
 
         let rebase_outcome = do_rebase(
-            &ctx,
-            &repo,
-            &config,
+            ctx,
+            repo,
+            config,
             root,
             head,
             bookmark_val,
-            &onto_bookmark,
-            maybe_hg_replay_data,
+            onto_bookmark,
             hooks,
             retry_num,
         )
@@ -413,9 +393,14 @@ async fn rebase_in_loop(
             .try_into()
             .unwrap_or(i64::MAX);
         if let Some((head, rebased_changesets)) = rebase_outcome {
-            STATS::critical_section_success_duration_us
-                .add_value(critical_section_duration_us, repo_args.clone());
-            STATS::critical_section_retries_failed.add_value(retry_num.0 as i64, repo_args.clone());
+            if should_log {
+                STATS::critical_section_success_duration_us
+                    .add_value(critical_section_duration_us, repo_args.clone());
+                STATS::critical_section_retries_failed
+                    .add_value(retry_num.0 as i64, repo_args.clone());
+                STATS::commits_rebased
+                    .add_value(rebased_changesets.len() as i64, repo_args.clone());
+            }
             let res = PushrebaseOutcome {
                 head,
                 retry_num,
@@ -423,37 +408,38 @@ async fn rebase_in_loop(
                 pushrebase_distance,
             };
             return Ok(res);
-        } else {
+        } else if should_log {
             STATS::critical_section_failure_duration_us
                 .add_value(critical_section_duration_us, repo_args.clone());
         }
 
         latest_rebase_attempt = bookmark_val.unwrap_or(root);
     }
-    STATS::critical_section_retries_failed.add_value(MAX_REBASE_ATTEMPTS as i64, repo_args);
+    if should_log {
+        STATS::critical_section_retries_failed.add_value(MAX_REBASE_ATTEMPTS as i64, repo_args);
+    }
 
     Err(PushrebaseInternalError::TooManyRebaseAttempts.into())
 }
 
 fn should_fail_pushrebase(bcs: &BonsaiChangeset) -> bool {
-    bcs.extra().any(|(key, _)| key == FAILUPUSHREBASE_EXTRA)
+    bcs.extra().any(|(key, _)| key == FAIL_PUSHREBASE_EXTRA)
 }
 
 async fn do_rebase(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &impl Repo,
     config: &PushrebaseFlags,
     root: ChangesetId,
     head: ChangesetId,
     bookmark_val: Option<ChangesetId>,
     onto_bookmark: &BookmarkName,
-    maybe_hg_replay_data: Option<&HgReplayData>,
     mut hooks: Vec<Box<dyn PushrebaseCommitHook>>,
     retry_num: PushrebaseRetryNum,
 ) -> Result<Option<(ChangesetId, Vec<PushrebaseChangesetPair>)>, PushrebaseError> {
     let (new_head, rebased_changesets) = create_rebased_changesets(
-        &ctx,
-        &repo,
+        ctx,
+        repo,
         config,
         root,
         head,
@@ -475,11 +461,10 @@ async fn do_rebase(
 
     try_move_bookmark(
         ctx.clone(),
-        &repo,
-        &onto_bookmark,
+        repo,
+        onto_bookmark,
         bookmark_val,
         new_head,
-        maybe_hg_replay_data,
         rebased_changesets,
         hooks,
     )
@@ -488,7 +473,7 @@ async fn do_rebase(
 
 async fn maybe_validate_commit(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &impl Repo,
     old_id: &ChangesetId,
     bcs_id: &ChangesetId,
     retry_num: PushrebaseRetryNum,
@@ -503,7 +488,7 @@ async fn maybe_validate_commit(
     }
 
     let bcs = bcs_id
-        .load(ctx, repo.blobstore())
+        .load(ctx, repo.repo_blobstore())
         .map_err(Error::from)
         .await?;
     if !bcs.is_merge() {
@@ -570,29 +555,30 @@ fn find_roots(commits: &HashSet<BonsaiChangeset>) -> HashMap<ChangesetId, ChildI
 
 async fn find_closest_root(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &impl Repo,
     config: &PushrebaseFlags,
     bookmark: &BookmarkName,
     roots: &HashMap<ChangesetId, ChildIndex>,
 ) -> Result<ChangesetId, PushrebaseError> {
-    let maybe_id = get_bookmark_value(&ctx, &repo, bookmark).await?;
+    let maybe_id = get_bookmark_value(ctx, repo, bookmark).await?;
 
     if let Some(id) = maybe_id {
-        return find_closest_ancestor_root(&ctx, &repo, &config, bookmark, &roots, id).await;
+        return find_closest_ancestor_root(ctx, repo, config, bookmark, roots, id).await;
     }
 
     let roots = roots.iter().map(|(root, _)| {
         let repo = &repo;
 
         async move {
-            let gen_num = repo
-                .get_generation_number(ctx.clone(), *root)
+            let entry = repo
+                .changesets()
+                .get(ctx.clone(), *root)
                 .await?
-                .ok_or(PushrebaseError::from(
-                    PushrebaseInternalError::RootNotFound(*root),
-                ))?;
+                .ok_or_else(|| {
+                    PushrebaseError::from(PushrebaseInternalError::RootNotFound(*root))
+                })?;
 
-            Result::<_, PushrebaseError>::Ok((*root, gen_num))
+            Result::<_, PushrebaseError>::Ok((*root, Generation::new(entry.gen)))
         }
     });
 
@@ -608,7 +594,7 @@ async fn find_closest_root(
 
 async fn find_closest_ancestor_root(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &impl Repo,
     config: &PushrebaseFlags,
     bookmark: &BookmarkName,
     roots: &HashMap<ChangesetId, ChildIndex>,
@@ -655,8 +641,11 @@ async fn find_closest_ancestor_root(
         }
 
         let parents = repo
-            .get_changeset_parents_by_bonsai(ctx.clone(), id)
-            .await?;
+            .changesets()
+            .get(ctx.clone(), id)
+            .await?
+            .ok_or_else(|| format_err!("Commit {} does not exist in the repo", id))?
+            .parents;
 
         queue.extend(parents.into_iter().filter(|p| queued.insert(*p)));
     }
@@ -665,7 +654,7 @@ async fn find_closest_ancestor_root(
 /// find changed files by comparing manifests of `ancestor` and `descendant`
 async fn find_changed_files_between_manifests(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &impl Repo,
     ancestor: ChangesetId,
     descendant: ChangesetId,
 ) -> Result<Vec<MPath>, PushrebaseError> {
@@ -682,21 +671,21 @@ async fn find_changed_files_between_manifests(
     Ok(paths)
 }
 
-async fn find_bonsai_diff(
+pub async fn find_bonsai_diff(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &impl Repo,
     ancestor: ChangesetId,
     descendant: ChangesetId,
 ) -> Result<impl TryStream<Ok = BonsaiDiffFileChange<HgFileNodeId>, Error = Error>> {
     let (d_mf, a_mf) = try_join(
-        id_to_manifestid(&ctx, &repo, descendant),
-        id_to_manifestid(&ctx, &repo, ancestor),
+        id_to_manifestid(ctx, repo, descendant),
+        id_to_manifestid(ctx, repo, ancestor),
     )
     .await?;
 
     Ok(bonsai_diff(
         ctx.clone(),
-        repo.get_blobstore(),
+        repo.repo_blobstore().clone(),
         d_mf,
         Some(a_mf).into_iter().collect(),
     ))
@@ -704,48 +693,51 @@ async fn find_bonsai_diff(
 
 async fn id_to_manifestid(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &impl Repo,
     bcs_id: ChangesetId,
 ) -> Result<HgManifestId, Error> {
     let hg_cs_id = repo.derive_hg_changeset(ctx, bcs_id).await?;
-    let hg_cs = hg_cs_id.load(ctx, repo.blobstore()).await?;
+    let hg_cs = hg_cs_id.load(ctx, repo.repo_blobstore()).await?;
     Ok(hg_cs.manifestid())
 }
 
 // from larger generation number to smaller
 async fn fetch_bonsai_range_ancestor_not_included(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &impl Repo,
     ancestor: ChangesetId,
     descendant: ChangesetId,
 ) -> Result<Vec<BonsaiChangeset>, PushrebaseError> {
     let stream = RangeNodeStream::new(
         ctx.clone(),
-        repo.get_changeset_fetcher(),
+        repo.changeset_fetcher_arc(),
         ancestor,
         descendant,
     )
     .compat();
 
-    let nodes = stream
-        .try_filter(|cs_id| future::ready(cs_id != &ancestor))
-        .map(|res| async move { Result::<_, Error>::Ok(res?.load(ctx, repo.blobstore()).await?) })
-        .buffered(100)
-        .try_collect::<Vec<_>>()
-        .await?;
+    let nodes =
+        stream
+            .try_filter(|cs_id| future::ready(cs_id != &ancestor))
+            .map(|res| async move {
+                Result::<_, Error>::Ok(res?.load(ctx, repo.repo_blobstore()).await?)
+            })
+            .buffered(100)
+            .try_collect::<Vec<_>>()
+            .await?;
 
     Ok(nodes)
 }
 
 async fn find_changed_files(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &impl Repo,
     ancestor: ChangesetId,
     descendant: ChangesetId,
 ) -> Result<Vec<MPath>, PushrebaseError> {
     let stream = RangeNodeStream::new(
         ctx.clone(),
-        repo.get_changeset_fetcher(),
+        repo.changeset_fetcher_arc(),
         ancestor,
         descendant,
     )
@@ -755,7 +747,7 @@ async fn find_changed_files(
         .map(|res| async move {
             match res {
                 Ok(bcs_id) => {
-                    let bcs = bcs_id.load(ctx, repo.blobstore()).await?;
+                    let bcs = bcs_id.load(ctx, repo.repo_blobstore()).await?;
                     Ok((bcs_id, bcs))
                 }
                 Err(e) => Err(e),
@@ -791,7 +783,7 @@ async fn find_changed_files(
                                 // one of the parents is not in the rebase set, to calculate
                                 // changed files in this case we will compute manifest diff
                                 // between elements that are in rebase set.
-                                find_changed_files_between_manifests(&ctx, &repo, id, *p_id).await
+                                find_changed_files_between_manifests(ctx, repo, id, *p_id).await
                             }
                             (None, None) => panic!(
                                 "`RangeNodeStream` produced invalid result for: ({}, {})",
@@ -809,7 +801,7 @@ async fn find_changed_files(
 
     let mut file_changes_union = file_changes
         .into_iter()
-        .flat_map(|v| v)
+        .flatten()
         .collect::<HashSet<_>>() // compute union
         .into_iter()
         .collect::<Vec<_>>();
@@ -820,7 +812,7 @@ async fn find_changed_files(
 
 fn extract_conflict_files_from_bonsai_changeset(bcs: BonsaiChangeset) -> Vec<MPath> {
     bcs.file_changes()
-        .map(|(path, file_change)| {
+        .flat_map(|(path, file_change)| {
             let mut v = vec![];
             if let Some((copy_from_path, _)) = file_change.copy_from() {
                 v.push(copy_from_path.clone());
@@ -828,7 +820,6 @@ fn extract_conflict_files_from_bonsai_changeset(bcs: BonsaiChangeset) -> Vec<MPa
             v.push(path.clone());
             v.into_iter()
         })
-        .flatten()
         .collect::<Vec<MPath>>()
 }
 
@@ -881,24 +872,24 @@ fn intersect_changed_files(left: Vec<MPath>, right: Vec<MPath>) -> Result<(), Pu
 
 async fn get_bookmark_value(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &impl BookmarksRef,
     bookmark_name: &BookmarkName,
 ) -> Result<Option<ChangesetId>, PushrebaseError> {
-    let maybe_cs_id = repo.get_bonsai_bookmark(ctx.clone(), bookmark_name).await?;
+    let maybe_cs_id = repo.bookmarks().get(ctx.clone(), bookmark_name).await?;
 
     Ok(maybe_cs_id)
 }
 
 async fn create_rebased_changesets(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &impl Repo,
     config: &PushrebaseFlags,
     root: ChangesetId,
     head: ChangesetId,
     onto: ChangesetId,
     hooks: &mut [Box<dyn PushrebaseCommitHook>],
 ) -> Result<(ChangesetId, RebasedChangesets), PushrebaseError> {
-    let rebased_set = find_rebased_set(&ctx, &repo, root, head).await?;
+    let rebased_set = find_rebased_set(ctx, repo, root, head).await?;
 
     let rebased_set_ids: HashSet<_> = rebased_set
         .clone()
@@ -928,7 +919,7 @@ async fn create_rebased_changesets(
             date.as_ref(),
             &root,
             &onto,
-            &repo,
+            repo,
             &rebased_set_ids,
             hooks,
         )
@@ -938,7 +929,7 @@ async fn create_rebased_changesets(
         rebased.push(bcs_new);
     }
 
-    save_bonsai_changesets(rebased, ctx.clone(), &repo).await?;
+    changesets_creation::save_changesets(ctx, repo, rebased).await?;
     Ok((
         remapping
             .get(&head)
@@ -960,7 +951,7 @@ async fn rebase_changeset(
     timestamp: Option<&Timestamp>,
     root: &ChangesetId,
     onto: &ChangesetId,
-    repo: &BlobRepo,
+    repo: &impl Repo,
     rebased_set: &HashSet<ChangesetId>,
     hooks: &mut [Box<dyn PushrebaseCommitHook>],
 ) -> Result<BonsaiChangeset> {
@@ -1092,7 +1083,7 @@ async fn generate_additional_bonsai_file_changes(
     bcs: &BonsaiChangeset,
     root: &ChangesetId,
     onto: &ChangesetId,
-    repo: &BlobRepo,
+    repo: &impl Repo,
     rebased_set: &HashSet<ChangesetId>,
 ) -> Result<Vec<(MPath, FileChange)>> {
     let parents: Vec<_> = bcs.parents().collect();
@@ -1121,7 +1112,7 @@ async fn generate_additional_bonsai_file_changes(
         return Ok(vec![]);
     }
 
-    let bonsai_diff = find_bonsai_diff(ctx, &repo, *root, *onto)
+    let bonsai_diff = find_bonsai_diff(ctx, repo, *root, *onto)
         .await?
         .try_collect::<Vec<_>>()
         .await?;
@@ -1159,7 +1150,7 @@ async fn generate_additional_bonsai_file_changes(
         futs.push(async move {
             let mfid = id_to_manifestid(ctx, repo, *p).await?;
             let stale = mfid
-                .find_entries(ctx.clone(), repo.get_blobstore(), paths)
+                .find_entries(ctx.clone(), repo.repo_blobstore().clone(), paths)
                 .try_filter_map(|(path, _)| async move { Ok(path) })
                 .try_collect::<HashSet<_>>()
                 .await?;
@@ -1186,7 +1177,7 @@ async fn generate_additional_bonsai_file_changes(
         }
 
         new_file_changes.push(convert_diff_result_into_file_change_for_diamond_merge(
-            ctx, &repo, res,
+            ctx, repo, res,
         ));
     }
 
@@ -1200,11 +1191,11 @@ async fn generate_additional_bonsai_file_changes(
 // Order - from lowest generation number to highest
 async fn find_rebased_set(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &impl Repo,
     root: ChangesetId,
     head: ChangesetId,
 ) -> Result<Vec<BonsaiChangeset>, PushrebaseError> {
-    let nodes = fetch_bonsai_range_ancestor_not_included(&ctx, &repo, root, head).await?;
+    let nodes = fetch_bonsai_range_ancestor_not_included(ctx, repo, root, head).await?;
 
     let nodes = nodes.into_iter().rev().collect();
 
@@ -1213,27 +1204,14 @@ async fn find_rebased_set(
 
 async fn try_move_bookmark(
     ctx: CoreContext,
-    repo: &BlobRepo,
+    repo: &impl Repo,
     bookmark: &BookmarkName,
     old_value: Option<ChangesetId>,
     new_value: ChangesetId,
-    maybe_hg_replay_data: Option<&HgReplayData>,
     rebased_changesets: RebasedChangesets,
     hooks: Vec<Box<dyn PushrebaseTransactionHook>>,
 ) -> Result<Option<(ChangesetId, Vec<PushrebaseChangesetPair>)>, PushrebaseError> {
-    let mut txn = repo.update_bookmark_transaction(ctx);
-
-    let bundle_replay_data = match maybe_hg_replay_data {
-        Some(hg_replay_data) => Some(
-            hg_replay_data
-                .to_bundle_replay_data(Some(&rebased_changesets))
-                .await?,
-        ),
-        None => None,
-    };
-    let bundle_replay = bundle_replay_data
-        .as_ref()
-        .map(|data| data as &dyn BundleReplay);
+    let mut txn = repo.bookmarks().create_transaction(ctx);
 
     match old_value {
         Some(old_value) => {
@@ -1242,16 +1220,10 @@ async fn try_move_bookmark(
                 new_value,
                 old_value,
                 BookmarkUpdateReason::Pushrebase,
-                bundle_replay,
             )?;
         }
         None => {
-            txn.create(
-                &bookmark,
-                new_value,
-                BookmarkUpdateReason::Pushrebase,
-                bundle_replay,
-            )?;
+            txn.create(bookmark, new_value, BookmarkUpdateReason::Pushrebase)?;
         }
     }
 
@@ -1282,34 +1254,48 @@ async fn try_move_bookmark(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::{format_err, Context};
+    use anyhow::format_err;
+    use anyhow::Context;
     use async_trait::async_trait;
+    use blobrepo::BlobRepo;
     use blobrepo_hg::BlobRepoHg;
     use bookmarks::BookmarkTransactionError;
+    use cloned::cloned;
     use fbinit::FacebookInit;
+    use filestore::FilestoreConfigRef;
+    use fixtures::Linear;
+    use fixtures::ManyFilesDirs;
+    use fixtures::MergeEven;
     use fixtures::TestRepoFixture;
-    use fixtures::{Linear, ManyFilesDirs, MergeEven};
-    use futures::{
-        future::{try_join_all, TryFutureExt},
-        stream::{self, TryStreamExt},
-    };
-    use manifest::{Entry, ManifestOps};
-    use maplit::{btreemap, hashmap, hashset};
+    use futures::future::try_join_all;
+    use futures::future::TryFutureExt;
+    use futures::stream;
+    use futures::stream::TryStreamExt;
+    use manifest::Entry;
+    use manifest::ManifestOps;
+    use maplit::btreemap;
+    use maplit::hashmap;
+    use maplit::hashset;
+    use mononoke_types::BonsaiChangesetMut;
     use mononoke_types::FileType;
-    use mononoke_types::{BonsaiChangesetMut, RepositoryId};
-    use mononoke_types_mocks::hash::AS;
-    use mutable_counters::{MutableCountersRef, SqlMutableCounters};
+    use mononoke_types::RepositoryId;
+    use mutable_counters::MutableCountersRef;
+    use mutable_counters::SqlMutableCounters;
     use rand::Rng;
+    use repo_blobstore::RepoBlobstoreRef;
     use sql::Transaction;
     use sql_ext::TransactionResult;
+    use std::collections::BTreeMap;
+    use std::str::FromStr;
     use std::time::Duration;
-    use std::{collections::BTreeMap, str::FromStr};
     use test_repo_factory::TestRepoFactory;
-    use tests_utils::{bookmark, resolve_cs_id, CreateCommitContext};
+    use tests_utils::bookmark;
+    use tests_utils::resolve_cs_id;
+    use tests_utils::CreateCommitContext;
 
     async fn fetch_bonsai_changesets(
         ctx: &CoreContext,
-        repo: &BlobRepo,
+        repo: &impl Repo,
         commit_ids: &HashSet<HgChangesetId>,
     ) -> Result<HashSet<BonsaiChangeset>, PushrebaseError> {
         let futs = commit_ids.iter().map(|hg_cs_id| {
@@ -1324,7 +1310,7 @@ mod tests {
                     ))?;
 
                 let bcs = bcs_id
-                    .load(ctx, repo.blobstore())
+                    .load(ctx, repo.repo_blobstore())
                     .await
                     .context("While intitial bonsai changesets fetching")?;
 
@@ -1338,24 +1324,14 @@ mod tests {
 
     async fn do_pushrebase(
         ctx: &CoreContext,
-        repo: &BlobRepo,
+        repo: &impl Repo,
         config: &PushrebaseFlags,
         onto_bookmark: &BookmarkName,
         pushed_set: &HashSet<HgChangesetId>,
-        maybe_hg_replay_data: Option<&HgReplayData>,
     ) -> Result<PushrebaseOutcome, PushrebaseError> {
-        let pushed = fetch_bonsai_changesets(&ctx, &repo, &pushed_set).await?;
+        let pushed = fetch_bonsai_changesets(ctx, repo, pushed_set).await?;
 
-        let res = do_pushrebase_bonsai(
-            &ctx,
-            &repo,
-            &config,
-            &onto_bookmark,
-            &pushed,
-            maybe_hg_replay_data,
-            &vec![],
-        )
-        .await?;
+        let res = do_pushrebase_bonsai(ctx, repo, config, onto_bookmark, &pushed, &[]).await?;
 
         Ok(res)
     }
@@ -1374,33 +1350,32 @@ mod tests {
             .ok_or(Error::msg(format_err!("Head not found: {:?}", cs_id)))?;
 
         let mut txn = repo.update_bookmark_transaction(ctx);
-        txn.force_set(&book, head, BookmarkUpdateReason::TestMove, None)?;
+        txn.force_set(book, head, BookmarkUpdateReason::TestMove)?;
         txn.commit().await?;
         Ok(())
     }
 
     fn make_paths(paths: &[&str]) -> Vec<MPath> {
-        let paths: Result<_, _> = paths.into_iter().map(MPath::new).collect();
+        let paths: Result<_, _> = paths.iter().map(MPath::new).collect();
         paths.unwrap()
     }
 
     fn master_bookmark() -> BookmarkName {
-        let book = BookmarkName::new("master").unwrap();
-        book
+        BookmarkName::new("master").unwrap()
     }
 
     async fn push_and_verify(
         ctx: &CoreContext,
-        repo: &BlobRepo,
+        repo: &(impl Repo + FilestoreConfigRef),
         parent: ChangesetId,
         bookmark: &BookmarkName,
         content: BTreeMap<&str, Option<&str>>,
         should_succeed: bool,
     ) -> Result<(), Error> {
-        let mut commit_ctx = CreateCommitContext::new(&ctx, &repo, vec![parent]);
+        let mut commit_ctx = CreateCommitContext::new(ctx, repo, vec![parent]);
 
         for (path, maybe_content) in content.iter() {
-            let path: &str = path.as_ref();
+            let path: &str = path;
             commit_ctx = match maybe_content {
                 Some(content) => commit_ctx.add_file(path, *content),
                 None => commit_ctx.delete_file(path),
@@ -1411,15 +1386,7 @@ mod tests {
 
         let hgcss = hashset![repo.derive_hg_changeset(ctx, cs_id).await?];
 
-        let res = do_pushrebase(
-            &ctx,
-            &repo,
-            &PushrebaseFlags::default(),
-            &bookmark,
-            &hgcss,
-            None,
-        )
-        .await;
+        let res = do_pushrebase(ctx, repo, &PushrebaseFlags::default(), bookmark, &hgcss).await;
 
         if should_succeed {
             assert!(res.is_ok());
@@ -1450,16 +1417,9 @@ mod tests {
                 .set_to("a5ffa77602a066db7d5cfb9fb5823a0895717c5a")
                 .await?;
 
-            do_pushrebase(
-                &ctx,
-                &repo,
-                &Default::default(),
-                &book,
-                &hashset![hg_cs],
-                None,
-            )
-            .map_err(|err| format_err!("{:?}", err))
-            .await?;
+            do_pushrebase(&ctx, &repo, &Default::default(), &book, &hashset![hg_cs])
+                .map_err(|err| format_err!("{:?}", err))
+                .await?;
             Ok(())
         })
     }
@@ -1492,7 +1452,7 @@ mod tests {
                 changesets: &RebasedChangesets,
             ) -> Result<Box<dyn PushrebaseTransactionHook>, Error> {
                 let (_, (cs_id, _)) = changesets
-                    .into_iter()
+                    .iter()
                     .next()
                     .ok_or(Error::msg("No rebased changeset"))?;
                 Ok(Box::new(TransactionHook(self.0, *cs_id)) as Box<dyn PushrebaseTransactionHook>)
@@ -1524,7 +1484,7 @@ mod tests {
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
             let factory = TestRepoFactory::new(fb)?;
-            let repo = factory.build()?;
+            let repo: BlobRepo = factory.build()?;
             Linear::initrepo(fb, &repo).await;
             // Bottom commit of the repo
             let parents = vec!["2d7d4ba9ce0a6ffd222de7785b249ead9c51c536"];
@@ -1533,7 +1493,7 @@ mod tests {
                 .commit()
                 .await?;
 
-            let bcs = bcs_id.load(&ctx, repo.blobstore()).await?;
+            let bcs = bcs_id.load(&ctx, repo.repo_blobstore()).await?;
 
             let mut book = master_bookmark();
 
@@ -1550,7 +1510,6 @@ mod tests {
                 &Default::default(),
                 &book,
                 &hashset![bcs.clone()],
-                None,
                 &hooks[..],
             )
             .map_err(|err| format_err!("{:?}", err))
@@ -1572,7 +1531,6 @@ mod tests {
                 &Default::default(),
                 &book,
                 &hashset![bcs],
-                None,
                 &hooks[..],
             )
             .map_err(|err| format_err!("{:?}", err))
@@ -1632,7 +1590,6 @@ mod tests {
                 &Default::default(),
                 &book,
                 &hashset![hg_cs_1, hg_cs_2],
-                None,
             )
             .await?;
             Ok(())
@@ -1684,7 +1641,6 @@ mod tests {
                 &Default::default(),
                 &book,
                 &hashset![hg_cs_1, hg_cs_2],
-                None,
             )
             .await?;
 
@@ -1791,7 +1747,6 @@ mod tests {
                 &config,
                 &book,
                 &hashset![hg_cs_1, hg_cs_2, hg_cs_3],
-                None,
             )
             .await?;
 
@@ -1863,7 +1818,6 @@ mod tests {
                 &Default::default(),
                 &book,
                 &hashset![hg_cs_1, hg_cs_2, hg_cs_3],
-                None,
             )
             .await;
             match result {
@@ -1925,7 +1879,7 @@ mod tests {
             )
             .await?;
 
-            do_pushrebase(&ctx, &repo, &Default::default(), &book, &hgcss, None).await?;
+            do_pushrebase(&ctx, &repo, &Default::default(), &book, &hgcss).await?;
 
             Ok(())
         })
@@ -1971,7 +1925,7 @@ mod tests {
             )
             .await?;
 
-            do_pushrebase(&ctx, &repo, &Default::default(), &book, &hgcss, None).await?;
+            do_pushrebase(&ctx, &repo, &Default::default(), &book, &hgcss).await?;
 
             Ok(())
         })
@@ -2000,7 +1954,7 @@ mod tests {
                     async move {
                         let file = format!("f{}", index);
                         let content = format!("{}", index);
-                        let bcs = CreateCommitContext::new(&ctx, &repo, vec![head])
+                        let bcs = CreateCommitContext::new(ctx, &repo, vec![head])
                             .add_file(file.as_str(), content)
                             .commit()
                             .await?;
@@ -2026,7 +1980,6 @@ mod tests {
                 &Default::default(),
                 &book.clone(),
                 &hgcss.into_iter().collect(),
-                None,
             )
             .await?;
 
@@ -2042,7 +1995,7 @@ mod tests {
                 recursion_limit: Some(128),
                 ..Default::default()
             };
-            let result = do_pushrebase(&ctx, &repo, &config, &book, &hgcss, None).await;
+            let result = do_pushrebase(&ctx, &repo, &config, &book, &hgcss).await;
             match result {
                 Err(PushrebaseError::RootTooFarBehind) => {}
                 _ => panic!("push-rebase should have failed because root too far behind"),
@@ -2052,7 +2005,7 @@ mod tests {
                 recursion_limit: Some(256),
                 ..Default::default()
             };
-            do_pushrebase(&ctx, &repo, &config, &book, &hgcss, None).await?;
+            do_pushrebase(&ctx, &repo, &config, &book, &hgcss).await?;
 
             Ok(())
         })
@@ -2090,7 +2043,7 @@ mod tests {
                 rewritedates: false,
                 ..Default::default()
             };
-            let bcs_keep_date = do_pushrebase(&ctx, &repo, &config, &book, &hgcss, None).await?;
+            let bcs_keep_date = do_pushrebase(&ctx, &repo, &config, &book, &hgcss).await?;
 
             set_bookmark(
                 ctx.clone(),
@@ -2103,11 +2056,14 @@ mod tests {
                 rewritedates: true,
                 ..Default::default()
             };
-            let bcs_rewrite_date = do_pushrebase(&ctx, &repo, &config, &book, &hgcss, None).await?;
+            let bcs_rewrite_date = do_pushrebase(&ctx, &repo, &config, &book, &hgcss).await?;
 
-            let bcs = bcs.load(&ctx, repo.blobstore()).await?;
-            let bcs_keep_date = bcs_keep_date.head.load(&ctx, repo.blobstore()).await?;
-            let bcs_rewrite_date = bcs_rewrite_date.head.load(&ctx, repo.blobstore()).await?;
+            let bcs = bcs.load(&ctx, repo.repo_blobstore()).await?;
+            let bcs_keep_date = bcs_keep_date.head.load(&ctx, repo.repo_blobstore()).await?;
+            let bcs_rewrite_date = bcs_rewrite_date
+                .head
+                .load(&ctx, repo.repo_blobstore())
+                .await?;
 
             assert_eq!(bcs.author_date(), bcs_keep_date.author_date());
             assert!(bcs.author_date() < bcs_rewrite_date.author_date());
@@ -2147,7 +2103,7 @@ mod tests {
             )
             .await?;
 
-            let result = do_pushrebase(&ctx, &repo, &Default::default(), &book, &hgcss, None).await;
+            let result = do_pushrebase(&ctx, &repo, &Default::default(), &book, &hgcss).await;
             match result {
                 Err(PushrebaseError::PotentialCaseConflict(conflict)) => {
                     assert_eq!(conflict, MPath::new("Dir1/file_1_in_dir1")?)
@@ -2165,7 +2121,6 @@ mod tests {
                 },
                 &book,
                 &hgcss,
-                None,
             )
             .await?;
 
@@ -2211,11 +2166,15 @@ mod tests {
             let path_1 = MPath::new("1")?;
 
             let root_hg = HgChangesetId::from_str("2d7d4ba9ce0a6ffd222de7785b249ead9c51c536")?;
-            let root_cs = root_hg.load(&ctx, repo.blobstore()).await?;
+            let root_cs = root_hg.load(&ctx, repo.repo_blobstore()).await?;
 
             let root_1_id = root_cs
                 .manifestid()
-                .find_entry(ctx.clone(), repo.get_blobstore(), Some(path_1.clone()))
+                .find_entry(
+                    ctx.clone(),
+                    repo.repo_blobstore().clone(),
+                    Some(path_1.clone()),
+                )
                 .await?
                 .and_then(|entry| Some(entry.into_leaf()?.1))
                 .ok_or(Error::msg("path_1 missing in manifest"))?;
@@ -2226,7 +2185,7 @@ mod tests {
                 .get_bonsai_from_hg(&ctx, root_hg)
                 .await?
                 .ok_or(Error::msg("Root missing"))?;
-            let root_bcs = root.load(&ctx, repo.blobstore()).await?;
+            let root_bcs = root.load(&ctx, repo.repo_blobstore()).await?;
             let file_1 = match root_bcs
                 .file_changes()
                 .find(|(path, _)| path == &&path_1)
@@ -2260,9 +2219,8 @@ mod tests {
             )
             .await?;
 
-            let result =
-                do_pushrebase(&ctx, &repo, &Default::default(), &book, &hgcss, None).await?;
-            let result_bcs = result.head.load(&ctx, repo.blobstore()).await?;
+            let result = do_pushrebase(&ctx, &repo, &Default::default(), &book, &hgcss).await?;
+            let result_bcs = result.head.load(&ctx, repo.repo_blobstore()).await?;
             let file_1_result = match result_bcs
                 .file_changes()
                 .find(|(path, _)| path == &&path_1)
@@ -2275,10 +2233,14 @@ mod tests {
             assert_eq!(FileChange::Change(file_1_result), file_1_exec);
 
             let result_hg = repo.derive_hg_changeset(&ctx, result.head).await?;
-            let result_cs = result_hg.load(&ctx, repo.blobstore()).await?;
+            let result_cs = result_hg.load(&ctx, repo.repo_blobstore()).await?;
             let result_1_id = result_cs
                 .manifestid()
-                .find_entry(ctx.clone(), repo.get_blobstore(), Some(path_1.clone()))
+                .find_entry(
+                    ctx.clone(),
+                    repo.repo_blobstore().clone(),
+                    Some(path_1.clone()),
+                )
                 .await?
                 .and_then(|entry| Some(entry.into_leaf()?.1))
                 .ok_or(Error::msg("path_1 missing in manifest"))?;
@@ -2314,7 +2276,7 @@ mod tests {
             .await?
             .ok_or(Error::msg("bonsai not found"))?;
 
-        let n = RangeNodeStream::new(ctx, repo.get_changeset_fetcher(), ancestor, descendant)
+        let n = RangeNodeStream::new(ctx, repo.changeset_fetcher_arc(), ancestor, descendant)
             .compat()
             .try_collect::<Vec<_>>()
             .await?
@@ -2403,7 +2365,7 @@ mod tests {
                     .commit()
                     .await?;
 
-                let bcs = bcs_id.load(&ctx, repo.blobstore()).await?;
+                let bcs = bcs_id.load(&ctx, repo.repo_blobstore()).await?;
 
                 let fut = async move {
                     do_pushrebase_bonsai(
@@ -2412,7 +2374,6 @@ mod tests {
                         &Default::default(),
                         &book,
                         &hashset![bcs],
-                        None,
                         &hooks,
                     )
                     .await
@@ -2465,15 +2426,7 @@ mod tests {
             let hg_cs = repo.derive_hg_changeset(&ctx, bcs_id).await?;
 
             let book = BookmarkName::new("newbook")?;
-            do_pushrebase(
-                &ctx,
-                &repo,
-                &Default::default(),
-                &book,
-                &hashset![hg_cs],
-                None,
-            )
-            .await?;
+            do_pushrebase(&ctx, &repo, &Default::default(), &book, &hashset![hg_cs]).await?;
             Ok(())
         })
     }
@@ -2508,7 +2461,7 @@ mod tests {
                     .commit()
                     .await?;
 
-                let bcs = bcs_id.load(&ctx, repo.blobstore()).await?;
+                let bcs = bcs_id.load(&ctx, repo.repo_blobstore()).await?;
 
                 let fut = async move {
                     do_pushrebase_bonsai(
@@ -2517,7 +2470,6 @@ mod tests {
                         &Default::default(),
                         &book,
                         &hashset![bcs],
-                        None,
                         &hooks,
                     )
                     .await
@@ -2574,19 +2526,7 @@ mod tests {
             )
             .await?;
 
-            do_pushrebase(
-                &ctx,
-                &repo,
-                &Default::default(),
-                &book,
-                &hashset![hg_cs],
-                Some(&HgReplayData::new_with_simple_convertor(
-                    ctx.clone(),
-                    RawBundle2Id::new(AS),
-                    repo.clone(),
-                )),
-            )
-            .await?;
+            do_pushrebase(&ctx, &repo, &Default::default(), &book, &hashset![hg_cs]).await?;
 
             Ok(())
         })
@@ -2630,21 +2570,13 @@ mod tests {
                 rewritedates: true,
                 ..Default::default()
             };
-            let bcs_rewrite_date = do_pushrebase(
-                &ctx,
-                &repo,
-                &config,
-                &book,
-                &hashset![hg_cs],
-                Some(&HgReplayData::new_with_simple_convertor(
-                    ctx.clone(),
-                    RawBundle2Id::new(AS),
-                    repo.clone(),
-                )),
-            )
-            .await?;
+            let bcs_rewrite_date =
+                do_pushrebase(&ctx, &repo, &config, &book, &hashset![hg_cs]).await?;
 
-            let bcs_rewrite_date = bcs_rewrite_date.head.load(&ctx, repo.blobstore()).await?;
+            let bcs_rewrite_date = bcs_rewrite_date
+                .head
+                .load(&ctx, repo.repo_blobstore())
+                .await?;
 
             assert_eq!(
                 bcs_rewrite_date.author_date().tz_offset_secs(),
@@ -2699,7 +2631,7 @@ mod tests {
             };
 
             assert!(
-                do_pushrebase(&ctx, &repo, &config_forbid_p2, &book, &hgcss, None)
+                do_pushrebase(&ctx, &repo, &config_forbid_p2, &book, &hgcss)
                     .await
                     .is_err()
             );
@@ -2709,7 +2641,7 @@ mod tests {
                 ..Default::default()
             };
 
-            do_pushrebase(&ctx, &repo, &config_allow_p2, &book, &hgcss, None).await?;
+            do_pushrebase(&ctx, &repo, &config_allow_p2, &book, &hgcss).await?;
 
             Ok(())
         })
@@ -2828,15 +2760,7 @@ mod tests {
 
             let hgcss = hashset![repo.derive_hg_changeset(&ctx, bcs_id_should_fail).await?];
 
-            let res = do_pushrebase(
-                &ctx,
-                &repo,
-                &PushrebaseFlags::default(),
-                &book,
-                &hgcss,
-                None,
-            )
-            .await;
+            let res = do_pushrebase(&ctx, &repo, &PushrebaseFlags::default(), &book, &hgcss).await;
 
             should_have_conflicts(res);
             let hgcss = hashset![
@@ -2844,15 +2768,7 @@ mod tests {
                     .await?,
             ];
 
-            do_pushrebase(
-                &ctx,
-                &repo,
-                &PushrebaseFlags::default(),
-                &book,
-                &hgcss,
-                None,
-            )
-            .await?;
+            do_pushrebase(&ctx, &repo, &PushrebaseFlags::default(), &book, &hgcss).await?;
 
             Ok(())
         })
@@ -2915,15 +2831,7 @@ mod tests {
                 repo.derive_hg_changeset(&ctx, bcs_id_second_merge).await?,
             ];
 
-            do_pushrebase(
-                &ctx,
-                &repo,
-                &PushrebaseFlags::default(),
-                &book,
-                &hgcss,
-                None,
-            )
-            .await?;
+            do_pushrebase(&ctx, &repo, &PushrebaseFlags::default(), &book, &hgcss).await?;
 
             let new_master = get_bookmark_value(&ctx, &repo, &BookmarkName::new("master")?)
                 .await?
@@ -2997,15 +2905,7 @@ mod tests {
 
             let hgcss = hashset![repo.derive_hg_changeset(&ctx, bcs_id_merge).await?,];
 
-            do_pushrebase(
-                &ctx,
-                &repo,
-                &PushrebaseFlags::default(),
-                &book,
-                &hgcss,
-                None,
-            )
-            .await?;
+            do_pushrebase(&ctx, &repo, &PushrebaseFlags::default(), &book, &hgcss).await?;
 
             let new_master = get_bookmark_value(&ctx, &repo, &BookmarkName::new("master")?)
                 .await?
@@ -3089,15 +2989,7 @@ mod tests {
 
             let hgcss = hashset![repo.derive_hg_changeset(&ctx, bcs_id_merge).await?];
 
-            do_pushrebase(
-                &ctx,
-                &repo,
-                &PushrebaseFlags::default(),
-                &book,
-                &hgcss,
-                None,
-            )
-            .await?;
+            do_pushrebase(&ctx, &repo, &PushrebaseFlags::default(), &book, &hgcss).await?;
 
             let new_master = get_bookmark_value(&ctx, &repo.clone(), &BookmarkName::new("master")?)
                 .await?
@@ -3151,12 +3043,11 @@ mod tests {
             &Default::default(),
             &master_bookmark(),
             &hashset![hg_cs],
-            None,
         )
         .map_err(|err| format_err!("{:?}", err))
         .await?;
 
-        let bcs = result.head.load(&ctx, repo.blobstore()).await?;
+        let bcs = result.head.load(&ctx, repo.repo_blobstore()).await?;
         assert_eq!(bcs.file_changes().collect::<Vec<_>>(), vec![]);
 
         let master_hg = repo.derive_hg_changeset(&ctx, result.head).await?;
@@ -3267,7 +3158,7 @@ mod tests {
         let hook: Box<dyn PushrebaseHook> = Box::new(InvalidPushrebaseHook {});
         let hooks = vec![hook];
 
-        let bcs_merge = bcs_id_merge.load(&ctx, repo.blobstore()).await?;
+        let bcs_merge = bcs_id_merge.load(&ctx, repo.repo_blobstore()).await?;
 
         let book = master_bookmark();
         let res = do_pushrebase_bonsai(
@@ -3276,7 +3167,6 @@ mod tests {
             &Default::default(),
             &book,
             &hashset![bcs_merge.clone()],
-            None,
             &hooks[..],
         )
         .await;
@@ -3297,7 +3187,7 @@ mod tests {
         let before_head_commit = "79a13814c5ce7330173ec04d279bf95ab3f652fb";
         let head_bcs_id = CreateCommitContext::new(&ctx, &repo, vec![before_head_commit])
             .add_file("file", "content")
-            .add_extra(FAILUPUSHREBASE_EXTRA.to_string(), vec![])
+            .add_extra(FAIL_PUSHREBASE_EXTRA.to_string(), vec![])
             .commit()
             .await?;
 
@@ -3316,7 +3206,6 @@ mod tests {
             &Default::default(),
             &BookmarkName::new("head")?,
             &hashset![hg_cs],
-            None,
         )
         .await;
 
@@ -3344,7 +3233,6 @@ mod tests {
             &Default::default(),
             &BookmarkName::new("head")?,
             &hashset![hg_cs],
-            None,
         )
         .map_err(|err| format_err!("{:?}", err))
         .await?;
@@ -3355,14 +3243,14 @@ mod tests {
     async fn ensure_content(
         ctx: &CoreContext,
         hg_cs_id: HgChangesetId,
-        repo: &BlobRepo,
+        repo: &impl Repo,
         expected: BTreeMap<String, String>,
     ) -> Result<(), Error> {
-        let cs = hg_cs_id.load(ctx, repo.blobstore()).await?;
+        let cs = hg_cs_id.load(ctx, repo.repo_blobstore()).await?;
 
         let entries = cs
             .manifestid()
-            .list_all_entries(ctx.clone(), repo.get_blobstore())
+            .list_all_entries(ctx.clone(), repo.repo_blobstore().clone())
             .try_collect::<Vec<_>>()
             .await?;
 
@@ -3370,7 +3258,7 @@ mod tests {
         for (path, entry) in entries {
             match entry {
                 Entry::Leaf((_, filenode_id)) => {
-                    let store = repo.blobstore();
+                    let store = repo.repo_blobstore();
                     let content_id = filenode_id.load(ctx, store).await?.content_id();
                     let content = filestore::fetch_concat(store, ctx, content_id).await?;
 

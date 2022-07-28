@@ -5,18 +5,23 @@
  * GNU General Public License version 2.
  */
 
-use crate::{ErrorKind, FastlogParent};
+use crate::ErrorKind;
+use crate::FastlogParent;
 use anyhow::Error;
-use blobstore::{Blobstore, BlobstoreBytes};
+use blobstore::Blobstore;
+use blobstore::BlobstoreBytes;
 use context::CoreContext;
 use futures::future::try_join_all;
 use manifest::Entry;
 use maplit::hashset;
-use mononoke_types::{
-    fastlog_batch::{FastlogBatch, ParentOffset},
-    ChangesetId, FileUnodeId, ManifestUnodeId,
-};
-use std::collections::{HashMap, HashSet, VecDeque};
+use mononoke_types::fastlog_batch::FastlogBatch;
+use mononoke_types::fastlog_batch::ParentOffset;
+use mononoke_types::ChangesetId;
+use mononoke_types::FileUnodeId;
+use mononoke_types::ManifestUnodeId;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 pub(crate) async fn create_new_batch(
@@ -91,8 +96,7 @@ fn create_merged_list(
 
     let mut cs_id_to_parents: HashMap<_, _> = parents_lists
         .into_iter()
-        .map(|list| list.into_iter())
-        .flatten()
+        .flat_map(|list| list.into_iter())
         .collect();
     cs_id_to_parents.insert(merge_cs_id, parents_of_merge_commit.clone());
 
@@ -107,8 +111,7 @@ fn create_merged_list(
         for p in parents {
             if let FastlogParent::Known(p) = p {
                 if let Some(parents) = cs_id_to_parents.get(&p) {
-                    if !used.contains(&p) {
-                        used.insert(p);
+                    if used.insert(p) {
                         q.push_back((p, parents.clone()));
                     }
                 }
@@ -196,7 +199,7 @@ pub fn unode_entry_to_fastlog_batch_key(
     format!("fastlogbatch.{}", key_part)
 }
 
-pub(crate) async fn fetch_flattened<B: Blobstore>(
+pub async fn fetch_flattened<B: Blobstore>(
     batch: &FastlogBatch,
     ctx: &CoreContext,
     blobstore: &B,
@@ -238,7 +241,9 @@ mod test {
     use fbinit::FacebookInit;
     use fixtures::Linear;
     use fixtures::TestRepoFixture;
-    use mononoke_types_mocks::changesetid::{ONES_CSID, THREES_CSID, TWOS_CSID};
+    use mononoke_types_mocks::changesetid::ONES_CSID;
+    use mononoke_types_mocks::changesetid::THREES_CSID;
+    use mononoke_types_mocks::changesetid::TWOS_CSID;
 
     #[fbinit::test]
     async fn fetch_flattened_simple(fb: FacebookInit) -> Result<(), Error> {
@@ -359,7 +364,7 @@ mod test {
             (THREES_CSID, vec![]),
         ];
 
-        let raw_list = Vec::from(convert_to_raw_list(list.clone()));
+        let raw_list = convert_to_raw_list(list.clone());
         let expected = vec![
             (ONES_CSID, vec![ParentOffset::new(1), ParentOffset::new(2)]),
             (TWOS_CSID, vec![]),
@@ -374,7 +379,7 @@ mod test {
             (THREES_CSID, vec![]),
         ];
 
-        let raw_list = Vec::from(convert_to_raw_list(list.clone()));
+        let raw_list = convert_to_raw_list(list.clone());
         let expected = vec![
             (ONES_CSID, vec![ParentOffset::new(1)]),
             (TWOS_CSID, vec![ParentOffset::new(1)]),

@@ -10,14 +10,18 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use blobrepo::BlobRepo;
-use bookmarks::{BookmarkName, BookmarkUpdateReason, Freshness};
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
+use bookmarks::Freshness;
 use context::CoreContext;
 use fbinit::FacebookInit;
 use futures::stream::TryStreamExt;
 use mononoke_types::ChangesetId;
 use tests_utils::drawdag::create_from_dag;
 
-use crate::repo::{BookmarkFreshness, Repo, RepoContext};
+use crate::repo::BookmarkFreshness;
+use crate::repo::Repo;
+use crate::repo::RepoContext;
 
 async fn init_repo(ctx: &CoreContext) -> Result<(RepoContext, BTreeMap<String, ChangesetId>)> {
     let blob_repo: BlobRepo = test_repo_factory::build_empty(ctx.fb)?;
@@ -36,12 +40,11 @@ async fn init_repo(ctx: &CoreContext) -> Result<(RepoContext, BTreeMap<String, C
         &BookmarkName::new("trunk")?,
         changesets["C"],
         BookmarkUpdateReason::TestMove,
-        None,
     )?;
     txn.commit().await?;
 
     let repo = Repo::new_test(ctx.clone(), blob_repo).await?;
-    let repo_ctx = RepoContext::new(ctx.clone(), Arc::new(repo)).await?;
+    let repo_ctx = RepoContext::new_test(ctx.clone(), Arc::new(repo)).await?;
     Ok((repo_ctx, changesets))
 }
 
@@ -49,7 +52,6 @@ async fn init_repo(ctx: &CoreContext) -> Result<(RepoContext, BTreeMap<String, C
 async fn create_bookmark(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
     let (repo, changesets) = init_repo(&ctx).await?;
-    let repo = repo.write().await?;
 
     // Can create public bookmarks on existing changesets (ancestors of trunk).
     repo.create_bookmark("bookmark1", changesets["A"], None)
@@ -90,7 +92,6 @@ async fn create_bookmark(fb: FacebookInit) -> Result<()> {
 async fn move_bookmark(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
     let (repo, changesets) = init_repo(&ctx).await?;
-    let repo = repo.write().await?;
 
     repo.move_bookmark("trunk", changesets["E"], None, false, None)
         .await?;
@@ -145,7 +146,6 @@ async fn move_bookmark(fb: FacebookInit) -> Result<()> {
 async fn delete_bookmark(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
     let (repo, changesets) = init_repo(&ctx).await?;
-    let repo = repo.write().await?;
 
     repo.create_bookmark("bookmark1", changesets["A"], None)
         .await?;

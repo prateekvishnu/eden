@@ -7,10 +7,14 @@
 
 #![feature(result_flattening)]
 
-use anyhow::{anyhow, Error, Result};
+use anyhow::anyhow;
+use anyhow::Error;
+use anyhow::Result;
 use clientinfo::ClientInfo;
-use permission_checker::{MononokeIdentitySet, MononokeIdentitySetExt};
-use session_id::{generate_session_id, SessionId};
+use permission_checker::MononokeIdentitySet;
+use permission_checker::MononokeIdentitySetExt;
+use session_id::generate_session_id;
+use session_id::SessionId;
 use std::net::IpAddr;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -19,8 +23,10 @@ use trust_dns_resolver::TokioAsyncResolver;
 #[derive(Clone, Debug, Default)]
 pub struct Metadata {
     session_id: SessionId,
-    is_trusted_client: bool,
     identities: MononokeIdentitySet,
+    /// If the identities were proxied, this is the true and original
+    /// identities from the request.
+    original_identities: Option<MononokeIdentitySet>,
     client_debug: bool,
     client_ip: Option<IpAddr>,
     client_hostname: Option<String>,
@@ -32,7 +38,6 @@ pub struct Metadata {
 impl Metadata {
     pub async fn new(
         session_id: Option<&String>,
-        is_trusted_client: bool,
         identities: MononokeIdentitySet,
         client_debug: bool,
         client_ip: Option<IpAddr>,
@@ -60,8 +65,8 @@ impl Metadata {
 
         Self {
             session_id,
-            is_trusted_client,
             identities,
+            original_identities: None,
             client_debug,
             client_ip,
             client_hostname,
@@ -105,6 +110,11 @@ impl Metadata {
         self
     }
 
+    pub fn add_original_identities(&mut self, identities: MononokeIdentitySet) -> &mut Self {
+        self.original_identities = Some(identities);
+        self
+    }
+
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
     }
@@ -113,12 +123,12 @@ impl Metadata {
         &self.identities
     }
 
-    pub fn raw_encoded_cats(&self) -> &Option<String> {
-        &self.raw_encoded_cats
+    pub fn original_identities(&self) -> Option<&MononokeIdentitySet> {
+        self.original_identities.as_ref()
     }
 
-    pub fn is_trusted_client(&self) -> bool {
-        self.is_trusted_client
+    pub fn raw_encoded_cats(&self) -> &Option<String> {
+        &self.raw_encoded_cats
     }
 
     pub fn set_identities(mut self, identities: MononokeIdentitySet) -> Self {

@@ -9,8 +9,8 @@
 #include <fcntl.h>
 #include <folly/String.h>
 #ifndef _WIN32
-#include <sys/socket.h>
-#include <unistd.h>
+#include <folly/portability/Sockets.h>
+#include <folly/portability/Unistd.h>
 #else
 #include <event2/util.h> // @manual
 #endif

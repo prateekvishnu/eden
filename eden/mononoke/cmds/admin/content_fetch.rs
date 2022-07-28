@@ -5,19 +5,25 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Error};
+use anyhow::format_err;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use blobstore::Loadable;
-use clap_old::{App, ArgMatches, SubCommand};
-use cmdlib::{
-    args::{self, MononokeMatches},
-    helpers,
-};
+use clap_old::App;
+use clap_old::ArgMatches;
+use clap_old::SubCommand;
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers;
 use context::CoreContext;
 use fbinit::FacebookInit;
-use manifest::{Entry, Manifest, ManifestOps};
+use manifest::Entry;
+use manifest::Manifest;
+use manifest::ManifestOps;
 use mercurial_derived_data::DeriveHgChangeset;
-use mercurial_types::{HgFileNodeId, HgManifestId, MPath};
+use mercurial_types::HgFileNodeId;
+use mercurial_types::HgManifestId;
+use mercurial_types::MPath;
 use mononoke_types::FileType;
 use slog::Logger;
 
@@ -45,7 +51,7 @@ pub async fn subcommand_content_fetch<'a>(
 
     let ctx = CoreContext::new_with_logger(fb, logger.clone());
 
-    let repo = args::open_repo(fb, &logger, &matches).await?;
+    let repo = args::open_repo(fb, &logger, matches).await?;
     let entry = fetch_entry(&ctx, &repo, &rev, &path).await?;
 
     match entry {
@@ -118,7 +124,7 @@ async fn fetch_entry(
 ) -> Result<Entry<HgManifestId, (FileType, HgFileNodeId)>, Error> {
     let mpath = MPath::new(path)?;
 
-    let bcs_id = helpers::csid_resolve(&ctx, repo.clone(), rev.to_string()).await?;
+    let bcs_id = helpers::csid_resolve(ctx, repo.clone(), rev.to_string()).await?;
     let hg_cs_id = repo.derive_hg_changeset(ctx, bcs_id).await?;
     let hg_cs = hg_cs_id.load(ctx, repo.blobstore()).await?;
 

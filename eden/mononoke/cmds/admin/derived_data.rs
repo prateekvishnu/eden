@@ -5,41 +5,51 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Error};
+use anyhow::anyhow;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use blobrepo_override::DangerousOverride;
 use blobstore::Loadable;
-use cacheblob::{dummy::DummyLease, LeaseOps};
-use clap_old::{App, Arg, ArgMatches, SubCommand};
-use cmdlib::{
-    args::{self, MononokeMatches},
-    helpers::{self, csid_resolve},
-};
-use context::{CoreContext, SessionClass};
+use cacheblob::dummy::DummyLease;
+use cacheblob::LeaseOps;
+use clap_old::App;
+use clap_old::Arg;
+use clap_old::ArgMatches;
+use clap_old::SubCommand;
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers;
+use cmdlib::helpers::csid_resolve;
+use context::CoreContext;
+use context::SessionClass;
 use derived_data::BonsaiDerived;
 use derived_data_manager::BonsaiDerivable;
-use derived_data_utils::{
-    derived_data_utils, derived_data_utils_for_config, DEFAULT_BACKFILLING_CONFIG_NAME,
-    POSSIBLE_DERIVED_TYPES,
-};
+use derived_data_utils::derived_data_utils;
+use derived_data_utils::derived_data_utils_for_config;
+use derived_data_utils::DEFAULT_BACKFILLING_CONFIG_NAME;
+use derived_data_utils::POSSIBLE_DERIVED_TYPES;
 use fbinit::FacebookInit;
 use fsnodes::RootFsnodeId;
-use futures::{
-    future::{try_join_all, FutureExt as PreviewFutureExt},
-    stream, StreamExt, TryStreamExt,
-};
+use futures::future::try_join_all;
+use futures::future::FutureExt as PreviewFutureExt;
+use futures::stream;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use futures_stats::TimedFutureExt;
 use manifest::ManifestOps;
 use mercurial_derived_data::DeriveHgChangeset;
 use mercurial_derived_data::MappedHgChangesetId;
-use mononoke_types::{ChangesetId, ContentId, FileType, MPath};
+use mononoke_types::ChangesetId;
+use mononoke_types::ContentId;
+use mononoke_types::FileType;
+use mononoke_types::MPath;
 use skeleton_manifest::RootSkeletonManifestId;
-use slog::{info, Logger};
-use std::{
-    collections::{HashMap, HashSet},
-    fmt,
-    sync::Arc,
-};
+use slog::info;
+use slog::Logger;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fmt;
+use std::sync::Arc;
 use unodes::RootUnodeManifestId;
 
 use crate::error::SubcommandError;
@@ -195,7 +205,7 @@ pub async fn subcommand_derived_data<'a>(
 
     match sub_m.subcommand() {
         (SUBCOMMAND_EXISTS, Some(arg_matches)) => {
-            let repo = args::open_repo(fb, &logger, &matches).await?;
+            let repo = args::open_repo(fb, &logger, matches).await?;
             let hashes_or_bookmarks: Vec<_> = arg_matches
                 .values_of(ARG_HASH_OR_BOOKMARK)
                 .map(|matches| matches.map(|cs| cs.to_string()).collect())
@@ -210,7 +220,7 @@ pub async fn subcommand_derived_data<'a>(
 
             let backfill_config_name = sub_m
                 .value_of(ARG_BACKFILL_CONFIG_NAME)
-                .unwrap_or_else(|| DEFAULT_BACKFILLING_CONFIG_NAME);
+                .unwrap_or(DEFAULT_BACKFILLING_CONFIG_NAME);
 
             check_derived_data_exists(
                 ctx,
@@ -223,7 +233,7 @@ pub async fn subcommand_derived_data<'a>(
             .await
         }
         (SUBCOMMAND_COUNT_UNDERIVED, Some(arg_matches)) => {
-            let repo = args::open_repo(fb, &logger, &matches).await?;
+            let repo = args::open_repo(fb, &logger, matches).await?;
             let hashes_or_bookmarks: Vec<_> = arg_matches
                 .values_of(ARG_HASH_OR_BOOKMARK)
                 .map(|matches| matches.map(|cs| cs.to_string()).collect())
@@ -238,7 +248,7 @@ pub async fn subcommand_derived_data<'a>(
 
             let backfill_config_name = sub_m
                 .value_of(ARG_BACKFILL_CONFIG_NAME)
-                .unwrap_or_else(|| DEFAULT_BACKFILLING_CONFIG_NAME);
+                .unwrap_or(DEFAULT_BACKFILLING_CONFIG_NAME);
 
             count_underived(
                 ctx,
@@ -251,21 +261,21 @@ pub async fn subcommand_derived_data<'a>(
             .await
         }
         (SUBCOMMAND_VERIFY_MANIFESTS, Some(arg_matches)) => {
-            let repo = args::open_repo(fb, &logger, &matches).await?;
+            let repo = args::open_repo(fb, &logger, matches).await?;
             let hash_or_bookmark = arg_matches
                 .value_of(ARG_HASH_OR_BOOKMARK)
                 .map(|m| m.to_string())
                 .unwrap();
 
-            let derived_data_types = arg_matches
-                .values_of(ARG_TYPE)
-                .map(|matches| matches.map(|cs| cs.to_string()).collect())
-                .unwrap_or_else(|| {
+            let derived_data_types = arg_matches.values_of(ARG_TYPE).map_or_else(
+                || {
                     MANIFEST_DERIVED_DATA_TYPES
-                        .into_iter()
+                        .iter()
                         .map(|s| String::from(*s))
                         .collect::<Vec<_>>()
-                });
+                },
+                |matches| matches.map(|cs| cs.to_string()).collect(),
+            );
 
             let fetch_derived = arg_matches.is_present(ARG_IF_DERIVED);
 
@@ -279,14 +289,14 @@ pub async fn subcommand_derived_data<'a>(
             .await
         }
         (SUBCOMMAND_DERIVE, Some(arg_matches)) => {
-            let mut repo_factory = args::get_repo_factory(&matches)?;
+            let mut repo_factory = args::get_repo_factory(matches)?;
 
             if arg_matches.is_present(ARG_REDERIVE) {
                 repo_factory.with_bonsai_hg_mapping_override();
             }
 
             let repo: BlobRepo =
-                args::open_repo_with_factory(fb, &logger, &matches, repo_factory).await?;
+                args::open_repo_with_factory(fb, &logger, matches, repo_factory).await?;
             let repo = repo.dangerous_override(|_| Arc::new(DummyLease {}) as Arc<dyn LeaseOps>);
             let ty = arg_matches
                 .value_of(ARG_TYPE)
@@ -398,7 +408,7 @@ async fn count_underived(
     let derived_utils = &derived_utils;
     let res = stream::iter(cs_ids)
         .map(|cs_id| async move {
-            let underived = derived_utils.count_underived(&ctx, &repo, cs_id).await?;
+            let underived = derived_utils.count_underived(ctx, repo, cs_id).await?;
             Result::<_, Error>::Ok((cs_id, underived))
         })
         .buffer_unordered(10)
@@ -512,8 +522,7 @@ impl FileContentValue {
         let contents: HashSet<_> = self
             .values
             .iter()
-            .map(ManifestData::content)
-            .flatten()
+            .filter_map(ManifestData::content)
             .collect();
         // Skeleton manifests have no content, so 0 is valid for them.
         // Otherwise, we should have exactly one.

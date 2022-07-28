@@ -6,17 +6,28 @@
  */
 
 use crate::RedactionConfigBlobstore;
-use anyhow::{Context, Error, Result};
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
-use blobstore::{Blobstore, Loadable};
-use cached_config::{ConfigHandle, ConfigStore};
+use blobstore::Blobstore;
+use blobstore::Loadable;
+use cached_config::ConfigHandle;
+use cached_config::ConfigStore;
 use context::CoreContext;
-use futures::stream::{self, StreamExt, TryStreamExt};
-use mononoke_types::{typed_hash::RedactionKeyListId, RedactionKeyList, Timestamp};
+use futures::stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use mononoke_types::typed_hash::RedactionKeyListId;
+use mononoke_types::RedactionKeyList;
+use mononoke_types::Timestamp;
 use redaction_set::RedactionSets;
-use reloader::{Loader, Reloader};
-use sql::{queries, Connection};
-use sql_construct::{SqlConstruct, SqlConstructFromMetadataDatabaseConfig};
+use reloader::Loader;
+use reloader::Reloader;
+use sql::queries;
+use sql::Connection;
+use sql_construct::SqlConstruct;
+use sql_construct::SqlConstructFromMetadataDatabaseConfig;
 use sql_ext::SqlConnections;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -187,7 +198,7 @@ impl InnerConfig {
                 .map(|redaction| async move {
                     let keylist: RedactionKeyList = RedactionKeyListId::from_str(&redaction.id)
                         .with_context(|| format!("Invalid keylist id: {}", redaction.id))?
-                        .load(&ctx, &blobstore)
+                        .load(ctx, &blobstore)
                         .await
                         .with_context(|| format!("Keylist with id {} not found", redaction.id))?;
                     let keys_with_metadata = keylist
@@ -241,7 +252,7 @@ impl SqlRedactedContentStore {
 
     pub async fn insert_redacted_blobs(
         &self,
-        content_keys: &Vec<String>,
+        content_keys: &[String],
         task: &String,
         add_timestamp: &Timestamp,
         log_only: bool,
@@ -259,7 +270,7 @@ impl SqlRedactedContentStore {
     }
 
     pub async fn delete_redacted_blobs(&self, content_keys: &[String]) -> Result<()> {
-        DeleteRedactedBlobs::query(&self.write_connection, &content_keys[..])
+        DeleteRedactedBlobs::query(&self.write_connection, content_keys)
             .await
             .map_err(Error::from)
             .map(|_| ())
@@ -316,8 +327,8 @@ mod test {
         let all = store.get_all_redacted_blobs().await.expect("select failed");
         let res = all.redacted();
 
-        assert_eq!(res.contains_key(&key_c), true);
-        assert_eq!(res.contains_key(&key_d), true);
+        assert!(res.contains_key(&key_c));
+        assert!(res.contains_key(&key_d));
         assert_eq!(res.len(), 2);
     }
 }

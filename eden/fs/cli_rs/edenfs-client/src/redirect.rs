@@ -6,9 +6,13 @@
  */
 
 use anyhow::anyhow;
-use edenfs_error::{EdenFsError, Result, ResultExt};
+use edenfs_error::EdenFsError;
+use edenfs_error::Result;
+use edenfs_error::ResultExt;
 use edenfs_utils::metadata::MetadataExt;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
+use serde::Deserializer;
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
@@ -26,7 +30,8 @@ const REPO_SOURCE: &str = ".eden-redirections";
 const USER_REDIRECTION_SOURCE: &str = ".eden/client/config.toml:redirections";
 const APFS_HELPER: &str = "/usr/local/libexec/eden/eden_apfs_mount_helper";
 
-#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+#[derive(Clone, Serialize, Copy, Debug, PartialEq, PartialOrd)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum RedirectionType {
     /// Linux: a bind mount to a mkscratch generated path
     /// macOS: a mounted dmg file in a mkscratch generated path
@@ -57,6 +62,7 @@ impl FromStr for RedirectionType {
 
 #[derive(Debug)]
 enum RedirectionState {
+    #[allow(dead_code)]
     /// Matches the expectations of our configuration as far as we can tell
     MatchesConfiguration,
     /// Something Mounted that we don't have configuration for
@@ -89,7 +95,9 @@ impl fmt::Display for RedirectionState {
 pub struct Redirection {
     repo_path: PathBuf,
     redir_type: RedirectionType,
+    #[allow(dead_code)]
     target: Option<PathBuf>,
+    #[allow(dead_code)]
     source: String,
     state: Option<RedirectionState>,
 }

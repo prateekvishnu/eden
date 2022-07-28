@@ -9,10 +9,14 @@
 
 use std::collections::HashMap;
 
-use anyhow::{bail, Context, Result};
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Result;
 use bytes::Bytes as BytesNew;
-use bytes_old::{BufMut, Bytes};
-use quickcheck::{Arbitrary, Gen};
+use bytes_old::BufMut;
+use bytes_old::Bytes;
+use quickcheck::Arbitrary;
+use quickcheck::Gen;
 
 use crate::chunk::Chunk;
 use crate::errors::ErrorKind;
@@ -229,11 +233,11 @@ impl PartHeader {
         // the actual params themselves
         for &(ref key, ref val) in &mparams {
             out_buf.put_slice(key.as_bytes());
-            out_buf.put_slice(&val);
+            out_buf.put_slice(val);
         }
         for &(ref key, ref val) in &aparams {
             out_buf.put_slice(key.as_bytes());
-            out_buf.put_slice(&val);
+            out_buf.put_slice(val);
         }
 
         // This can only fail because the chunk is too big, but the restrictions
@@ -321,7 +325,7 @@ fn decode_header_param(buf: &mut Bytes, ksize: usize, vsize: usize) -> Result<(S
     let key = buf.drain_str(ksize).context("invalid key")?;
     let val = buf.split_to(vsize);
     let val = bytes_ext::copy_from_old(val);
-    return Ok((key, val));
+    Ok((key, val))
 }
 
 /// Builder for a bundle2 part header.
@@ -455,7 +459,8 @@ impl Arbitrary for PartHeaderType {
 
 #[cfg(test)]
 mod test {
-    use quickcheck::{quickcheck, TestResult};
+    use quickcheck::quickcheck;
+    use quickcheck::TestResult;
 
     use super::*;
     use crate::quickcheck_types::QCBytes;

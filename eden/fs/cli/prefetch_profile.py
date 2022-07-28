@@ -3,6 +3,8 @@
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2.
 
+# pyre-unsafe
+
 import argparse
 import os
 import re
@@ -367,6 +369,12 @@ class ActivateProfileCmd(Subcmd):
     def setup_parser(self, parser: argparse.ArgumentParser) -> None:
         parser = add_common_args(parser)
         parser.add_argument("profile_name", help="Profile to activate.")
+        parser.add_argument(
+            "--force-fetch",
+            help="Fetch the profile even if the profile has already been activated",
+            default=False,
+            action="store_true",
+        )
 
     def run(self, args: argparse.Namespace) -> int:
         checkout = args.checkout
@@ -382,7 +390,7 @@ class ActivateProfileCmd(Subcmd):
             telemetry_sample.add_bool("skip_prefetch", args.skip_prefetch)
 
             activation_result = checkout.activate_profile(
-                args.profile_name, telemetry_sample
+                args.profile_name, telemetry_sample, args.force_fetch
             )
 
             # error in activation, no point in continuing, so exit early
@@ -691,94 +699,13 @@ class FetchPredictiveProfileCmd(Subcmd):
         return 0
 
 
-@prefetch_profile_cmd(
-    "disable",
-    "Disables prefetch profiles locally",
-)
-class DisableProfileCmd(Subcmd):
-    def run(self, args: argparse.Namespace) -> int:
-        instance = get_eden_instance(args)
-        config = instance.read_local_config()
-        prefetch_profiles_section = {}
-        if config.has_section("prefetch-profiles"):
-            prefetch_profiles_section.update(
-                config.get_section_str_to_any("prefetch-profiles")
-            )
-        prefetch_profiles_section["prefetching-enabled"] = False
-        config["prefetch-profiles"] = prefetch_profiles_section
-        instance.write_local_config(config)
-
-        return 0
-
-
-@prefetch_profile_cmd(
-    "enable",
-    "Enables prefetch profiles locally",
-)
-class EnableProfileCmd(Subcmd):
-    def run(self, args: argparse.Namespace) -> int:
-        instance = get_eden_instance(args)
-        config = instance.read_local_config()
-        prefetch_profiles_section = {}
-        if config.has_section("prefetch-profiles"):
-            prefetch_profiles_section.update(
-                config.get_section_str_to_any("prefetch-profiles")
-            )
-        prefetch_profiles_section["prefetching-enabled"] = True
-        config["prefetch-profiles"] = prefetch_profiles_section
-        instance.write_local_config(config)
-
-        return 0
-
-
-# help=None hides this from users in `eden prefetch-profile --help`
-@prefetch_profile_cmd(
-    "enable-predictive",
-    None,
-)
-class EnablePredictiveProfileCmd(Subcmd):
-    def run(self, args: argparse.Namespace) -> int:
-        instance = get_eden_instance(args)
-        config = instance.read_local_config()
-        prefetch_profiles_section = {}
-        if config.has_section("prefetch-profiles"):
-            prefetch_profiles_section.update(
-                config.get_section_str_to_any("prefetch-profiles")
-            )
-        prefetch_profiles_section["predictive-prefetching-enabled"] = True
-        config["prefetch-profiles"] = prefetch_profiles_section
-        instance.write_local_config(config)
-
-        return 0
-
-
-# help=None hides this from users in `eden prefetch-profile --help`
-@prefetch_profile_cmd(
-    "disable-predictive",
-    None,
-)
-class DisablePredictiveProfileCmd(Subcmd):
-    def run(self, args: argparse.Namespace) -> int:
-        instance = get_eden_instance(args)
-        config = instance.read_local_config()
-        prefetch_profiles_section = {}
-        if config.has_section("prefetch-profiles"):
-            prefetch_profiles_section.update(
-                config.get_section_str_to_any("prefetch-profiles")
-            )
-        prefetch_profiles_section["predictive-prefetching-enabled"] = False
-        config["prefetch-profiles"] = prefetch_profiles_section
-        instance.write_local_config(config)
-
-        return 0
-
-
 class PrefetchProfileCmd(Subcmd):
     NAME = "prefetch-profile"
     HELP = (
         "Create, manage, and use Prefetch Profiles. This command is "
         " primarily for use in automation."
     )
+    ALIASES = ["pp"]
 
     def setup_parser(self, parser: argparse.ArgumentParser) -> None:
         self.add_subcommands(parser, prefetch_profile_cmd.commands)

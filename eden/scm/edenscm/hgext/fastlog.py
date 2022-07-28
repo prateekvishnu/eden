@@ -51,7 +51,7 @@ FASTLOG_QUEUE_SIZE = 1000
 FASTLOG_TIMEOUT = 20
 
 
-def extsetup(ui):
+def extsetup(ui) -> None:
     extensions.wrapfunction(revset, "_follow", fastlogfollow)
 
 
@@ -114,7 +114,7 @@ def lazyparents(rev, public, parentfunc):
                         public.add(p)
 
 
-def dirmatches(files, paths):
+def dirmatches(files, paths) -> bool:
     """dirmatches(files, paths)
     Return true if any files match directories in paths
     Expects paths to end in '/' if they are directories.
@@ -153,7 +153,7 @@ def originator(parentfunc, rev):
             yield p
 
 
-def fastlogfollow(orig, repo, subset, x, name, followfirst=False):
+def fastlogfollow(orig, repo, subset, x, name, followfirst: bool = False):
     if followfirst:
         # fastlog does not support followfirst=True
         repo.ui.debug("fastlog: not used because 'followfirst' is set\n")
@@ -191,7 +191,7 @@ def fastlogfollow(orig, repo, subset, x, name, followfirst=False):
     try:
         # Test that the GraphQL client can be constructed, to rule
         # out configuration issues like missing `.arcrc` etc.
-        _graphqlclient = graphql.Client(repo=repo)
+        graphql.Client(repo=repo)
     except Exception as ex:
         repo.ui.debug(
             "fastlog: not used because graphql client cannot be constructed: %r\n" % ex
@@ -211,29 +211,28 @@ def fastlogfollow(orig, repo, subset, x, name, followfirst=False):
         )
         return orig(repo, subset, x, name, followfirst)
 
-    files = [path]
-    if not files or "." in files:
+    if not path or path == ".":
         # Walking the whole repo - bail on fastlog
         repo.ui.debug("fastlog: not used because walking through the entire repo\n")
         return orig(repo, subset, x, name, followfirst)
 
     dirs = set()
+    files = set()
     wvfs = repo.wvfs
-    for path in files:
-        if wvfs.isdir(path) and not wvfs.islink(path):
-            dirs.update([path + "/"])
+
+    if wvfs.isdir(path) and not wvfs.islink(path):
+        dirs.add(path + "/")
+    else:
+        if repo.ui.configbool("fastlog", "files"):
+            files.add(path)
+
         else:
-            if repo.ui.configbool("fastlog", "files"):
-                dirs.update([path])
-            else:
-                # bail on symlinks, and also bail on files for now
-                # with follow behavior, for files, we are supposed
-                # to track copies / renames, but it isn't convenient
-                # to do this through scmquery
-                repo.ui.debug(
-                    "fastlog: not used because %s is not a directory\n" % path
-                )
-                return orig(repo, subset, x, name, followfirst)
+            # bail on symlinks, and also bail on files for now
+            # with follow behavior, for files, we are supposed
+            # to track copies / renames, but it isn't convenient
+            # to do this through scmquery
+            repo.ui.debug("fastlog: not used because %s is not a directory\n" % path)
+            return orig(repo, subset, x, name, followfirst)
 
     rev = startrev
 
@@ -262,22 +261,39 @@ def fastlogfollow(orig, repo, subset, x, name, followfirst=False):
                 else:
                     public.add(cur)
 
-    def fastlog(repo, startrev, dirs, localmatch):
+    def fastlog(repo, startrev, dirs, files, localmatch):
         filefunc = repo.changelog.readfiles
         for parent in lazyparents(startrev, public, parents):
-            files = filefunc(parent)
-            if dirmatches(files, dirs):
+            # Undo relevant file renames in parent so we end up
+            # passing the renamee to scmquery. Note that this will not
+            # work for non-linear drafts where a file does not have
+            # linear rename history.
+            undorenames(repo[parent], files)
+
+            if dirmatches(filefunc(parent), dirs.union(files)):
                 yield parent
         repo.ui.debug("found common parent at %s\n" % repo[parent].hex())
-        for rev in combinator(repo, parent, dirs, localmatch):
+        for rev in combinator(repo, parent, dirs.union(files), localmatch):
             yield rev
 
-    def combinator(repo, rev, dirs, localmatch):
-        """combinator(repo, rev, dirs, localmatch)
+    def undorenames(ctx, files):
+        """mutate files to undo any file renames in ctx"""
+        renamed = []
+        for f in files:
+            r = f in ctx and ctx[f].renamed()
+            if r:
+                renamed.append((r[0], f))
+        for (src, dst) in renamed:
+            files.remove(dst)
+            files.add(src)
+
+    def combinator(repo, rev, paths, localmatch):
+        """combinator(repo, rev, paths, localmatch)
         Make parallel local and remote queries along ancestors of
         rev along path and combine results, eliminating duplicates,
-        restricting results to those which match dirs
+        restricting results to those which match paths
         """
+
         LOCAL = "L"
         REMOTE = "R"
         queue = util.queue(FASTLOG_QUEUE_SIZE + 100)
@@ -285,10 +301,10 @@ def fastlogfollow(orig, repo, subset, x, name, followfirst=False):
 
         localenabled = repo.ui.configbool("fastlog", "scan-local-repo")
         if localenabled:
-            local = LocalIteratorThread(queue, LOCAL, rev, dirs, localmatch, repo)
+            local = LocalIteratorThread(queue, LOCAL, rev, paths, localmatch, repo)
         else:
             local = None
-        remote = FastLogThread(queue, REMOTE, reponame, "hg", hash, dirs, repo)
+        remote = FastLogThread(queue, REMOTE, reponame, "hg", hash, paths, repo)
 
         # Allow debugging either remote or local path
         debug = repo.ui.config("fastlog", "debug")
@@ -331,7 +347,7 @@ def fastlogfollow(orig, repo, subset, x, name, followfirst=False):
                 local.stop()
             remote.stop()
 
-    revgen = fastlog(repo, rev, dirs, dirmatches)
+    revgen = fastlog(repo, rev, dirs, files, dirmatches)
     fastlogset = smartset.generatorset(revgen, iterasc=False, repo=repo)
     # Optimization: typically for "reverse(:.) & follow(path)" used by
     # "hg log". The left side is more expensive, although it has smaller

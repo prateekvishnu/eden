@@ -10,8 +10,11 @@ from typing import List, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .repo import Repo
+    from .types import PathLike
 
 
+from .errors import MissingCommitError
+from .file import ScmFile
 from .status import Status
 
 
@@ -31,22 +34,22 @@ class Commit:
             return self.hash == other.hash
         return super().__eq__(other)
 
+    def __hash__(self) -> int:
+        return hash(self.hash)
+
     def ancestor(self, idx: int) -> Commit:
-        commit = self
-        # This could be more efficient, instead of execing hg for every step of
-        # the parent.
-        while idx > 0:
-            idx -= 1
-            parents = self.parents()
-            if len(parents) == 0:
-                raise ValueError("reached end of history when traversing parents")
-            commit = parents[0]
-        return commit
+        try:
+            return self.repo.commit(f"ancestors({self.hash}, {idx}, {idx})")
+        except MissingCommitError:
+            raise MissingCommitError(f"ancestor with depth {idx} does not exist")
 
     def status(self) -> Status:
-        return Status(self.repo.hg.status(change=self.hash, template="json").stdout)
+        return Status(
+            self.repo.hg.status(change=self.hash, copies=True, template="json").stdout
+        )
 
     def parents(self) -> List[Commit]:
-        raw = self.repo.hg.log(rev=f"parents({self.hash})", template="{node}\n").stdout
-        lines = raw.split("\n")
-        return [Commit(self.repo, hash) for hash in lines[:-1]]
+        return self.repo.commits(f"parents({self.hash})", allowempty=True)
+
+    def __getitem__(self, path: PathLike) -> ScmFile:
+        return ScmFile(self, path)

@@ -11,18 +11,38 @@
 ///
 /// This is a special job used to validate that cross-repo sync,
 /// produced correct results
-use anyhow::{format_err, Context, Error, Result};
+use anyhow::format_err;
+/// Mononoke Cross Repo validator job
+///
+/// This is a special job used to validate that cross-repo sync,
+/// produced correct results
+use anyhow::Context;
+/// Mononoke Cross Repo validator job
+///
+/// This is a special job used to validate that cross-repo sync,
+/// produced correct results
+use anyhow::Error;
+/// Mononoke Cross Repo validator job
+///
+/// This is a special job used to validate that cross-repo sync,
+/// produced correct results
+use anyhow::Result;
 use blobrepo::BlobRepo;
-use bookmarks::{BookmarkName, BookmarkUpdateLogEntry, Freshness};
-use cmdlib::{
-    args::{self, MononokeClapApp, MononokeMatches},
-    helpers::block_execute,
-    monitoring::AliveService,
-};
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateLogEntry;
+use bookmarks::Freshness;
+use cmdlib::args;
+use cmdlib::args::MononokeClapApp;
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers::block_execute;
+use cmdlib::monitoring::AliveService;
 use context::CoreContext;
 use fbinit::FacebookInit;
 use futures::future;
-use futures::stream::{self, Stream, StreamExt, TryStreamExt};
+use futures::stream;
+use futures::stream::Stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use mononoke_api_types::InnerRepo;
 use mutable_counters::MutableCountersRef;
 use scuba_ext::MononokeScubaSampleBuilder;
@@ -34,13 +54,21 @@ mod setup;
 mod tail;
 mod validation;
 
-use crate::cli::{create_app, ARG_ONCE, ARG_TAIL};
-use crate::setup::{format_counter, get_entry_id, get_start_id, get_validation_helpers};
-use crate::tail::{tail_entries, QueueSize};
-use crate::validation::{
-    get_entry_with_small_repo_mapings, prepare_entry, unfold_bookmarks_update_log_entry,
-    validate_entry, EntryCommitId, ValidationHelpers,
-};
+use crate::cli::create_app;
+use crate::cli::ARG_ONCE;
+use crate::cli::ARG_TAIL;
+use crate::setup::format_counter;
+use crate::setup::get_entry_id;
+use crate::setup::get_start_id;
+use crate::setup::get_validation_helpers;
+use crate::tail::tail_entries;
+use crate::tail::QueueSize;
+use crate::validation::get_entry_with_small_repo_mapings;
+use crate::validation::prepare_entry;
+use crate::validation::unfold_bookmarks_update_log_entry;
+use crate::validation::validate_entry;
+use crate::validation::EntryCommitId;
+use crate::validation::ValidationHelpers;
 
 const SERVICE_NAME: &str = "mononoke_x_repo_commit_validator";
 
@@ -96,7 +124,7 @@ async fn run_in_tailing_mode(
         scuba_sample,
     );
 
-    validate_stream(&ctx, &validation_helpers, stream_of_entries)
+    validate_stream(ctx, &validation_helpers, stream_of_entries)
         .then(
             |validated_entry_id_res: Result<EntryCommitId, Error>| async {
                 let entry_id = validated_entry_id_res?;
@@ -142,7 +170,7 @@ async fn run_in_once_mode(
     }
 
     let stream_of_entries = stream::iter(entries);
-    validate_stream(&ctx, &validation_helpers, stream_of_entries)
+    validate_stream(ctx, &validation_helpers, stream_of_entries)
         .try_for_each(|_| future::ready(Ok(())))
         .await
 }
@@ -153,11 +181,11 @@ async fn run<'a>(
     matches: &'a MononokeMatches<'a>,
 ) -> Result<(), Error> {
     let config_store = matches.config_store();
-    let repo_id = args::get_repo_id(config_store, &matches)?;
-    let (_, repo_config) = args::get_config_by_repoid(config_store, &matches, repo_id)?;
+    let repo_id = args::get_repo_id(config_store, matches)?;
+    let (_, repo_config) = args::get_config_by_repoid(config_store, matches, repo_id)?;
 
     let logger = ctx.logger();
-    let repo: InnerRepo = args::open_repo_with_repo_id(fb, &logger, repo_id, &matches)
+    let repo: InnerRepo = args::open_repo_with_repo_id(fb, logger, repo_id, matches)
         .await
         .with_context(|| format!("While opening the large repo ({})", repo_id))?;
     let mysql_options = matches.mysql_options();

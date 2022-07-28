@@ -5,35 +5,50 @@
  * GNU General Public License version 2.
  */
 
-use crate::errors::ErrorKind;
-use crate::security_checker::ConnectionsSecurityChecker;
 use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::sync::Mutex;
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use bytes::Bytes;
-use context::{LoggingContainer, SessionContainer, SessionId};
+use connection_security_checker::ConnectionSecurityChecker;
+use context::LoggingContainer;
+use context::SessionContainer;
+use context::SessionId;
 use failure_ext::SlogKVError;
 use fbinit::FacebookInit;
 use futures::compat::Future01CompatExt;
-use futures_old::{sync::mpsc, Future, Stream};
+use futures_old::sync::mpsc;
+use futures_old::Future;
+use futures_old::Stream;
 use futures_stats::TimedFutureExt;
-use hgproto::{sshproto, HgProtoHandler};
-use maplit::{hashmap, hashset};
+use hgproto::sshproto;
+use hgproto::HgProtoHandler;
+use maplit::hashmap;
+use maplit::hashset;
 use qps::Qps;
 use rate_limiting::Metric;
 use rate_limiting::RateLimitEnvironment;
 use repo_client::RepoClient;
+use repo_identity::RepoIdentityRef;
 use scribe_ext::Scribe;
-use slog::{self, error, o, Drain, Level, Logger};
+use slog::error;
+use slog::o;
+use slog::Drain;
+use slog::Level;
+use slog::Logger;
 use slog_ext::SimpleFormatWithError;
 use slog_kvfilter::KVFilter;
-use sshrelay::{SenderBytesWrite, Stdio};
+use sshrelay::SenderBytesWrite;
+use sshrelay::Stdio;
 use stats::prelude::*;
-use std::mem;
-use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
 use time_ext::DurationExt;
 
+use crate::errors::ErrorKind;
 use crate::repo_handlers::RepoHandler;
 
 define_stats! {
@@ -49,7 +64,7 @@ pub async fn request_handler(
     fb: FacebookInit,
     reponame: String,
     repo_handlers: &HashMap<String, RepoHandler>,
-    _security_checker: &ConnectionsSecurityChecker,
+    _security_checker: &ConnectionSecurityChecker,
     stdio: Stdio,
     rate_limiter: Option<RateLimitEnvironment>,
     addr: IpAddr,
@@ -82,7 +97,6 @@ pub async fn request_handler(
         logger,
         mut scuba,
         repo,
-        preserve_raw_bundle2,
         maybe_push_redirector_args,
         repo_client_knobs,
         maybe_backup_repo_source,
@@ -96,11 +110,11 @@ pub async fn request_handler(
     scuba.add_metadata(&metadata);
     scuba.sample_for_identities(metadata.identities());
 
-    let reponame = repo.reponame();
+    let reponame = repo.inner_repo().repo_identity().name();
 
     let rate_limiter = rate_limiter.map(|r| r.get_rate_limiter());
     if let Some(ref rate_limiter) = rate_limiter {
-        if let Err(err) = rate_limiter.check_load_shed(&metadata.identities()) {
+        if let Err(err) = rate_limiter.check_load_shed(metadata.identities()) {
             scuba.log_with_msg("Request rejected due to load shedding", format!("{}", err));
             error!(conn_log, "Request rejected due to load shedding: {}", err; "remote" => "true");
 
@@ -108,26 +122,24 @@ pub async fn request_handler(
         }
     }
 
-    if !metadata.is_trusted_client() {
-        let is_allowed_to_repo = repo.blobrepo().permission_checker()
-            .check_if_read_access_allowed(metadata.identities())
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to check if access to repo '{}' is allowed for client '{}' with identity set '{:#?}'.",
-                    reponame,
-                    addr,
-                    metadata.identities(),
-                )
-            })?;
+    let is_allowed_to_repo = repo.blob_repo().permission_checker()
+        .check_if_read_access_allowed(metadata.identities())
+        .await
+        .with_context(|| {
+            format!(
+                "failed to check if access to repo '{}' is allowed for client '{}' with identity set '{:#?}'.",
+                reponame,
+                addr,
+                metadata.identities(),
+            )
+        })?;
 
-        if !is_allowed_to_repo {
-            let err: Error = ErrorKind::AuthorizationFailed.into();
-            scuba.log_with_msg("Authorization failed", format!("{}", err));
-            error!(conn_log, "Authorization failed: {}", err; "remote" => "true");
+    if !is_allowed_to_repo {
+        let err: Error = ErrorKind::AuthorizationFailed.into();
+        scuba.log_with_msg("Authorization failed", format!("{}", err));
+        error!(conn_log, "Authorization failed: {}", err; "remote" => "true");
 
-            return Err(err);
-        }
+        return Err(err);
     }
 
     // Info per wireproto command within this session
@@ -148,7 +160,6 @@ pub async fn request_handler(
         repo,
         session.clone(),
         logging,
-        preserve_raw_bundle2,
         maybe_push_redirector_args,
         repo_client_knobs,
         maybe_backup_repo_source,
@@ -180,7 +191,7 @@ pub async fn request_handler(
 
     let wireproto_calls = {
         let mut wireproto_calls = wireproto_calls.lock().expect("lock poisoned");
-        mem::replace(&mut *wireproto_calls, Vec::new())
+        std::mem::take(&mut *wireproto_calls)
     };
 
     STATS::wireproto_ms.add_value(stats.completion_time.as_millis_unchecked() as i64);

@@ -10,14 +10,17 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use blobrepo::BlobRepo;
-use bookmarks::{BookmarkName, BookmarkUpdateReason};
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
 use context::CoreContext;
 use fbinit::FacebookInit;
 use futures::stream::TryStreamExt;
 use mononoke_types::ChangesetId;
 use tests_utils::drawdag::create_from_dag;
 
-use crate::repo::{BookmarkFreshness, Repo, RepoContext};
+use crate::repo::BookmarkFreshness;
+use crate::repo::Repo;
+use crate::repo::RepoContext;
 
 async fn init_repo(ctx: &CoreContext) -> Result<(RepoContext, BTreeMap<String, ChangesetId>)> {
     let blob_repo: BlobRepo = test_repo_factory::build_empty(ctx.fb)?;
@@ -36,14 +39,13 @@ async fn init_repo(ctx: &CoreContext) -> Result<(RepoContext, BTreeMap<String, C
         &BookmarkName::new("trunk")?,
         changesets["E"],
         BookmarkUpdateReason::TestMove,
-        None,
     )?;
     txn.create_scratch(&BookmarkName::new("scratch/branch")?, changesets["G"])?;
     txn.create_scratch(&BookmarkName::new("scratch/branchpoint")?, changesets["B"])?;
     txn.commit().await?;
 
     let repo = Repo::new_test(ctx.clone(), blob_repo).await?;
-    let repo_ctx = RepoContext::new(ctx.clone(), Arc::new(repo)).await?;
+    let repo_ctx = RepoContext::new_test(ctx.clone(), Arc::new(repo)).await?;
     Ok((repo_ctx, changesets))
 }
 
@@ -51,7 +53,6 @@ async fn init_repo(ctx: &CoreContext) -> Result<(RepoContext, BTreeMap<String, C
 async fn resolve_bookmark(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
     let (repo, changesets) = init_repo(&ctx).await?;
-    let repo = repo.write().await?;
 
     // Test that normal bookmarks are visible both in and through the cache.
     assert_eq!(
@@ -107,7 +108,6 @@ async fn resolve_bookmark(fb: FacebookInit) -> Result<()> {
 async fn list_bookmarks(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
     let (repo, changesets) = init_repo(&ctx).await?;
-    let repo = repo.write().await?;
 
     assert_eq!(
         repo.list_bookmarks(false, None, None, None)

@@ -7,9 +7,12 @@
 
 use std::sync::Arc;
 
-use anyhow::{format_err, Context, Result};
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Result;
 
-use blobstore::{Blobstore, BlobstoreBytes};
+use blobstore::Blobstore;
+use blobstore::BlobstoreBytes;
 use context::CoreContext;
 use mononoke_types::RepositoryId;
 
@@ -92,7 +95,7 @@ impl IdDagSaveStore {
             )
             .await
             .context("saving iddag in blobstore")?;
-        log_new_iddag_version(&ctx, self.repo_id, iddag_version);
+        log_new_iddag_version(ctx, self.repo_id, iddag_version);
         Ok(iddag_version)
     }
 

@@ -6,33 +6,44 @@
  */
 
 use std::cmp;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
-use anyhow::{format_err, Error, Result};
+use anyhow::format_err;
+use anyhow::Error;
+use anyhow::Result;
 use bytes::Bytes;
 use clap_old::Arg;
 use fbinit::FacebookInit;
 use futures::future::TryFutureExt;
-use futures::stream::{self, StreamExt, TryStreamExt};
-use slog::{debug, info, Logger};
+use futures::stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use slog::debug;
+use slog::info;
+use slog::Logger;
 
 use blobrepo::BlobRepo;
-use blobstore::{Loadable, Storable};
+use blobstore::Loadable;
+use blobstore::Storable;
 use changesets::ChangesetsRef;
-use cmdlib::{
-    args::{self, MononokeClapApp, MononokeMatches},
-    helpers::block_execute,
-};
+use cmdlib::args;
+use cmdlib::args::MononokeClapApp;
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers::block_execute;
 use context::CoreContext;
-use filestore::{self, Alias, AliasBlob, FetchKey};
+use filestore::Alias;
+use filestore::AliasBlob;
+use filestore::FetchKey;
 use mercurial_types::FileBytes;
-use mononoke_types::{
-    hash::{self, Sha256},
-    ChangesetId, ContentAlias, ContentId, FileChange, RepositoryId,
-};
+use mononoke_types::hash;
+use mononoke_types::hash::Sha256;
+use mononoke_types::ChangesetId;
+use mononoke_types::ContentAlias;
+use mononoke_types::ContentId;
+use mononoke_types::FileChange;
+use mononoke_types::RepositoryId;
 
 const LIMIT: usize = 1000;
 
@@ -40,8 +51,8 @@ pub fn get_sha256(contents: &Bytes) -> hash::Sha256 {
     use sha2::Digest;
     use sha2::Sha256;
     let mut hasher = Sha256::new();
-    hasher.input(contents);
-    hash::Sha256::from_byte_array(hasher.result().into())
+    hasher.update(contents);
+    hash::Sha256::from_byte_array(hasher.finalize().into())
 }
 
 #[derive(Debug, Clone)]
@@ -84,7 +95,7 @@ impl AliasVerification {
             info!(self.logger, "Commit processed {:?}", cs_cnt);
         }
 
-        let bcs = bcs_id.load(&ctx, self.blobrepo.blobstore()).await?;
+        let bcs = bcs_id.load(ctx, self.blobrepo.blobstore()).await?;
         let file_changes: Vec<_> = bcs
             .file_changes_map()
             .iter()
@@ -130,17 +141,18 @@ impl AliasVerification {
                 let blobstore = self.blobrepo.get_blobstore();
 
                 let maybe_meta =
-                    filestore::get_metadata(&blobstore, &ctx, &FetchKey::Canonical(content_id))
+                    filestore::get_metadata(&blobstore, ctx, &FetchKey::Canonical(content_id))
                         .await?;
 
-                let meta = maybe_meta.ok_or(format_err!("Missing content {:?}", content_id))?;
+                let meta =
+                    maybe_meta.ok_or_else(|| format_err!("Missing content {:?}", content_id))?;
 
                 if meta.sha256 == *alias {
                     AliasBlob(
                         Alias::Sha256(meta.sha256),
                         ContentAlias::from_content_id(content_id),
                     )
-                    .store(&ctx, &blobstore)
+                    .store(ctx, &blobstore)
                     .await
                 } else {
                     Err(format_err!(
@@ -305,7 +317,7 @@ async fn run_aliasverify<'a>(
     matches: &'a MononokeMatches<'a>,
     mode: Mode,
 ) -> Result<(), Error> {
-    let blobrepo = args::open_repo(fb, &logger, matches).await?;
+    let blobrepo = args::open_repo(fb, logger, matches).await?;
     AliasVerification::new(logger.clone(), blobrepo, repoid, mode)
         .verify_all(&ctx, step, min_cs_db_id)
         .await

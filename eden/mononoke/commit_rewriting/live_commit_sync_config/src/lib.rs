@@ -5,17 +5,27 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Error, Result};
+use anyhow::anyhow;
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
-use cached_config::{ConfigHandle, ConfigStore};
-use commitsync::types::{RawCommitSyncAllVersions, RawCommitSyncConfigAllVersionsOneRepo};
+use cached_config::ConfigHandle;
+use cached_config::ConfigStore;
+use commitsync::types::RawCommitSyncAllVersions;
+use commitsync::types::RawCommitSyncConfigAllVersionsOneRepo;
 use metaconfig_parser::Convert;
-use metaconfig_types::{CommitSyncConfig, CommitSyncConfigVersion, CommonCommitSyncConfig};
+use metaconfig_types::CommitSyncConfig;
+use metaconfig_types::CommitSyncConfigVersion;
+use metaconfig_types::CommonCommitSyncConfig;
 use mononoke_types::RepositoryId;
-use pushredirect_enable::types::{MononokePushRedirectEnable, PushRedirectEnableState};
-use slog::{debug, error, Logger};
+use pushredirect_enable::types::MononokePushRedirectEnable;
+use pushredirect_enable::types::PushRedirectEnableState;
+use slog::debug;
+use slog::error;
+use slog::Logger;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 use thiserror::Error;
 
 pub const CONFIGERATOR_PUSHREDIRECT_ENABLE: &str = "scm/mononoke/pushredirect/enable";
@@ -202,7 +212,7 @@ impl LiveCommitSyncConfig for CfgrLiveCommitSyncConfig {
             interesting_configs
                 .into_iter()
                 .map(|raw_commit_sync_config| {
-                    let commit_sync_config = raw_commit_sync_config.clone().convert()?;
+                    let commit_sync_config = raw_commit_sync_config.convert()?;
                     let version_name = commit_sync_config.version_name.clone();
                     Ok((version_name, commit_sync_config))
                 })
@@ -221,7 +231,7 @@ impl LiveCommitSyncConfig for CfgrLiveCommitSyncConfig {
 
         let mut version = None;
         for (_, config_version_set) in large_repo_config_version_sets.iter() {
-            if !Self::related_to_repo(&config_version_set, repo_id) {
+            if !Self::related_to_repo(config_version_set, repo_id) {
                 continue;
             }
             for config in &config_version_set.versions {
@@ -359,7 +369,7 @@ impl TestLiveCommitSyncConfigSource {
 
         Ok(version_to_config
             .into_iter()
-            .filter(|(_, config)| Self::related_to_repo(&config, repo_id))
+            .filter(|(_, config)| Self::related_to_repo(config, repo_id))
             .collect())
     }
 

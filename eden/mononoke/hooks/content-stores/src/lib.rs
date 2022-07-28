@@ -11,17 +11,23 @@ mod repo;
 mod store;
 mod text_only;
 
-pub use crate::memory::{InMemoryFileContentManager, InMemoryFileText};
+pub use crate::memory::InMemoryFileContentManager;
+pub use crate::memory::InMemoryFileText;
 pub use crate::repo::RepoFileContentManager;
 pub use crate::text_only::TextOnlyFileContentManager;
-pub use store::{FileChange, FileContentManager, PathContent};
+pub use store::FileChange;
+pub use store::FileContentManager;
+pub use store::PathContent;
 
+use bookmarks::BookmarksArc;
 use errors::ErrorKind;
+use repo_blobstore::RepoBlobstoreArc;
+use repo_derived_data::RepoDerivedDataArc;
 
-pub fn blobrepo_text_only_fetcher(
-    blobrepo: ::blobrepo::BlobRepo,
+pub fn repo_text_only_fetcher(
+    repo: &(impl RepoBlobstoreArc + BookmarksArc + RepoDerivedDataArc),
     max_file_size: u64,
 ) -> Box<dyn FileContentManager> {
-    let store = RepoFileContentManager::new(blobrepo);
+    let store = RepoFileContentManager::new(repo);
     Box::new(TextOnlyFileContentManager::new(store, max_file_size))
 }

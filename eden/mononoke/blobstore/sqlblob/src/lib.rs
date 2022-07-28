@@ -21,37 +21,57 @@ use crate::delay::BlobDelay;
 use crate::facebook::myadmin_delay;
 #[cfg(not(fbcode_build))]
 use crate::myadmin_delay_dummy as myadmin_delay;
-use crate::store::{ChunkGenerationState, ChunkSqlStore, ChunkingMethod, DataSqlStore};
-use anyhow::{bail, format_err, Error, Result};
+use crate::store::ChunkGenerationState;
+use crate::store::ChunkSqlStore;
+use crate::store::ChunkingMethod;
+use crate::store::DataSqlStore;
+use anyhow::bail;
+use anyhow::format_err;
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
-use blobstore::{
-    Blobstore, BlobstoreGetData, BlobstoreIsPresent, BlobstoreMetadata, BlobstorePutOps,
-    BlobstoreUnlinkOps, CountedBlobstore, OverwriteStatus, PutBehaviour,
-};
-use bytes::{Bytes, BytesMut};
-use cached_config::{ConfigHandle, ConfigStore, ModificationTime, TestSource};
+use blobstore::Blobstore;
+use blobstore::BlobstoreGetData;
+use blobstore::BlobstoreIsPresent;
+use blobstore::BlobstoreMetadata;
+use blobstore::BlobstorePutOps;
+use blobstore::BlobstoreUnlinkOps;
+use blobstore::CountedBlobstore;
+use blobstore::OverwriteStatus;
+use blobstore::PutBehaviour;
+use bytes::Bytes;
+use bytes::BytesMut;
+use cached_config::ConfigHandle;
+use cached_config::ConfigStore;
+use cached_config::ModificationTime;
+use cached_config::TestSource;
 use context::CoreContext;
 use fbinit::FacebookInit;
-use futures::stream::{FuturesOrdered, FuturesUnordered, Stream, TryStreamExt};
+use futures::stream::FuturesOrdered;
+use futures::stream::FuturesUnordered;
+use futures::stream::Stream;
+use futures::stream::TryStreamExt;
 use futures::TryFutureExt;
-use mononoke_types::{hash::Context as HashContext, BlobstoreBytes};
+use mononoke_types::hash::Context as HashContext;
+use mononoke_types::BlobstoreBytes;
 use nonzero_ext::nonzero;
-use sql::{rusqlite::Connection as SqliteConnection, Connection};
-use sql_ext::{
-    facebook::{
-        create_mysql_connections_sharded, create_mysql_connections_unsharded, MysqlOptions,
-    },
-    open_sqlite_in_memory, open_sqlite_path, SqlConnections, SqlShardedConnections,
-};
-use std::{
-    collections::HashMap,
-    fmt,
-    future::Future,
-    num::NonZeroUsize,
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use sql::rusqlite::Connection as SqliteConnection;
+use sql::Connection;
+use sql_ext::facebook::create_mysql_connections_sharded;
+use sql_ext::facebook::create_mysql_connections_unsharded;
+use sql_ext::facebook::MysqlOptions;
+use sql_ext::open_sqlite_in_memory;
+use sql_ext::open_sqlite_path;
+use sql_ext::SqlConnections;
+use sql_ext::SqlShardedConnections;
+use std::collections::HashMap;
+use std::fmt;
+use std::future::Future;
+use std::num::NonZeroUsize;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::SystemTime;
 use tokio::task::spawn_blocking;
 use xdb_gc_structs::XdbGc;
 
@@ -222,7 +242,7 @@ impl Sqlblob {
 
         let futs: FuturesOrdered<_> = (0..shard_count)
             .into_iter()
-            .map(|shard| connection_factory(shard))
+            .map(connection_factory)
             .collect();
 
         let shard_connections = futs.try_collect::<Vec<_>>().await?;
@@ -479,7 +499,7 @@ impl Sqlblob {
     }
 
     async fn get_impl<'a>(&'a self, key: &'a str) -> Result<Option<BlobstoreGetData>> {
-        let chunked = self.data_store.get(&key).await?;
+        let chunked = self.data_store.get(key).await?;
         if let Some(chunked) = chunked {
             let blob = match chunked.chunking_method {
                 ChunkingMethod::InlineBase64 => {
@@ -537,7 +557,7 @@ impl Blobstore for Sqlblob {
         _ctx: &'a CoreContext,
         key: &'a str,
     ) -> Result<BlobstoreIsPresent> {
-        let present = self.data_store.is_present(&key).await?;
+        let present = self.data_store.is_present(key).await?;
         Ok(if present {
             BlobstoreIsPresent::Present
         } else {
@@ -730,7 +750,7 @@ impl BlobstoreUnlinkOps for Sqlblob {
                 key
             )
         };
-        self.data_store.unlink(&key).await
+        self.data_store.unlink(key).await
     }
 }
 

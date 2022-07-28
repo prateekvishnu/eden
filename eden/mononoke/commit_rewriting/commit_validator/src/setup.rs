@@ -5,17 +5,22 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Error, Result};
+use anyhow::format_err;
+use anyhow::Error;
+use anyhow::Result;
 use blobstore_factory::ReadOnlyStorage;
 use bookmarks::BookmarkName;
 use borrowed::borrowed;
 use clap_old::ArgMatches;
-use cmdlib::args::{self, MononokeMatches};
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
 use context::CoreContext;
-use cross_repo_sync::types::{Large, Small};
+use cross_repo_sync::types::Large;
+use cross_repo_sync::types::Small;
 use fbinit::FacebookInit;
 use futures::future::try_join_all;
-use live_commit_sync_config::{CfgrLiveCommitSyncConfig, LiveCommitSyncConfig};
+use live_commit_sync_config::CfgrLiveCommitSyncConfig;
+use live_commit_sync_config::LiveCommitSyncConfig;
 use metaconfig_types::RepoConfig;
 use mononoke_api_types::InnerRepo;
 use mutable_counters::MutableCountersRef;
@@ -24,7 +29,9 @@ use sql_construct::SqlConstructFromMetadataDatabaseConfig;
 use sql_ext::facebook::MysqlOptions;
 use synced_commit_mapping::SqlSyncedCommitMapping;
 
-use crate::cli::{ARG_ENTRY_ID, ARG_MASTER_BOOKMARK, ARG_START_ID};
+use crate::cli::ARG_ENTRY_ID;
+use crate::cli::ARG_MASTER_BOOKMARK;
+use crate::cli::ARG_START_ID;
 use crate::reporting::add_common_commit_syncing_fields;
 use crate::validation::ValidationHelpers;
 
@@ -41,7 +48,7 @@ pub async fn get_validation_helpers<'a>(
     let repo_id = large_repo.blob_repo.get_repoid();
 
     let config_store = matches.config_store();
-    let live_commit_sync_config = CfgrLiveCommitSyncConfig::new(ctx.logger(), &config_store)?;
+    let live_commit_sync_config = CfgrLiveCommitSyncConfig::new(ctx.logger(), config_store)?;
     let common_commit_sync_config = live_commit_sync_config.get_common_config(repo_id)?;
 
     let mapping = SqlSyncedCommitMapping::with_metadata_database_config(
@@ -51,7 +58,7 @@ pub async fn get_validation_helpers<'a>(
         readonly_storage.0,
     )?;
 
-    let large_repo_master_bookmark = get_master_bookmark(&matches)?;
+    let large_repo_master_bookmark = get_master_bookmark(matches)?;
 
     let validation_helper_futs =
         common_commit_sync_config
@@ -111,7 +118,7 @@ pub async fn get_start_id<'a>(
             repo.mutable_counters()
                 .get_counter(ctx, &counter)
                 .await?
-                .ok_or(format_err!("mutable counter {} is missing", counter))
+                .ok_or_else(|| format_err!("mutable counter {} is missing", counter))
                 .map(|val| val as u64)
         }
     }
@@ -120,7 +127,7 @@ pub async fn get_start_id<'a>(
 pub fn get_entry_id<'a>(matches: &'a ArgMatches<'a>) -> Result<u64, Error> {
     matches
         .value_of(ARG_ENTRY_ID)
-        .ok_or(format_err!("Entry id argument missing"))?
+        .ok_or_else(|| format_err!("Entry id argument missing"))?
         .parse::<u64>()
         .map_err(|_| format_err!("{} must be a valid u64", ARG_ENTRY_ID))
 }
@@ -128,6 +135,6 @@ pub fn get_entry_id<'a>(matches: &'a ArgMatches<'a>) -> Result<u64, Error> {
 fn get_master_bookmark<'a, 'b>(matches: &'a MononokeMatches<'b>) -> Result<BookmarkName, Error> {
     let name = matches
         .value_of(ARG_MASTER_BOOKMARK)
-        .ok_or(format_err!("Argument {} is required", ARG_MASTER_BOOKMARK))?;
+        .ok_or_else(|| format_err!("Argument {} is required", ARG_MASTER_BOOKMARK))?;
     BookmarkName::new(name)
 }

@@ -6,7 +6,6 @@
 # scmquery.py
 # An extension to augement hg with information obtained from SCMQuery
 
-import json
 import re
 from typing import Any, List
 
@@ -21,8 +20,6 @@ from edenscm.mercurial import (
 )
 from edenscm.mercurial.i18n import _, _x
 from edenscm.mercurial.node import bin
-from edenscm.mercurial.pycompat import range
-from edenscm.mercurial.util import httplib
 
 from .extlib.phabricator import arcconfig, graphql
 
@@ -33,9 +30,9 @@ DEFAULT_TIMEOUT = 60
 MAX_CONNECT_RETRIES = 3
 
 
-githashre = re.compile("g([0-9a-f]{40})")
-svnrevre = re.compile("^r[A-Z]+(\d+)$")
-phabhashre = re.compile("^r([A-Z]+)([0-9a-f]{12,40})$")
+githashre = re.compile(r"g([0-9a-f]{40})")
+svnrevre = re.compile(r"^r[A-Z]+(\d+)$")
+phabhashre = re.compile(r"^r([A-Z]+)([0-9a-f]{12,40})$")
 
 
 def uisetup(ui):

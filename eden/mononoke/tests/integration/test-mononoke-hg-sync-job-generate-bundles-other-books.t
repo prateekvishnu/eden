@@ -83,8 +83,8 @@ Sync it to another client
   $ cd $TESTTMP
 
 Sync a creation of a bookmark
-  $ mononoke_hg_sync repo-hg 1 --generate-bundles 2>&1 | grep 'successful sync of entries'
-  * successful sync of entries [2] (glob)
+  $ mononoke_hg_sync repo-hg 1 2>&1 | grep 'successful sync of entries'
+  * successful sync of entries [2]* (glob)
 
   $ cd $TESTTMP/repo-hg
   $ hg log -r newbook -T '{desc}'
@@ -93,16 +93,16 @@ Sync a creation of a bookmark
   $TESTTMP
 
 Sync force push
-  $ mononoke_hg_sync repo-hg 2 --generate-bundles 2>&1 | grep 'successful sync of entries'
-  * successful sync of entries [3] (glob)
+  $ mononoke_hg_sync repo-hg 2 2>&1 | grep 'successful sync of entries'
+  * successful sync of entries [3]* (glob)
 
 Sync bookmark move
-  $ mononoke_hg_sync repo-hg 3 --generate-bundles 2>&1 | grep 'successful sync of entries'
-  * successful sync of entries [4] (glob)
+  $ mononoke_hg_sync repo-hg 3 2>&1 | grep 'successful sync of entries'
+  * successful sync of entries [4]* (glob)
 
 Sync deletion of a bookmark
-  $ mononoke_hg_sync repo-hg 4 --generate-bundles 2>&1 | grep 'successful sync of entries'
-  * successful sync of entries [5] (glob)
+  $ mononoke_hg_sync repo-hg 4 2>&1 | grep 'successful sync of entries'
+  * successful sync of entries [5]* (glob)
 
   $ cd $TESTTMP/repo-hg
   $ hg log -r newbook

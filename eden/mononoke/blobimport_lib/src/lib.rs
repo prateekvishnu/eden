@@ -16,29 +16,38 @@ use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{format_err, Context, Error};
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
 use ascii::AsciiString;
-use futures::{
-    compat::{Future01CompatExt, Stream01CompatExt},
-    future,
-    stream::{self, StreamExt, TryStreamExt},
-    Stream,
-};
+use futures::compat::Future01CompatExt;
+use futures::compat::Stream01CompatExt;
+use futures::future;
+use futures::stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use futures::Stream;
 use futures_01_ext::StreamExt as OldStreamExt;
-use slog::{debug, error, info};
+use slog::debug;
+use slog::error;
+use slog::info;
 
 use blobrepo::BlobRepo;
 use blobrepo_hg::BlobRepoHg;
-use bonsai_globalrev_mapping::{bulk_import_globalrevs, BonsaiGlobalrevMapping};
+use bonsai_globalrev_mapping::bulk_import_globalrevs;
+use bonsai_globalrev_mapping::BonsaiGlobalrevMapping;
 use context::CoreContext;
 use derived_data_utils::derive_data_for_csids;
-use mercurial_revlog::{revlog::RevIdx, RevlogRepo};
-use mercurial_types::{HgChangesetId, HgNodeHash};
-use mononoke_types::{ChangesetId, RepositoryId};
+use mercurial_revlog::revlog::RevIdx;
+use mercurial_revlog::RevlogRepo;
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgNodeHash;
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
 use phases::PhasesRef;
-use synced_commit_mapping::{
-    SyncedCommitMapping, SyncedCommitMappingEntry, SyncedCommitSourceRepo,
-};
+use synced_commit_mapping::SyncedCommitMapping;
+use synced_commit_mapping::SyncedCommitMappingEntry;
+use synced_commit_mapping::SyncedCommitSourceRepo;
 
 use crate::changeset::UploadChangesets;
 
@@ -147,7 +156,7 @@ impl<'a> Blobimport<'a> {
                 if cs_count % log_step == 0 {
                     info!(ctx.logger(), "inserted commits # {}", cs_count);
                 }
-                (revidx, cs.0.clone())
+                (revidx, cs.0)
             }
         })
         .chunks(chunk_size)
@@ -182,9 +191,7 @@ impl<'a> Blobimport<'a> {
         while let Some(chunk_result) = upload_changesets.next().await {
             let chunk = chunk_result?;
             for (rev, cs) in chunk.iter() {
-                let max_rev = max_rev_and_bcs_id
-                    .map(|(revidx, _)| revidx)
-                    .unwrap_or_else(RevIdx::zero);
+                let max_rev = max_rev_and_bcs_id.map_or_else(RevIdx::zero, |(revidx, _)| revidx);
                 if rev >= &max_rev {
                     max_rev_and_bcs_id = Some((*rev, cs.get_changeset_id()))
                 }
@@ -206,7 +213,7 @@ impl<'a> Blobimport<'a> {
                         })
                         .collect();
                     synced_commit_mapping
-                        .add_bulk(&ctx, entries)
+                        .add_bulk(ctx, entries)
                         .await
                         .map(|_| ())
                 } else {
@@ -268,7 +275,7 @@ impl<'a> Blobimport<'a> {
             BookmarkImportPolicy::Prefix(prefix) => {
                 bookmark::upload_bookmarks(
                     ctx.clone(),
-                    &ctx.logger(),
+                    ctx.logger(),
                     revlogrepo,
                     blobrepo.clone(),
                     stale_bookmarks,
@@ -321,7 +328,7 @@ impl<'a> Blobimport<'a> {
                 let public = blobrepo
                     .phases()
                     .get_public(
-                        &ctx,
+                        ctx,
                         hg_to_bcs_ids
                             .clone()
                             .into_iter()
@@ -361,9 +368,7 @@ impl<'a> Blobimport<'a> {
         let mut max_rev_and_bcs_id = None;
         for maybe_rev_cs in imported {
             if let Some((rev, bcs_id)) = maybe_rev_cs {
-                let max_rev = max_rev_and_bcs_id
-                    .map(|(revidx, _)| revidx)
-                    .unwrap_or_else(RevIdx::zero);
+                let max_rev = max_rev_and_bcs_id.map_or_else(RevIdx::zero, |(revidx, _)| revidx);
                 if rev >= max_rev {
                     max_rev_and_bcs_id = Some((rev, bcs_id))
                 }

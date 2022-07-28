@@ -15,13 +15,15 @@
 //! 0-sized chunk is the indication of end of stream, so a proper stream of data should not
 //! contain empty chunks inside.
 
-use bytes_old::Bytes;
-use std::io::{self, BufRead, Read};
-use std::sync::{Arc, Mutex};
+use std::io;
+use std::io::BufRead;
+use std::io::Read;
 
 use futures::future::poll_fn;
-use futures::{Async, Future};
-use tokio_io::{try_nb, AsyncRead};
+use futures::Async;
+use futures::Future;
+use tokio_io::try_nb;
+use tokio_io::AsyncRead;
 
 /// Structure that wraps around a `AsyncRead + BufRead` object to provide chunked-based encoding
 /// over it. See this module's doc for the description of the format.
@@ -32,7 +34,6 @@ use tokio_io::{try_nb, AsyncRead};
 pub struct Dechunker<R> {
     bufread: R,
     state: DechunkerState,
-    maybe_full_content: Option<Arc<Mutex<Bytes>>>,
 }
 
 enum DechunkerState {
@@ -51,13 +52,7 @@ where
         Self {
             bufread,
             state: ParsingInt(Vec::new()),
-            maybe_full_content: None,
         }
-    }
-
-    pub fn with_full_content(mut self, full_bundle2_content: Arc<Mutex<Bytes>>) -> Self {
-        self.maybe_full_content = Some(full_bundle2_content);
-        self
     }
 
     pub fn check_is_done(self) -> impl Future<Item = (bool, Self), Error = io::Error> {
@@ -146,10 +141,10 @@ where
 {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.advance_parsing_int()?;
-        let chunk_size = match &self.state {
-            &ParsingInt(_) => panic!("expected to get pass parsing int state"),
-            &ReadingChunk(ref chunk_size) => *chunk_size,
-            &Done => return Ok(0),
+        let chunk_size = match self.state {
+            ParsingInt(_) => panic!("expected to get pass parsing int state"),
+            ReadingChunk(ref chunk_size) => *chunk_size,
+            Done => return Ok(0),
         };
 
         let buf_size = if buf.len() > chunk_size {
@@ -160,12 +155,6 @@ where
 
         let buf_size = self.bufread.read(&mut buf[0..buf_size])?;
         self.consume_chunk(buf_size);
-        if let Some(ref mut full_bundle2_content) = self.maybe_full_content {
-            full_bundle2_content
-                .lock()
-                .unwrap()
-                .extend_from_slice(&buf[0..buf_size]);
-        }
         Ok(buf_size)
     }
 }
@@ -178,10 +167,10 @@ where
 {
     fn fill_buf(&mut self) -> io::Result<&[u8]> {
         self.advance_parsing_int()?;
-        let chunk_size = match &self.state {
-            &ParsingInt(_) => panic!("expected to get pass parsing int state"),
-            &ReadingChunk(ref chunk_size) => *chunk_size,
-            &Done => return Ok(&[]),
+        let chunk_size = match self.state {
+            ParsingInt(_) => panic!("expected to get pass parsing int state"),
+            ReadingChunk(ref chunk_size) => *chunk_size,
+            Done => return Ok(&[]),
         };
 
         let buf = self.bufread.fill_buf()?;
@@ -194,19 +183,6 @@ where
     }
 
     fn consume(&mut self, amt: usize) {
-        if amt > 0 {
-            if let Some(ref mut full_bundle2_content) = self.maybe_full_content {
-                // The below fill_buf call should never fail because:
-                //  * fill_buf errors only when underlying read fails
-                //  * the read is performed only if the internal buffer is empty
-                //  * the "amt" should be always <= internal buffer size so the buffer is not empty here
-                let buf = self.bufread.fill_buf().unwrap();
-                full_bundle2_content
-                    .lock()
-                    .unwrap()
-                    .extend_from_slice(&buf[0..amt]);
-            }
-        }
         self.consume_chunk(amt);
         self.bufread.consume(amt);
     }
@@ -215,8 +191,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::{ensure, Result};
-    use quickcheck::{quickcheck, Arbitrary, Gen, TestResult};
+    use anyhow::ensure;
+    use anyhow::Result;
+    use quickcheck::quickcheck;
+    use quickcheck::Arbitrary;
+    use quickcheck::Gen;
+    use quickcheck::TestResult;
     use std::io::Cursor;
 
     // Vec of non empty Vec<u8> for quickcheck::Arbitrary
@@ -246,16 +226,12 @@ mod tests {
     }
 
     quickcheck! {
-        fn test_bufread_api(chunks: Chunks, remainder: Vec<u8>, with_full_content: bool) -> TestResult {
+        fn test_bufread_api(chunks: Chunks, remainder: Vec<u8>) -> TestResult {
             let chunks = &chunks;
             let remainder = remainder.as_slice();
             let concat_chunks = concat_chunks(chunks, remainder);
 
-            let mut dechunker = Dechunker::new(Cursor::new(&concat_chunks));
-            if with_full_content {
-                let full_bundle2_content = Arc::new(Mutex::new(Bytes::new()));
-                dechunker = dechunker.with_full_content(full_bundle2_content);
-            }
+            let dechunker = Dechunker::new(Cursor::new(&concat_chunks));
             match check_bufread_api(
                 dechunker,
                 chunks,
@@ -266,16 +242,12 @@ mod tests {
             }
         }
 
-        fn test_read_api(chunks: Chunks, remainder: Vec<u8>, with_full_content: bool) -> TestResult {
+        fn test_read_api(chunks: Chunks, remainder: Vec<u8>) -> TestResult {
             let chunks = &chunks;
             let remainder = remainder.as_slice();
             let concat_chunks = concat_chunks(chunks, remainder);
 
-            let mut dechunker = Dechunker::new(Cursor::new(&concat_chunks));
-            if with_full_content {
-                let full_bundle2_content = Arc::new(Mutex::new(Bytes::new()));
-                dechunker = dechunker.with_full_content(full_bundle2_content);
-            }
+            let dechunker = Dechunker::new(Cursor::new(&concat_chunks));
 
             match check_read_api(
                 dechunker,
@@ -304,7 +276,6 @@ mod tests {
         chunks: &Chunks,
         remainder: &[u8],
     ) -> Result<()> {
-        let mut full_len = 0;
         for chunk in &chunks.0 {
             let buf_len = {
                 let buf = d.fill_buf()?;
@@ -317,16 +288,6 @@ mod tests {
                 buf.len()
             };
             d.consume(buf_len);
-            full_len += buf_len;
-        }
-        if let Some(ref mut full_bundle2_content) = d.maybe_full_content {
-            let saved_content = full_bundle2_content.lock().unwrap();
-            ensure!(
-                saved_content.len() == full_len,
-                "expected full_bundle2_content length to be {:?} found {:?}",
-                full_len,
-                saved_content.len(),
-            );
         }
 
         check_remainder(d, remainder)
@@ -359,16 +320,6 @@ mod tests {
             concat_chunks,
             buf
         );
-
-        if let Some(ref mut full_bundle2_content) = d.maybe_full_content {
-            let saved_content = full_bundle2_content.lock().unwrap();
-            ensure!(
-                saved_content.len() == buf_len,
-                "expected full_bundle2_content length to be {:?} found {:?}",
-                buf_len,
-                saved_content.len(),
-            );
-        }
 
         check_remainder(d, remainder)
     }

@@ -5,21 +5,28 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 
-use anyhow::{Context, Error};
+use anyhow::Context;
+use anyhow::Error;
 use blobstore::Loadable;
 use borrowed::borrowed;
 use context::CoreContext;
-use derived_data::batch::{split_batch_in_linear_stacks, FileConflicts, StackItem};
-use derived_data_manager::{BonsaiDerivable, DerivationContext};
-use futures::stream::{FuturesOrdered, TryStreamExt};
+use derived_data::batch::split_batch_in_linear_stacks;
+use derived_data::batch::FileConflicts;
+use derived_data::batch::StackItem;
+use derived_data_manager::BonsaiDerivable;
+use derived_data_manager::DerivationContext;
+use futures::stream::FuturesOrdered;
+use futures::stream::TryStreamExt;
 use itertools::Itertools;
 use mononoke_types::ChangesetId;
 use stats::prelude::*;
 
 use crate::derive::derive_skeleton_manifest_stack;
-use crate::{RootSkeletonManifestId, SkeletonManifestId};
+use crate::RootSkeletonManifestId;
+use crate::SkeletonManifestId;
 
 define_stats! {
     prefix = "mononoke.derived_data.skeleton_manifest";
@@ -96,9 +103,9 @@ pub async fn new_batch_derivation(
         // we can't derive stack for a merge commit,
         // so let's derive it without batching
         for item in file_changes {
-            let bonsai = item.cs_id.load(&ctx, derivation_ctx.blobstore()).await?;
+            let bonsai = item.cs_id.load(ctx, derivation_ctx.blobstore()).await?;
             let parents = derivation_ctx
-                .fetch_unknown_parents(ctx, Some(&already_derived), &bonsai)
+                .fetch_unknown_parents(ctx, Some(already_derived), &bonsai)
                 .await?;
             let derived =
                 RootSkeletonManifestId::derive_single(ctx, derivation_ctx, bonsai, parents).await?;
@@ -137,7 +144,7 @@ pub async fn new_batch_derivation(
             ctx,
             derivation_ctx,
             file_changes,
-            parent_skeleton_manifests.get(0).map(|mf_id| *mf_id),
+            parent_skeleton_manifests.get(0).copied(),
         )
         .await
         .with_context(|| format!("failed deriving stack of {:?} to {:?}", first, last,))?;
@@ -164,8 +171,9 @@ mod test {
     use repo_derived_data::RepoDerivedDataRef;
     use revset::AncestorsNodeStream;
     use test_repo_factory::TestRepoFactory;
+    use tests_utils::bookmark;
+    use tests_utils::drawdag::create_from_dag;
     use tests_utils::resolve_cs_id;
-    use tests_utils::{bookmark, drawdag::create_from_dag};
 
     #[fbinit::test]
     async fn batch_derive(fb: FacebookInit) -> Result<(), Error> {
@@ -308,7 +316,7 @@ mod test {
         gap_size: usize,
     ) -> Result<HashMap<ChangesetId, RootSkeletonManifestId>, Error> {
         let repo = Linear::getrepo(fb).await;
-        let master_cs_id = resolve_cs_id(&ctx, &repo, "master").await?;
+        let master_cs_id = resolve_cs_id(ctx, &repo, "master").await?;
 
         let mut cs_ids =
             AncestorsNodeStream::new(ctx.clone(), &repo.get_changeset_fetcher(), master_cs_id)
@@ -320,7 +328,7 @@ mod test {
 
         manager
             .backfill_batch::<RootSkeletonManifestId>(
-                &ctx,
+                ctx,
                 cs_ids.clone(),
                 BatchDeriveOptions::Parallel {
                     gap_size: Some(gap_size),
@@ -335,13 +343,13 @@ mod test {
             .collect();
 
         let derived = manager
-            .fetch_derived_batch::<RootSkeletonManifestId>(&ctx, derived, None)
+            .fetch_derived_batch::<RootSkeletonManifestId>(ctx, derived, None)
             .await?;
         for cs_id in cs_ids {
             if !derived.contains_key(&cs_id) {
                 assert_eq!(
                     manager
-                        .fetch_derived::<RootSkeletonManifestId>(&ctx, cs_id, None)
+                        .fetch_derived::<RootSkeletonManifestId>(ctx, cs_id, None)
                         .await?,
                     None
                 );

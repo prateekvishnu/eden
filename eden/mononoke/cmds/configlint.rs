@@ -5,7 +5,8 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{bail, Result};
+use anyhow::bail;
+use anyhow::Result;
 use fbinit::FacebookInit;
 use itertools::Itertools;
 use std::collections::BTreeMap;
@@ -65,7 +66,7 @@ fn main(fb: FacebookInit) -> Result<()> {
         repoids
             .entry(config.repoid)
             .and_modify(|names| names.push(name.as_str()))
-            .or_insert(vec![name.as_str()]);
+            .or_insert_with(|| vec![name.as_str()]);
 
         if isbad || !quiet {
             println!(

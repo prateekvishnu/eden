@@ -5,21 +5,27 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Error, Result};
+use anyhow::format_err;
+use anyhow::Error;
+use anyhow::Result;
 use blobrepo::BlobRepo;
 use borrowed::borrowed;
 use cloned::cloned;
 use context::CoreContext;
-use futures::{future, TryFutureExt, TryStreamExt};
+use futures::future;
+use futures::TryFutureExt;
+use futures::TryStreamExt;
 
-use bookmarks::{BookmarkName, BookmarkUpdateReason};
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
 use fbinit::FacebookInit;
 use fixtures::Linear;
 use fixtures::TestRepoFixture;
 use maplit::hashset;
 use mercurial_types::nodehash::HgChangesetId;
 use mononoke_types::ChangesetId;
-use phases::{Phases, PhasesRef};
+use phases::Phases;
+use phases::PhasesRef;
 use std::str::FromStr;
 
 async fn delete_all_publishing_bookmarks(ctx: &CoreContext, repo: &BlobRepo) -> Result<(), Error> {
@@ -31,7 +37,7 @@ async fn delete_all_publishing_bookmarks(ctx: &CoreContext, repo: &BlobRepo) -> 
     let mut txn = repo.update_bookmark_transaction(ctx.clone());
 
     for (bookmark, _) in bookmarks {
-        txn.force_delete(bookmark.name(), BookmarkUpdateReason::TestMove, None)
+        txn.force_delete(bookmark.name(), BookmarkUpdateReason::TestMove)
             .unwrap();
     }
 
@@ -56,7 +62,7 @@ async fn set_bookmark(
         .ok_or_else(|| Error::msg("cs does not exit"))?;
 
     let mut txn = repo.update_bookmark_transaction(ctx.clone());
-    txn.force_set(&book, head, BookmarkUpdateReason::TestMove, None)?;
+    txn.force_set(book, head, BookmarkUpdateReason::TestMove)?;
 
     let ok = txn.commit().await?;
     if !ok {
@@ -257,7 +263,7 @@ async fn test_mark_reachable_as_public(fb: FacebookInit) -> Result<()> {
 
     borrowed!(ctx, repo);
 
-    delete_all_publishing_bookmarks(&ctx, &repo).await?;
+    delete_all_publishing_bookmarks(ctx, repo).await?;
 
     // resolve bonsai
     let bcss = future::try_join_all(

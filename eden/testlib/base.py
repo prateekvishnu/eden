@@ -45,6 +45,10 @@ date = 0 0
 
 [remotefilelog]
 cachepath = {new_dir()}
+
+[edenfs]
+backing-repos-dir={new_dir()}
+command={str(os.getenv("EDENFSCTL_RUST_PATH"))}
 """
         )
 
@@ -53,13 +57,13 @@ cachepath = {new_dir()}
             self.config.append(
                 f"""
 [auth]
-mononoke.cert={cert_dir}/localhost.crt
-mononoke.key={cert_dir}/localhost.key
+mononoke.cert={cert_dir}/client0.crt
+mononoke.key={cert_dir}/client0.key
 mononoke.cacerts={cert_dir}/root-ca.crt
 mononoke.prefix=mononoke://*
 mononoke.cn=localhost
-edenapi.cert={cert_dir}/localhost.crt
-edenapi.key={cert_dir}/localhost.key
+edenapi.cert={cert_dir}/client0.crt
+edenapi.key={cert_dir}/client0.key
 edenapi.prefix=localhost
 edenapi.schemes=https
 edenapi.cacerts={cert_dir}/root-ca.crt
@@ -74,7 +78,7 @@ url=https://localhost:{self.server.port}/edenapi
 
     def new_server(self) -> Server:
         if os.environ.get("USE_MONONOKE", False):
-            return MononokeServer()
+            return MononokeServer(record_stderr_to_file=test_globals.debug)
         else:
             return LocalServer()
 
@@ -90,7 +94,7 @@ def hgtest(func: Callable[[TBase, Repo, WorkingCopy], None]) -> Callable[[TBase]
     def wrapper(self: TBase) -> None:
         use_eden = os.environ.get("USE_EDEN", False)
         if use_eden:
-            wc = self.repo.new_working_copy(path=new_dir(), eden=True)
+            wc = self.repo.new_working_copy(path=new_dir(label="Eden Dir"), eden=True)
             self.addCleanup(wc.cleanup)
         else:
             wc = self.repo.new_working_copy()

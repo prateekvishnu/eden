@@ -5,23 +5,33 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Context, Error};
-use backsyncer::{open_backsyncer_dbs, TargetRepoDbs};
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
+use backsyncer::open_backsyncer_dbs;
+use backsyncer::TargetRepoDbs;
 use blobrepo::BlobRepo;
 use blobstore_factory::ReadOnlyStorage;
 use cache_warmup::cache_warmup;
 use cloned::cloned;
 use context::CoreContext;
 use fbinit::FacebookInit;
-use metaconfig_types::{BackupRepoConfig, CommonCommitSyncConfig, RepoClientKnobs};
+use metaconfig_types::BackupRepoConfig;
+use metaconfig_types::CommonCommitSyncConfig;
+use metaconfig_types::RepoClientKnobs;
 use mononoke_api::Mononoke;
+use mononoke_api::Repo;
 use mononoke_types::RepositoryId;
-use repo_client::{MononokeRepo, PushRedirectorArgs};
+use repo_client::PushRedirectorArgs;
 use scuba_ext::MononokeScubaSampleBuilder;
-use slog::{debug, info, o, Logger};
+use slog::debug;
+use slog::info;
+use slog::o;
+use slog::Logger;
 use sql_construct::SqlConstructFromMetadataDatabaseConfig;
 use sql_ext::facebook::MysqlOptions;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use synced_commit_mapping::SqlSyncedCommitMapping;
 
@@ -37,8 +47,7 @@ use crate::errors::ErrorKind;
 struct IncompleteRepoHandler {
     logger: Logger,
     scuba: MononokeScubaSampleBuilder,
-    repo: MononokeRepo,
-    preserve_raw_bundle2: bool,
+    repo: Arc<Repo>,
     maybe_incomplete_push_redirector_args: Option<IncompletePushRedirectorArgs>,
     repo_client_knobs: RepoClientKnobs,
     /// This is used for repositories that are backups of another prod repository
@@ -66,7 +75,7 @@ impl IncompletePushRedirectorArgs {
         } = self;
 
         let large_repo_id = common_commit_sync_config.large_repo_id;
-        let target_repo: MononokeRepo = repo_lookup_table
+        let target_repo: Arc<Repo> = repo_lookup_table
             .get(&large_repo_id)
             .ok_or(ErrorKind::LargeRepoNotFound(large_repo_id))?
             .repo
@@ -90,7 +99,6 @@ impl IncompleteRepoHandler {
             logger,
             scuba,
             repo,
-            preserve_raw_bundle2,
             maybe_incomplete_push_redirector_args,
             repo_client_knobs,
             backup_repo_config,
@@ -118,7 +126,6 @@ impl IncompleteRepoHandler {
             logger,
             scuba,
             repo,
-            preserve_raw_bundle2,
             maybe_push_redirector_args,
             repo_client_knobs,
             maybe_backup_repo_source,
@@ -131,7 +138,7 @@ fn try_find_repo_by_name<'a>(
     iter: impl Iterator<Item = &'a IncompleteRepoHandler>,
 ) -> Result<BlobRepo, Error> {
     for handler in iter {
-        let blobrepo = handler.repo.blobrepo();
+        let blobrepo = handler.repo.blob_repo();
         if blobrepo.name() == name {
             return Ok(blobrepo.clone());
         }
@@ -144,8 +151,7 @@ fn try_find_repo_by_name<'a>(
 pub struct RepoHandler {
     pub logger: Logger,
     pub scuba: MononokeScubaSampleBuilder,
-    pub repo: MononokeRepo,
-    pub preserve_raw_bundle2: bool,
+    pub repo: Arc<Repo>,
     pub maybe_push_redirector_args: Option<PushRedirectorArgs>,
     pub repo_client_knobs: RepoClientKnobs,
     pub maybe_backup_repo_source: Option<BlobRepo>,
@@ -171,7 +177,6 @@ pub async fn repo_handlers<'a>(
         // Clone the few things we're going to need later in our bootstrap.
         let cache_warmup_params = config.cache_warmup.clone();
         let db_config = config.storage_config.metadata.clone();
-        let preserve_raw_bundle2 = config.bundle2_replay_params.preserve_raw_bundle2.clone();
 
         let common_commit_sync_config = repo
             .live_commit_sync_config()
@@ -199,25 +204,19 @@ pub async fn repo_handlers<'a>(
             readonly_storage.0,
         )?;
 
+        info!(
+            logger,
+            "Creating CommitSyncMapping, TargetRepoDbs, WarmBookmarksCache"
+        );
+
         let backsyncer_dbs = open_backsyncer_dbs(
             ctx.clone(),
             blobrepo.clone(),
             db_config.clone(),
             mysql_options.clone(),
             readonly_storage,
-        );
-
-        info!(
-            logger,
-            "Creating MononokeRepo, CommitSyncMapping, TargetRepoDbs, \
-                WarmBookmarksCache"
-        );
-
-        let mononoke_repo =
-            MononokeRepo::new(ctx.fb, repo.clone(), mysql_options, readonly_storage);
-
-        let (mononoke_repo, backsyncer_dbs) =
-            futures::future::try_join(mononoke_repo, backsyncer_dbs).await?;
+        )
+        .await?;
 
         let maybe_incomplete_push_redirector_args = common_commit_sync_config.and_then({
             cloned!(logger);
@@ -253,8 +252,7 @@ pub async fn repo_handlers<'a>(
             IncompleteRepoHandler {
                 logger,
                 scuba: scuba.clone(),
-                repo: mononoke_repo,
-                preserve_raw_bundle2,
+                repo: repo.clone(),
                 maybe_incomplete_push_redirector_args,
                 repo_client_knobs,
                 backup_repo_config,

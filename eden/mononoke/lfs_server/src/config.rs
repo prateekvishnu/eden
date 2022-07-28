@@ -5,13 +5,16 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{Context, Error};
+use anyhow::Context;
+use anyhow::Error;
 use gotham_ext::middleware::PostResponseConfig;
 use permission_checker::MononokeIdentitySet;
 use rate_limiting::LoadShedLimit;
-use serde::de::{Deserializer, Error as _};
+use serde::de::Deserializer;
+use serde::de::Error as _;
 use serde::ser::Serializer;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::num::NonZeroU16;
 use std::str::FromStr;
@@ -90,7 +93,7 @@ impl TryFrom<lfs_server_config::LfsServerConfig> for ServerConfig {
         for list in value.disable_compression_identities.iter() {
             let idents = list
                 .iter()
-                .map(|i| FromStr::from_str(&i))
+                .map(|i| FromStr::from_str(i))
                 .collect::<Result<BTreeSet<_>, _>>()?;
             disable_compression_identities.push(idents);
         }

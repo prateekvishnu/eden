@@ -6,26 +6,33 @@
  */
 
 use crate::commands::SCRUB;
-use crate::detail::{
-    graph::Node,
-    sampling::WalkSampleMapping,
-    scrub::{scrub_objects, ScrubCommand, ScrubSample},
-};
-use anyhow::{Context, Error};
+use crate::detail::graph::Node;
+use crate::detail::sampling::WalkSampleMapping;
+use crate::detail::scrub::scrub_objects;
+use crate::detail::scrub::ScrubCommand;
+use crate::detail::scrub::ScrubSample;
+use anyhow::Context;
+use anyhow::Error;
 use async_trait::async_trait;
 use clap::Parser;
-use executor_lib::{BackgroundProcessExecutor, RepoShardedProcess, RepoShardedProcessExecutor};
+use executor_lib::BackgroundProcessExecutor;
+use executor_lib::RepoShardedProcess;
+use executor_lib::RepoShardedProcessExecutor;
 use fbinit::FacebookInit;
 use mononoke_app::args::MultiRepoArgs;
 use mononoke_app::MononokeApp;
 use once_cell::sync::OnceCell;
-use slog::{info, Logger};
-use std::sync::atomic::{AtomicBool, Ordering};
+use slog::info;
+use slog::Logger;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::args::{
-    OutputFormat, SamplingArgs, ScrubOutputNodeArgs, ScrubPackLogArgs, WalkerCommonArgs,
-};
+use crate::args::OutputFormat;
+use crate::args::SamplingArgs;
+use crate::args::ScrubOutputNodeArgs;
+use crate::args::ScrubPackLogArgs;
+use crate::args::WalkerCommonArgs;
 use crate::commands::JobParams;
 use crate::setup::setup_common;
 use crate::WalkerArgs;
@@ -69,10 +76,8 @@ impl WalkerScrubProcess {
 #[async_trait]
 impl RepoShardedProcess for WalkerScrubProcess {
     async fn setup(&self, repo_name: &str) -> anyhow::Result<Arc<dyn RepoShardedProcessExecutor>> {
-        info!(
-            self.app.logger(),
-            "Setting up walker scrub for repo {}", repo_name
-        );
+        let logger = self.app.repo_logger(repo_name);
+        info!(&logger, "Setting up walker scrub for repo {}", repo_name);
         let repos = MultiRepoArgs {
             repo_name: vec![repo_name.to_string()],
             repo_id: vec![],
@@ -83,12 +88,12 @@ impl RepoShardedProcess for WalkerScrubProcess {
                 format!("Failure in setting up walker scrub for repo {}", &repo_name)
             })?;
         info!(
-            self.app.logger(),
+            &logger,
             "Completed walker scrub setup for repo {}", repo_name
         );
         Ok(Arc::new(WalkerScrubProcessExecutor::new(
             self.app.fb,
-            self.app.logger().clone(),
+            logger,
             job_params,
             command,
             repo_name.to_string(),
@@ -164,6 +169,11 @@ async fn setup_scrub(
     args: &CommandArgs,
 ) -> Result<(JobParams, ScrubCommand), Error> {
     let component_sampler = Arc::new(WalkSampleMapping::<Node, ScrubSample>::new());
+    let repo_name = repos.repo_name.clone().pop();
+    let logger = match repo_name {
+        Some(repo_name) => app.repo_logger(&repo_name),
+        None => app.logger().clone(),
+    };
     let job_params = setup_common(
         SCRUB,
         app,
@@ -171,6 +181,7 @@ async fn setup_scrub(
         &args.common_args,
         None,
         Some(component_sampler.clone()),
+        &logger,
     )
     .await?;
 

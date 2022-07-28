@@ -5,18 +5,25 @@
  * GNU General Public License version 2.
  */
 
-use crate::{
-    blob::{Blob, BlobstoreValue, FastlogBatchBlob},
-    errors::ErrorKind,
-    thrift,
-    typed_hash::{ChangesetId, FastlogBatchId, FastlogBatchIdContext},
-};
-use anyhow::{Context, Result};
-use blobstore::{Blobstore, Loadable, Storable};
+use crate::blob::Blob;
+use crate::blob::BlobstoreValue;
+use crate::blob::FastlogBatchBlob;
+use crate::errors::ErrorKind;
+use crate::thrift;
+use crate::typed_hash::ChangesetId;
+use crate::typed_hash::FastlogBatchId;
+use crate::typed_hash::FastlogBatchIdContext;
+use anyhow::Context;
+use anyhow::Result;
+use blobstore::Blobstore;
+use blobstore::Loadable;
+use blobstore::Storable;
 use bytes::Bytes;
 use context::CoreContext;
 use fbthrift::compact_protocol;
-use futures::future::{try_join_all, BoxFuture, FutureExt};
+use futures::future::try_join_all;
+use futures::future::BoxFuture;
+use futures::future::FutureExt;
 use itertools::Itertools;
 use std::collections::VecDeque;
 
@@ -58,7 +65,7 @@ impl FastlogBatch {
             .chunks(MAX_LATEST_LEN);
         let chunks: Vec<_> = chunks.into_iter().map(VecDeque::from_iter).collect();
         let mut chunks = chunks.into_iter();
-        let latest = chunks.next().unwrap_or(VecDeque::new());
+        let latest = chunks.next().unwrap_or_default();
 
         let previous_batches = VecDeque::from(
             try_join_all(chunks.map(move |chunk| {
@@ -85,7 +92,7 @@ impl FastlogBatch {
     ) -> Result<FastlogBatch> {
         let mut new_batch = self.clone();
         if new_batch.latest.len() >= MAX_LATEST_LEN {
-            let previous_latest = std::mem::replace(&mut new_batch.latest, VecDeque::new());
+            let previous_latest = std::mem::take(&mut new_batch.latest);
             let new_previous_batch = FastlogBatch::new(previous_latest, VecDeque::new());
             let new_batch_id = new_previous_batch.into_blob().store(ctx, blobstore).await?;
             if new_batch.previous_batches.len() >= MAX_BATCHES {
@@ -343,6 +350,6 @@ mod test {
         raw_list.truncate(max_entries_in_fastlog_batch());
         let actual = batch.fetch_raw_list(ctx, blobstore).await.unwrap();
 
-        TestResult::from_bool(actual == Vec::from(raw_list))
+        TestResult::from_bool(raw_list == actual)
     }
 }

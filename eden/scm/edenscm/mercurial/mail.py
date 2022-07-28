@@ -20,6 +20,7 @@ import os
 import smtplib
 import socket
 import time
+from typing import List, Union
 
 from . import encoding, error, sslutil, util
 from .i18n import _
@@ -139,7 +140,7 @@ def _smtp(ui):
     return send
 
 
-def _sendmail(ui, sender, recipients, msg):
+def _sendmail(ui, sender: str, recipients, msg) -> None:
     """send mail using sendmail."""
     program = ui.config("email", "method")
     cmdline = "%s -f %s %s" % (
@@ -158,14 +159,18 @@ def _sendmail(ui, sender, recipients, msg):
         )
 
 
-def _mbox(mbox, sender, recipients, msg):
+def _mbox(mbox, sender, recipients, msg) -> None:
     """write mails to mbox"""
     fp = open(mbox, "ab+")
     # Should be time.asctime(), but Windows prints 2-characters day
     # of month instead of one. Make them print the same thing.
     date = time.strftime(r"%a %b %d %H:%M:%S %Y", time.localtime())
+    # pyre-fixme[6]: For 1st param expected `Union[array[typing.Any], bytearray,
+    #  bytes, _CData, memoryview, mmap]` but got `str`.
     fp.write("From %s %s\n" % (sender, date))
     fp.write(msg)
+    # pyre-fixme[6]: For 1st param expected `Union[array[typing.Any], bytearray,
+    #  bytes, _CData, memoryview, mmap]` but got `str`.
     fp.write("\n\n")
     fp.close()
 
@@ -187,7 +192,7 @@ def sendmail(ui, sender, recipients, msg, mbox=None):
     return send(sender, recipients, msg)
 
 
-def validateconfig(ui):
+def validateconfig(ui) -> None:
     """determine if we have enough config data to try sending email."""
     method = ui.config("email", "method")
     if method == "smtp":
@@ -202,7 +207,7 @@ def validateconfig(ui):
             )
 
 
-def codec2iana(cs):
+def codec2iana(cs: str) -> str:
     """ """
     cs = email.charset.Charset(cs).input_charset.lower()
 
@@ -212,7 +217,9 @@ def codec2iana(cs):
     return cs
 
 
-def mimetextpatch(s, subtype="plain", display=False):
+def mimetextpatch(
+    s, subtype: str = "plain", display: bool = False
+) -> email.message.Message:
     """Return MIME message suitable for a patch.
     Charset will be detected by first trying to decode as us-ascii, then utf-8,
     and finally the global encodings. If all those fail, fall back to
@@ -232,7 +239,9 @@ def mimetextpatch(s, subtype="plain", display=False):
     return mimetextqp(s, subtype, "iso-8859-1")
 
 
-def mimetextqp(body, subtype, charset):
+def mimetextqp(
+    body: Union[List[email.message.Message], bytes, str], subtype, charset
+) -> email.message.Message:
     """Return MIME message.
     Quoted-printable transfer encoding will be used if necessary.
     """
@@ -240,6 +249,8 @@ def mimetextqp(body, subtype, charset):
     msg = email.message.Message()
     msg.set_type("text/" + subtype)
 
+    # pyre-fixme[16]: Item `List` of `Union[List[email.message.Message], bytes,
+    #  str]` has no attribute `splitlines`.
     for line in body.splitlines():
         if len(line) > 950:
             cs.body_encoding = email.charset.QP
@@ -286,7 +297,7 @@ def _encode(ui, s, charsets):
     return s, "us-ascii"
 
 
-def headencode(ui, s, charsets=None, display=False):
+def headencode(ui, s, charsets=None, display: bool = False) -> str:
     """Returns RFC-2047 compliant header from given string."""
     if not display:
         # split into words?
@@ -295,7 +306,7 @@ def headencode(ui, s, charsets=None, display=False):
     return s
 
 
-def _addressencode(ui, name, addr, charsets=None):
+def _addressencode(ui, name: str, addr, charsets=None):
     name = headencode(ui, name, charsets)
     try:
         acc, dom = addr.split("@")
@@ -310,18 +321,20 @@ def _addressencode(ui, name, addr, charsets=None):
             addr = addr.encode("ascii")
         except UnicodeDecodeError:
             raise error.Abort(_("invalid local address: %s") % addr)
+    # pyre-fixme[16]: Module `email` has no attribute `Utils`.
     return email.Utils.formataddr((name, addr))
 
 
-def addressencode(ui, address, charsets=None, display=False):
+def addressencode(ui, address, charsets=None, display: bool = False):
     """Turns address into RFC-2047 compliant header."""
     if display or not address:
         return address or ""
+    # pyre-fixme[16]: Module `email` has no attribute `Utils`.
     name, addr = email.Utils.parseaddr(address)
     return _addressencode(ui, name, addr, charsets)
 
 
-def addrlistencode(ui, addrs, charsets=None, display=False):
+def addrlistencode(ui, addrs, charsets=None, display: bool = False):
     """Turns a list of addresses into a list of RFC-2047 compliant headers.
     A single element of input list may contain multiple addresses, but output
     always has one address per item"""
@@ -329,13 +342,14 @@ def addrlistencode(ui, addrs, charsets=None, display=False):
         return [a.strip() for a in addrs if a.strip()]
 
     result = []
+    # pyre-fixme[16]: Module `email` has no attribute `Utils`.
     for name, addr in email.Utils.getaddresses(addrs):
         if name or addr:
             result.append(_addressencode(ui, name, addr, charsets))
     return result
 
 
-def mimeencode(ui, s, charsets=None, display=False):
+def mimeencode(ui, s, charsets=None, display: bool = False) -> email.message.Message:
     """creates mime text object, encodes it if needed, and sets
     charset and transfer-encoding accordingly."""
     cs = "us-ascii"

@@ -6,65 +6,90 @@
  */
 
 use crate::errors::ErrorKind;
-use anyhow::{anyhow, Error, Result};
+use anyhow::anyhow;
+use anyhow::Error;
+use anyhow::Result;
 use blobrepo::BlobRepo;
 use blobrepo_hg::BlobRepoHg;
 use blobstore::Loadable;
+use bonsai_hg_mapping::BonsaiHgMappingRef;
 use bytes::Bytes;
 use bytes_old::Bytes as BytesOld;
 use changeset_fetcher::ArcChangesetFetcher;
+use changesets::ChangesetsRef;
 use cloned::cloned;
-use context::{CoreContext, PerfCounterType};
+use context::CoreContext;
+use context::PerfCounterType;
 use derived_data::BonsaiDerived;
 use derived_data_filenodes::FilenodesOnlyPublic;
 use filestore::FetchKey;
-use futures::{
-    compat::Stream01CompatExt,
-    future::{self, FutureExt, TryFutureExt},
-    stream::{self, Stream, StreamExt, TryStreamExt},
-};
-use futures_01_ext::{
-    BoxFuture as OldBoxFuture, BoxStream as OldBoxStream, BufferedParams, FutureExt as _,
-    StreamExt as OldStreamExt,
-};
+use futures::compat::Stream01CompatExt;
+use futures::future;
+use futures::future::FutureExt;
+use futures::future::TryFutureExt;
+use futures::stream;
+use futures::stream::Stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use futures_01_ext::BoxFuture as OldBoxFuture;
+use futures_01_ext::BoxStream as OldBoxStream;
+use futures_01_ext::BufferedParams;
+use futures_01_ext::FutureExt as _;
+use futures_01_ext::StreamExt as OldStreamExt;
 use futures_ext::stream::FbStreamExt;
-use futures_old::{
-    future as old_future, stream as old_stream, Future as OldFuture, Stream as OldStream,
-};
+use futures_old::future as old_future;
+use futures_old::stream as old_stream;
+use futures_old::Future as OldFuture;
+use futures_old::Stream as OldStream;
 use futures_stats::TimedTryFutureExt;
 use futures_util::try_join;
-use manifest::{find_intersection_of_diffs_and_parents, Entry};
-use mercurial_bundles::{
-    changegroup::CgVersion,
-    part_encode::PartEncodeBuilder,
-    parts::{self, FilenodeEntry},
-};
-use mercurial_revlog::{self, RevlogChangeset};
-use mercurial_types::{
-    blobs::{fetch_manifest_envelope, File},
-    FileBytes, HgBlobNode, HgChangesetId, HgFileNodeId, HgManifestId, HgParents, MPath, RevFlags,
-    NULL_CSID,
-};
-use mononoke_types::{hash::Sha256, ChangesetId, ContentId, Generation};
-use phases::{Phase, Phases, PhasesRef};
+use manifest::find_intersection_of_diffs_and_parents;
+use manifest::Entry;
+use mercurial_bundles::changegroup::CgVersion;
+use mercurial_bundles::part_encode::PartEncodeBuilder;
+use mercurial_bundles::parts;
+use mercurial_bundles::parts::FilenodeEntry;
+use mercurial_revlog::RevlogChangeset;
+use mercurial_types::blobs::fetch_manifest_envelope;
+use mercurial_types::blobs::File;
+use mercurial_types::FileBytes;
+use mercurial_types::HgBlobNode;
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::HgManifestId;
+use mercurial_types::HgParents;
+use mercurial_types::MPath;
+use mercurial_types::RevFlags;
+use mercurial_types::NULL_CSID;
+use mononoke_types::hash::Sha256;
+use mononoke_types::ChangesetId;
+use mononoke_types::ContentId;
+use mononoke_types::Generation;
+use phases::Phase;
+use phases::Phases;
+use phases::PhasesRef;
 use rate_limiting::Metric;
 use reachabilityindex::LeastCommonAncestorsHint;
 use repo_blobstore::RepoBlobstore;
+use repo_blobstore::RepoBlobstoreRef;
+use repo_derived_data::RepoDerivedDataRef;
 use revset::DifferenceOfUnionsOfAncestorsNodeStream;
-use sha1::{Digest, Sha1};
-use slog::{debug, info, o};
+use sha1::Digest;
+use sha1::Sha1;
+use slog::debug;
+use slog::info;
+use slog::o;
 use stats::prelude::*;
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
 use tunables::tunables;
 
 mod errors;
 mod low_gen_nums_optimization;
-use low_gen_nums_optimization::{
-    compute_partial_getbundle, low_gen_num_optimization, LowGenNumChecker,
-};
+use low_gen_nums_optimization::compute_partial_getbundle;
+use low_gen_nums_optimization::low_gen_num_optimization;
+use low_gen_nums_optimization::LowGenNumChecker;
 
 pub const MAX_FILENODE_BYTES_IN_MEMORY: u64 = 100_000_000;
 pub const GETBUNDLE_COMMIT_NUM_WARN: u64 = 1_000_000;
@@ -121,7 +146,7 @@ pub async fn create_getbundle_response(
         find_new_draft_commits_and_derive_filenodes_for_public_roots(
             ctx, blobrepo, &common, heads, phases
         ),
-        find_commits_to_send(ctx, blobrepo, &common, heads, &lca_hint),
+        find_commits_to_send(ctx, blobrepo, &common, heads, lca_hint),
     )?;
 
     report_draft_commits(ctx, &draft_commits);
@@ -262,8 +287,8 @@ pub async fn find_commits_to_send(
     let changeset_fetcher = blobrepo.get_changeset_fetcher();
 
     let heads = hg_to_bonsai_stream(
-        &ctx,
-        &blobrepo,
+        ctx,
+        blobrepo,
         heads
             .iter()
             .filter(|head| !common.contains(head))
@@ -272,11 +297,11 @@ pub async fn find_commits_to_send(
     );
 
     let excludes = hg_to_bonsai_stream(
-        &ctx,
-        &blobrepo,
+        ctx,
+        blobrepo,
         common
             .iter()
-            .map(|node| node.clone())
+            .copied()
             .filter(|node| node.into_nodehash() != NULL_CSID.into_nodehash())
             .collect(),
     );
@@ -312,10 +337,10 @@ pub async fn find_commits_to_send(
         || !low_gen_num_checker.is_low_gen_num(lowest_head_gen_num)
     {
         call_difference_of_union_of_ancestors_revset(
-            &ctx,
+            ctx,
             &changeset_fetcher,
             params,
-            &lca_hint,
+            lca_hint,
             None,
         )
         .await?
@@ -325,10 +350,10 @@ pub async fn find_commits_to_send(
             .clone()
             .log_with_msg("Using low generation getbundle optimization", None);
         let maybe_result = low_gen_num_optimization(
-            &ctx,
+            ctx,
             &changeset_fetcher,
             params.clone(),
-            &lca_hint,
+            lca_hint,
             &low_gen_num_checker,
         )
         .await?;
@@ -339,10 +364,10 @@ pub async fn find_commits_to_send(
                 .clone()
                 .log_with_msg("Skipped low generation getbundle optimization", None);
             call_difference_of_union_of_ancestors_revset(
-                &ctx,
+                ctx,
                 &changeset_fetcher,
                 params,
-                &lca_hint,
+                lca_hint,
                 None,
             )
             .await?
@@ -416,9 +441,9 @@ impl Params {
         csids.sort();
         let mut hasher = Sha1::new();
         for csid in csids {
-            hasher.input(csid.blake2().as_ref());
+            hasher.update(csid.blake2().as_ref());
         }
-        let res = faster_hex::hex_string(&hasher.result());
+        let res = faster_hex::hex_string(&hasher.finalize());
         Ok(res)
     }
 }
@@ -444,7 +469,7 @@ async fn call_difference_of_union_of_ancestors_revset(
     match (min_heads_gen_num, max_excludes_gen_num) {
         (Some(min_heads), Some(max_excludes)) => {
             if min_heads.difference_from(*max_excludes).unwrap_or(0) > GETBUNDLE_COMMIT_NUM_WARN {
-                warn_expensive_getbundle(&ctx);
+                warn_expensive_getbundle(ctx);
                 notified_expensive_getbundle = true;
             }
         }
@@ -453,7 +478,7 @@ async fn call_difference_of_union_of_ancestors_revset(
 
     let nodes_to_send = DifferenceOfUnionsOfAncestorsNodeStream::new_with_excludes_gen_num(
         ctx.clone(),
-        &changeset_fetcher,
+        changeset_fetcher,
         lca_hint.clone(),
         heads,
         excludes,
@@ -466,7 +491,7 @@ async fn call_difference_of_union_of_ancestors_revset(
             i += 1;
             if i > GETBUNDLE_COMMIT_NUM_WARN && !notified_expensive_getbundle {
                 notified_expensive_getbundle = true;
-                warn_expensive_getbundle(&ctx);
+                warn_expensive_getbundle(ctx);
             }
         }
     });
@@ -499,9 +524,7 @@ fn warn_expensive_getbundle(ctx: &CoreContext) {
     info!(
         ctx.logger(),
         "your repository is out of date and pulling new commits might take a long time. \
-        Please consider recloning your repository since it might be much faster. \
-        Try the `--reclone` option on `fbclone` and see more instructions in \
-        https://fburl.com/wiki/brz1ysn7."
+        Please consider recloning your repository since it might be much faster."
         ; o!("remote" => "true")
     );
 }
@@ -546,7 +569,7 @@ async fn create_hg_changeset_part(
                 }
             }
         })
-        .map_ok(|res| stream::iter(res))
+        .map_ok(stream::iter)
         .try_flatten()
         .map({
             cloned!(ctx, blobrepo);
@@ -588,12 +611,9 @@ async fn create_hg_changeset_part(
         .boxed()
         .compat();
 
-    let maybe_filenode_entries = match maybe_prepared_filenode_entries {
-        Some(prepared_filenode_entries) => Some(
-            create_filenodes(ctx.clone(), blobrepo.clone(), prepared_filenode_entries).boxify(),
-        ),
-        None => None,
-    };
+    let maybe_filenode_entries = maybe_prepared_filenode_entries.map(|prepared_filenode_entries| {
+        create_filenodes(ctx.clone(), blobrepo.clone(), prepared_filenode_entries).boxify()
+    });
 
     let cg_version = if lfs_params.threshold.is_some() {
         CgVersion::Cg3Version
@@ -783,7 +803,7 @@ async fn find_phase_heads(
 /// `draft_callback` returns true.
 async fn traverse_draft_commits(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &(impl ChangesetsRef + RepoDerivedDataRef + BonsaiHgMappingRef + Send + Sync),
     phases: &dyn Phases,
     heads: &[HgChangesetId],
     mut public_callback: impl FnMut(ChangesetId, HgChangesetId),
@@ -797,7 +817,7 @@ async fn traverse_draft_commits(
 
     // Find the initial set of public changesets.
     let bonsai_heads = hg_bonsai_heads.iter().map(|(_, bcs_id)| *bcs_id).collect();
-    let mut public_changesets = phases.get_cached_public(&ctx, bonsai_heads).await?;
+    let mut public_changesets = phases.get_cached_public(ctx, bonsai_heads).await?;
 
     // Call the draft head callback for each of the draft heads.
     let mut seen = HashSet::new();
@@ -828,8 +848,16 @@ async fn traverse_draft_commits(
         // TODO(mbthomas): After blobrepo refactoring, change to use a method that calls `Changesets::get_many`.
         let parents: Vec<_> = stream::iter(traverse)
             .map(move |csid| async move {
-                repo.get_changeset_parents_by_bonsai(ctx.clone(), csid)
-                    .await
+                let parents = repo
+                    .changesets()
+                    .get(ctx.clone(), csid)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::format_err!("Commit {} does not exist in the repo", csid)
+                    })?
+                    .parents;
+
+                Result::<_, Error>::Ok(parents)
             })
             .buffered(100)
             .try_collect::<Vec<_>>()
@@ -841,7 +869,7 @@ async fn traverse_draft_commits(
 
         let (new_next_changesets, new_public_changesets) = try_join!(
             repo.get_hg_bonsai_mapping(ctx.clone(), parents.clone()),
-            phases.get_cached_public(&ctx, parents)
+            phases.get_cached_public(ctx, parents)
         )?;
         next_changesets = new_next_changesets;
         public_changesets = new_public_changesets;
@@ -875,7 +903,7 @@ impl PreparedFilenodeEntry {
     async fn into_filenode<'a>(
         self,
         ctx: &'a CoreContext,
-        repo: &'a BlobRepo,
+        blobstore: &'a RepoBlobstore,
     ) -> Result<(HgFileNodeId, HgChangesetId, HgBlobNode, Option<RevFlags>), Error> {
         let Self {
             filenode,
@@ -888,21 +916,21 @@ impl PreparedFilenodeEntry {
 
         async fn fetch_and_wrap(
             ctx: &CoreContext,
-            repo: &BlobRepo,
+            blobstore: &RepoBlobstore,
             content_id: ContentId,
         ) -> Result<FileBytes, Error> {
-            let content = filestore::fetch_concat(repo.blobstore(), ctx, content_id).await?;
+            let content = filestore::fetch_concat(blobstore, ctx, content_id).await?;
 
             Ok(FileBytes(content))
         }
 
         let (blob, flags) = match content {
             FilenodeEntryContent::InlineV2(content_id) => {
-                let bytes = fetch_and_wrap(ctx, repo, content_id).await?;
+                let bytes = fetch_and_wrap(ctx, blobstore, content_id).await?;
                 (generate_inline_file(&bytes, parents, &metadata), None)
             }
             FilenodeEntryContent::InlineV3(content_id) => {
-                let bytes = fetch_and_wrap(ctx, repo, content_id).await?;
+                let bytes = fetch_and_wrap(ctx, blobstore, content_id).await?;
                 (
                     generate_inline_file(&bytes, parents, &metadata),
                     Some(RevFlags::REVIDX_DEFAULT_FLAGS),
@@ -942,14 +970,14 @@ fn calculate_content_weight_hint(content_size: u64, content: &FilenodeEntryConte
 
 fn prepare_filenode_entries_stream<'a>(
     ctx: &'a CoreContext,
-    repo: &'a BlobRepo,
+    blobstore: &'a RepoBlobstore,
     filenodes: Vec<(MPath, HgFileNodeId, HgChangesetId)>,
     lfs_session: &'a SessionLfsParams,
 ) -> impl Stream<Item = Result<(MPath, Vec<PreparedFilenodeEntry>), Error>> + 'a {
     stream::iter(filenodes.into_iter())
         .map({
             move |(path, filenode, linknode)| async move {
-                let envelope = filenode.load(ctx, repo.blobstore()).await?;
+                let envelope = filenode.load(ctx, blobstore).await?;
 
                 let file_size = envelope.content_size();
 
@@ -960,7 +988,7 @@ fn prepare_filenode_entries_stream<'a>(
                     }
                     _ => {
                         let key = FetchKey::from(envelope.content_id());
-                        let meta = filestore::get_metadata(repo.blobstore(), ctx, &key).await?;
+                        let meta = filestore::get_metadata(blobstore, ctx, &key).await?;
                         let meta =
                             meta.ok_or_else(|| Error::from(ErrorKind::MissingContent(key)))?;
                         let oid = meta.sha256;
@@ -1026,7 +1054,7 @@ fn generate_lfs_file(
     let mut parents = parents.into_iter();
     let p1 = parents.next();
     let p2 = parents.next();
-    Ok(HgBlobNode::new(Bytes::from(bytes), p1, p2))
+    Ok(HgBlobNode::new(bytes, p1, p2))
 }
 
 pub fn create_manifest_entries_stream(
@@ -1063,7 +1091,9 @@ pub fn create_manifest_entries_stream(
 
 async fn diff_with_parents(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &(
+         impl ChangesetsRef + RepoDerivedDataRef + BonsaiHgMappingRef + RepoBlobstoreRef + Send + Sync
+     ),
     hg_cs_id: HgChangesetId,
 ) -> Result<
     (
@@ -1072,13 +1102,21 @@ async fn diff_with_parents(
     ),
     Error,
 > {
-    let (mf_id, parent_mf_ids) = try_join!(fetch_manifest(ctx, repo, &hg_cs_id), async {
-        let parents = repo.get_changeset_parents(ctx.clone(), hg_cs_id).await?;
+    let (mf_id, parent_mf_ids) = try_join!(
+        fetch_manifest(ctx, repo.repo_blobstore(), &hg_cs_id),
+        async {
+            let parents = repo.get_changeset_parents(ctx.clone(), hg_cs_id).await?;
 
-        future::try_join_all(parents.iter().map(|p| fetch_manifest(ctx, repo, p))).await
-    })?;
+            future::try_join_all(
+                parents
+                    .iter()
+                    .map(|p| fetch_manifest(ctx, repo.repo_blobstore(), p)),
+            )
+            .await
+        }
+    )?;
 
-    let blobstore = Arc::new(repo.get_blobstore());
+    let blobstore = Arc::new(repo.repo_blobstore().clone());
     let new_entries: Vec<(Option<MPath>, Entry<_, _>, _)> =
         find_intersection_of_diffs_and_parents(ctx.clone(), blobstore, mf_id, parent_mf_ids)
             .try_collect()
@@ -1115,7 +1153,7 @@ async fn diff_with_parents(
 
 fn create_filenodes_weighted(
     ctx: CoreContext,
-    repo: BlobRepo,
+    repo: impl RepoBlobstoreRef + Clone + Sync + Send + 'static,
     entries: HashMap<MPath, Vec<PreparedFilenodeEntry>>,
 ) -> impl OldStream<
     Item = (
@@ -1137,7 +1175,7 @@ fn create_filenodes_weighted(
                     |entry| {
                         {
                             cloned!(ctx, repo);
-                            async move { entry.into_filenode(&ctx, &repo).await }
+                            async move { entry.into_filenode(&ctx, repo.repo_blobstore()).await }
                         }
                         .boxed()
                         .compat()
@@ -1155,7 +1193,7 @@ fn create_filenodes_weighted(
 
 pub fn create_filenodes(
     ctx: CoreContext,
-    repo: BlobRepo,
+    repo: impl RepoBlobstoreRef + Clone + Sync + Send + 'static,
     entries: HashMap<MPath, Vec<PreparedFilenodeEntry>>,
 ) -> impl OldStream<Item = (MPath, Vec<FilenodeEntry>), Error = Error> {
     let params = BufferedParams {
@@ -1169,7 +1207,9 @@ pub fn create_filenodes(
 // created in an earlier commit will be earlier in the output.
 pub async fn get_manifests_and_filenodes(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &(
+         impl ChangesetsRef + RepoDerivedDataRef + BonsaiHgMappingRef + RepoBlobstoreRef + Send + Sync
+     ),
     commits: impl IntoIterator<Item = HgChangesetId>,
     lfs_params: &SessionLfsParams,
 ) -> Result<
@@ -1185,9 +1225,14 @@ pub async fn get_manifests_and_filenodes(
                 let (manifests, filenodes) = diff_with_parents(ctx, repo, hg_cs_id).await?;
 
                 let filenodes: Vec<(MPath, Vec<PreparedFilenodeEntry>)> =
-                    prepare_filenode_entries_stream(&ctx, &repo, filenodes, &lfs_params)
-                        .try_collect()
-                        .await?;
+                    prepare_filenode_entries_stream(
+                        ctx,
+                        repo.repo_blobstore(),
+                        filenodes,
+                        lfs_params,
+                    )
+                    .try_collect()
+                    .await?;
                 Result::<_, Error>::Ok((manifests, filenodes))
             }
         })
@@ -1226,9 +1271,9 @@ pub async fn get_manifests_and_filenodes(
 
 async fn fetch_manifest(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    blobstore: &RepoBlobstore,
     hg_cs_id: &HgChangesetId,
 ) -> Result<HgManifestId, Error> {
-    let blob_cs = hg_cs_id.load(ctx, repo.blobstore()).await?;
+    let blob_cs = hg_cs_id.load(ctx, blobstore).await?;
     Ok(blob_cs.manifestid())
 }

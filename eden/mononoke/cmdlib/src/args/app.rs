@@ -9,11 +9,18 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::num::NonZeroU32;
 
-use super::cache::{add_cachelib_args, CachelibSettings};
+use super::cache::add_cachelib_args;
+use super::cache::CachelibSettings;
 use super::matches::MononokeMatches;
-use anyhow::{Error, Result};
-use blobstore_factory::{PutBehaviour, ScrubAction, ScrubWriteMostly, DEFAULT_PUT_BEHAVIOUR};
-use clap_old::{App, Arg, ArgGroup};
+use anyhow::Error;
+use anyhow::Result;
+use blobstore_factory::PutBehaviour;
+use blobstore_factory::ScrubAction;
+use blobstore_factory::ScrubWriteMostly;
+use blobstore_factory::DEFAULT_PUT_BEHAVIOUR;
+use clap_old::App;
+use clap_old::Arg;
+use clap_old::ArgGroup;
 use fbinit::FacebookInit;
 use once_cell::sync::OnceCell;
 use repo_factory::ReadOnlyStorage;
@@ -24,6 +31,7 @@ use strum::VariantNames;
 pub const CONFIG_PATH: &str = "mononoke-config-path";
 pub const REPO_ID: &str = "repo-id";
 pub const REPO_NAME: &str = "repo-name";
+pub const SHARDED_SERVICE_NAME: &str = "sharded-service-name";
 pub const SOURCE_REPO_GROUP: &str = "source-repo";
 pub const SOURCE_REPO_ID: &str = "source-repo-id";
 pub const SOURCE_REPO_NAME: &str = "source-repo-name";
@@ -93,6 +101,8 @@ pub const CRYPTO_PATH_REGEX_ARG: &str = "crypto-path-regex";
 pub const DERIVE_REMOTELY: &str = "derive-remotely";
 pub const DERIVE_REMOTELY_TIER: &str = "derive-remotely-tier";
 
+pub const ACL_FILE: &str = "acl-file";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArgType {
     /// Options related to mononoke config
@@ -137,6 +147,8 @@ pub enum ArgType {
     RendezVous,
     /// Adds options related to derivation
     Derivation,
+    /// Adds options related to acls
+    Acls,
 }
 
 // Arguments that are enabled by default for MononokeAppBuilder
@@ -151,11 +163,14 @@ const DEFAULT_ARG_TYPES: &[ArgType] = &[
     ArgType::Tunables,
     ArgType::RendezVous,
     ArgType::Derivation,
+    ArgType::Acls,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RepoRequirement {
+    // The command will execute for exactly one repo at a time.
     ExactlyOne,
+    // The command requires atleast one repo.
     AtLeastOne,
 }
 
@@ -167,6 +182,10 @@ pub struct MononokeAppBuilder {
     /// Whether to hide advanced Manifold configuration from help. Note that the arguments will
     /// still be available, just not displayed in help.
     hide_advanced_args: bool,
+
+    /// Flag determinig if the command supports getting repos dynamically at runtime in
+    /// addition to repos being provided through CLI before execution.
+    dynamic_repos: bool,
 
     /// Whether to require the user select a repo if the option is present.
     repo_required: Option<RepoRequirement>,
@@ -302,6 +321,7 @@ impl MononokeAppBuilder {
             scrub_action_on_missing_write_mostly_default: None,
             scrub_queue_peek_bound_secs_default: None,
             slog_filter_fn: None,
+            dynamic_repos: false,
         }
     }
 
@@ -364,6 +384,13 @@ impl MononokeAppBuilder {
     /// This command has arguments for fb303
     pub fn with_fb303_args(mut self) -> Self {
         self.arg_types.insert(ArgType::Fb303);
+        self
+    }
+
+    /// This command can get repos through CLI OR
+    /// at runtime dynamically through sharded execution.
+    pub fn with_dynamic_repos(mut self) -> Self {
+        self.dynamic_repos = true;
         self
     }
 
@@ -514,8 +541,20 @@ impl MononokeAppBuilder {
                 .help("Name of repository")
                 .conflicts_with_all(repo_conflicts);
 
+            let sharded_service_name_arg = Arg::with_name(SHARDED_SERVICE_NAME)
+                .long(SHARDED_SERVICE_NAME)
+                .value_name("NAME")
+                .multiple(false)
+                .help("The name of SM service to be used when the command needs to be executed in a sharded setting")
+                .conflicts_with_all(repo_conflicts);
+
+            let group_args = if self.dynamic_repos {
+                vec![REPO_ID, REPO_NAME, SHARDED_SERVICE_NAME]
+            } else {
+                vec![REPO_ID, REPO_NAME]
+            };
             let mut repo_group = ArgGroup::with_name("repo")
-                .args(&[REPO_ID, REPO_NAME])
+                .args(&group_args)
                 .required(self.repo_required.is_some());
 
             if self.repo_required == Some(RepoRequirement::AtLeastOne) {
@@ -523,8 +562,14 @@ impl MononokeAppBuilder {
                 repo_name_arg = repo_name_arg.multiple(true).number_of_values(1);
                 repo_group = repo_group.multiple(true)
             }
-
-            app = app.arg(repo_id_arg).arg(repo_name_arg).group(repo_group);
+            app = if self.dynamic_repos {
+                app.arg(sharded_service_name_arg)
+                    .arg(repo_id_arg)
+                    .arg(repo_name_arg)
+                    .group(repo_group)
+            } else {
+                app.arg(repo_id_arg).arg(repo_name_arg).group(repo_group)
+            };
 
             if self.arg_types.contains(&ArgType::SourceRepo)
                 || self.arg_types.contains(&ArgType::SourceAndTargetRepos)
@@ -611,6 +656,9 @@ impl MononokeAppBuilder {
         if self.arg_types.contains(&ArgType::Derivation) {
             app = add_derivation_args(app);
         }
+        if self.arg_types.contains(&ArgType::Acls) {
+            app = add_acls_args(app);
+        }
 
         app = add_megarepo_svc_args(app);
 
@@ -653,7 +701,7 @@ impl MononokeAppBuilder {
             static QPS_FORMATTED: OnceCell<String> = OnceCell::new();
             // clap needs &'static str
             read_qps_arg =
-                read_qps_arg.default_value(&QPS_FORMATTED.get_or_init(|| format!("{}", default)));
+                read_qps_arg.default_value(QPS_FORMATTED.get_or_init(|| format!("{}", default)));
         }
 
         let app = app.arg(
@@ -804,8 +852,8 @@ impl MononokeAppBuilder {
                 .help("Number of seconds grace to give for key to arrive in multiple blobstores or the healer queue when scrubbing");
             if let Some(default) = self.scrub_grace_secs_default {
                 static FORMATTED: OnceCell<String> = OnceCell::new(); // Lazy static is nicer to LeakSanitizer than Box::leak
-                scrub_grace_arg = scrub_grace_arg
-                    .default_value(&FORMATTED.get_or_init(|| format!("{}", default)));
+                scrub_grace_arg =
+                    scrub_grace_arg.default_value(FORMATTED.get_or_init(|| format!("{}", default)));
             }
             let mut scrub_queue_peek_bound_arg = Arg::with_name(
                 BLOBSTORE_SCRUB_QUEUE_PEEK_BOUND_ARG,
@@ -818,7 +866,7 @@ impl MononokeAppBuilder {
             if let Some(default) = self.scrub_queue_peek_bound_secs_default {
                 static FORMATTED: OnceCell<String> = OnceCell::new(); // Lazy static is nicer to LeakSanitizer than Box::leak
                 scrub_queue_peek_bound_arg = scrub_queue_peek_bound_arg
-                    .default_value(&FORMATTED.get_or_init(|| format!("{}", default)));
+                    .default_value(FORMATTED.get_or_init(|| format!("{}", default)));
             };
             let mut scrub_action_on_missing_write_mostly_arg =
                 Arg::with_name(BLOBSTORE_SCRUB_WRITE_MOSTLY_MISSING_ARG)
@@ -1174,5 +1222,15 @@ fn add_derivation_args<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
             .takes_value(true)
             .value_name("SMC")
             .help("Specify smc tier for derived data service"),
+    )
+}
+
+fn add_acls_args<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
+    app.arg(
+        Arg::with_name(ACL_FILE)
+            .long(ACL_FILE)
+            .takes_value(true)
+            .value_name("PATH")
+            .help("Specify a file containing ACLs"),
     )
 }

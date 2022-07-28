@@ -5,44 +5,87 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Context, Error};
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Error;
 use async_trait::async_trait;
-use futures::{stream, Stream, StreamExt, TryStreamExt};
-use gotham::state::{FromState, State};
-use gotham_derive::{StateData, StaticResponseExtender};
-use gotham_ext::{
-    error::HttpError, middleware::scuba::ScubaMiddlewareState, response::TryIntoResponse,
-};
+use futures::stream;
+use futures::try_join;
+use futures::Stream;
+use futures::StreamExt;
+use futures::TryStreamExt;
+use gotham::state::FromState;
+use gotham::state::State;
+use gotham_derive::StateData;
+use gotham_derive::StaticResponseExtender;
+use gotham_ext::error::HttpError;
+use gotham_ext::middleware::scuba::ScubaMiddlewareState;
+use gotham_ext::response::TryIntoResponse;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
 use blobstore::Loadable;
-use edenapi_types::{
-    wire::WireCommitHashToLocationRequestBatch, AnyFileContentId, AnyId, Batch, BonsaiFileChange,
-    CommitGraphEntry, CommitGraphRequest, CommitHashLookupRequest, CommitHashLookupResponse,
-    CommitHashToLocationResponse, CommitLocationToHashRequest, CommitLocationToHashRequestBatch,
-    CommitLocationToHashResponse, CommitMutationsRequest, CommitMutationsResponse,
-    CommitRevlogData, CommitRevlogDataRequest, EphemeralPrepareRequest, EphemeralPrepareResponse,
-    FetchSnapshotRequest, FetchSnapshotResponse, UploadBonsaiChangesetRequest,
-    UploadHgChangesetsRequest, UploadToken, UploadTokensResponse,
-};
+use edenapi_types::wire::WireCommitHashToLocationRequestBatch;
+use edenapi_types::AnyFileContentId;
+use edenapi_types::AnyId;
+use edenapi_types::Batch;
+use edenapi_types::BonsaiFileChange;
+use edenapi_types::CommitGraphEntry;
+use edenapi_types::CommitGraphRequest;
+use edenapi_types::CommitHashLookupRequest;
+use edenapi_types::CommitHashLookupResponse;
+use edenapi_types::CommitHashToLocationResponse;
+use edenapi_types::CommitId;
+use edenapi_types::CommitIdScheme;
+use edenapi_types::CommitLocationToHashRequest;
+use edenapi_types::CommitLocationToHashRequestBatch;
+use edenapi_types::CommitLocationToHashResponse;
+use edenapi_types::CommitMutationsRequest;
+use edenapi_types::CommitMutationsResponse;
+use edenapi_types::CommitRevlogData;
+use edenapi_types::CommitRevlogDataRequest;
+use edenapi_types::CommitTranslateIdRequest;
+use edenapi_types::CommitTranslateIdResponse;
+use edenapi_types::EphemeralPrepareRequest;
+use edenapi_types::EphemeralPrepareResponse;
+use edenapi_types::FetchSnapshotRequest;
+use edenapi_types::FetchSnapshotResponse;
+use edenapi_types::UploadBonsaiChangesetRequest;
+use edenapi_types::UploadHgChangesetsRequest;
+use edenapi_types::UploadToken;
+use edenapi_types::UploadTokensResponse;
 use ephemeral_blobstore::BubbleId;
-use mercurial_types::{HgChangesetId, HgNodeHash};
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgNodeHash;
 use mononoke_api_hg::HgRepoContext;
-use mononoke_types::{ChangesetId, DateTime, FileChange};
+use mononoke_types::hash::GitSha1;
+use mononoke_types::ChangesetId;
+use mononoke_types::DateTime;
+use mononoke_types::FileChange;
+use mononoke_types::Globalrev;
 use tunables::tunables;
-use types::{HgId, Parents};
+use types::HgId;
+use types::Parents;
 
 use crate::context::ServerContext;
 use crate::errors::ErrorKind;
 use crate::middleware::RequestContext;
-use crate::utils::{
-    cbor_stream_filtered_errors, custom_cbor_stream, get_repo, parse_cbor_request,
-    parse_wire_request, to_create_change, to_hg_path, to_mononoke_path, to_revlog_changeset,
-};
+use crate::utils::cbor_stream_filtered_errors;
+use crate::utils::custom_cbor_stream;
+use crate::utils::get_repo;
+use crate::utils::parse_cbor_request;
+use crate::utils::parse_wire_request;
+use crate::utils::to_create_change;
+use crate::utils::to_hg_path;
+use crate::utils::to_mononoke_path;
+use crate::utils::to_revlog_changeset;
 
-use super::{EdenApiHandler, EdenApiMethod, HandlerInfo, HandlerResult};
+use super::EdenApiHandler;
+use super::EdenApiMethod;
+use super::HandlerInfo;
+use super::HandlerResult;
 
 /// XXX: This number was chosen arbitrarily.
 const MAX_CONCURRENT_FETCHES_PER_REQUEST: usize = 100;
@@ -144,12 +187,12 @@ pub async fn hash_to_location(state: &mut State) -> Result<impl TryIntoResponse,
         EdenApiMethod::CommitHashToLocation,
     ));
 
-    ScubaMiddlewareState::try_set_sampling_rate(state, nonzero_ext::nonzero!(100_u64));
+    ScubaMiddlewareState::try_set_sampling_rate(state, nonzero_ext::nonzero!(256_u64));
 
     let sctx = ServerContext::borrow_from(state);
     let rctx = RequestContext::borrow_from(state).clone();
 
-    let hg_repo_ctx = get_repo(&sctx, &rctx, &params.repo, None).await?;
+    let hg_repo_ctx = get_repo(sctx, &rctx, &params.repo, None).await?;
 
     let batch = parse_wire_request::<WireCommitHashToLocationRequestBatch>(state).await?;
     let master_heads = batch
@@ -182,7 +225,7 @@ pub async fn revlog_data(state: &mut State) -> Result<impl TryIntoResponse, Http
     let sctx = ServerContext::borrow_from(state);
     let rctx = RequestContext::borrow_from(state).clone();
 
-    let hg_repo_ctx = get_repo(&sctx, &rctx, &params.repo, None).await?;
+    let hg_repo_ctx = get_repo(sctx, &rctx, &params.repo, None).await?;
 
     let request: CommitRevlogDataRequest = parse_cbor_request(state).await?;
     let revlog_commits = request
@@ -202,7 +245,7 @@ async fn commit_revlog_data(
         .revlog_commit_data(hg_id.into())
         .await
         .context(ErrorKind::CommitRevlogDataRequestFailed)?
-        .ok_or_else(|| ErrorKind::HgIdNotFound(hg_id))?;
+        .ok_or(ErrorKind::HgIdNotFound(hg_id))?;
     let answer = CommitRevlogData::new(hg_id, bytes);
     Ok(answer)
 }
@@ -292,7 +335,7 @@ impl EdenApiHandler for UploadHgChangesetsHandler {
                 .map_err(Error::from)
             });
 
-        Ok(stream::iter(results.into_iter()).boxed())
+        Ok(stream::iter(results).boxed())
     }
 }
 
@@ -328,9 +371,6 @@ impl EdenApiHandler for UploadBonsaiChangesetHandler {
             .await?;
         let cs_id = repo
             .repo()
-            .clone()
-            .draft()
-            .await?
             .create_changeset(
                 parents,
                 cs.author,
@@ -413,14 +453,13 @@ impl EdenApiHandler for FetchSnapshotHandler {
                 .await?
                 .into_iter()
                 .map(|id| id.into()),
-            )
-            .into(),
+            ),
             file_changes: cs
                 .file_changes
                 .into_iter()
                 .map(|(path, fc)| {
                     Ok((
-                        to_hg_path(&path.clone().into())?,
+                        to_hg_path(&path.into())?,
                         match fc {
                             FileChange::Deletion => BonsaiFileChange::Deletion,
                             FileChange::UntrackedDeletion => BonsaiFileChange::UntrackedDeletion,
@@ -565,5 +604,100 @@ impl EdenApiHandler for CommitMutationsHandler {
             });
 
         Ok(stream::iter(mutations).boxed())
+    }
+}
+
+pub struct CommitTranslateId;
+
+#[async_trait]
+impl EdenApiHandler for CommitTranslateId {
+    type Request = CommitTranslateIdRequest;
+    type Response = CommitTranslateIdResponse;
+
+    const HTTP_METHOD: hyper::Method = hyper::Method::POST;
+    const API_METHOD: EdenApiMethod = EdenApiMethod::CommitTranslateId;
+    const ENDPOINT: &'static str = "/commit/translate_id";
+
+    async fn handler(
+        repo: HgRepoContext,
+        _path: Self::PathExtractor,
+        _query: Self::QueryStringExtractor,
+        request: Self::Request,
+    ) -> HandlerResult<'async_trait, Self::Response> {
+        let mut hg_ids = Vec::new();
+        let mut bonsai_ids = Vec::new();
+        let mut git_ids = Vec::new();
+        let mut globalrevs = Vec::new();
+        for commit in &request.commits {
+            match commit {
+                CommitId::Hg(hg_id) => hg_ids.push(HgChangesetId::from(*hg_id)),
+                CommitId::Bonsai(bonsai_id) => bonsai_ids.push(ChangesetId::from(*bonsai_id)),
+                CommitId::GitSha1(git_id) => git_ids.push(GitSha1::from(*git_id)),
+                CommitId::Globalrev(globalrev) => globalrevs.push(Globalrev::new(*globalrev)),
+            }
+        }
+        // Convert request types to bonsais
+        let (hg_bonsais, git_bonsais, globalrev_bonsais) = try_join!(
+            repo.repo().many_changeset_ids_from_hg(hg_ids),
+            repo.repo().many_changeset_ids_from_git_sha1(git_ids),
+            repo.repo().many_changeset_ids_from_globalrev(globalrevs),
+        )?;
+        let hg_bonsais = hg_bonsais.into_iter().collect::<HashMap<_, _>>();
+        let git_bonsais = git_bonsais.into_iter().collect::<HashMap<_, _>>();
+        let globalrev_bonsais = globalrev_bonsais.into_iter().collect::<HashMap<_, _>>();
+        // Collect all bonsai changeset ids
+        let all_bonsai_ids: Vec<ChangesetId> = bonsai_ids
+            .into_iter()
+            .chain(hg_bonsais.values().copied())
+            .chain(git_bonsais.values().copied())
+            .chain(globalrev_bonsais.values().copied())
+            .collect();
+        // Convert all bonsais to the target type
+        let bonsai_translations: HashMap<ChangesetId, CommitId> = match request.scheme {
+            CommitIdScheme::Bonsai => all_bonsai_ids
+                .into_iter()
+                .map(|id| (id.clone(), CommitId::Bonsai(id.clone().into())))
+                .collect(),
+            CommitIdScheme::Hg => repo
+                .repo()
+                .many_changeset_hg_ids(all_bonsai_ids)
+                .await?
+                .into_iter()
+                .map(|(id, hg_id)| (id, CommitId::Hg(hg_id.into())))
+                .collect(),
+            CommitIdScheme::GitSha1 => repo
+                .repo()
+                .many_changeset_git_sha1s(all_bonsai_ids)
+                .await?
+                .into_iter()
+                .map(|(id, git_sha1)| (id, CommitId::GitSha1(git_sha1.into())))
+                .collect(),
+            CommitIdScheme::Globalrev => repo
+                .repo()
+                .many_changeset_globalrev_ids(all_bonsai_ids)
+                .await?
+                .into_iter()
+                .map(|(id, globalrev)| (id, CommitId::Globalrev(globalrev.id())))
+                .collect(),
+        };
+        // Build the response based on the original request
+        let translations: Vec<_> = request
+            .commits
+            .into_iter()
+            .filter_map(|commit| {
+                let id = match commit {
+                    CommitId::Hg(hg_id) => *hg_bonsais.get(&HgChangesetId::from(hg_id))?,
+                    CommitId::Bonsai(id) => ChangesetId::from(id),
+                    CommitId::GitSha1(git_id) => *git_bonsais.get(&GitSha1::from(git_id))?,
+                    CommitId::Globalrev(globalrev) => {
+                        *globalrev_bonsais.get(&Globalrev::new(globalrev))?
+                    }
+                };
+                let translated = bonsai_translations.get(&id)?.clone();
+                Some(CommitTranslateIdResponse { commit, translated })
+            })
+            .map(anyhow::Ok)
+            .collect();
+        Ok(stream::iter(translations).boxed())
     }
 }

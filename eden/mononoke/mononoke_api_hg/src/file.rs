@@ -7,19 +7,29 @@
 
 use async_trait::async_trait;
 use blobrepo_hg::file_history::get_file_history_maybe_incomplete;
-use blobstore::{Loadable, LoadableError};
+use blobstore::Loadable;
+use blobstore::LoadableError;
 use bytes::Bytes;
-use futures::{compat::Future01CompatExt, TryStream, TryStreamExt};
+use futures::compat::Future01CompatExt;
+use futures::TryStream;
+use futures::TryStreamExt;
 use getbundle_response::SessionLfsParams;
-use mercurial_types::{
-    envelope::HgFileEnvelope, FileType, HgFileHistoryEntry, HgFileNodeId, HgNodeHash, HgParents,
-};
+use mercurial_types::envelope::HgFileEnvelope;
+use mercurial_types::FileType;
+use mercurial_types::HgFileHistoryEntry;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::HgNodeHash;
+use mercurial_types::HgParents;
 use mononoke_api::errors::MononokeError;
-use mononoke_types::{fsnode::FsnodeFile, ContentMetadata, MPath};
+use mononoke_types::fsnode::FsnodeFile;
+use mononoke_types::ContentMetadata;
+use mononoke_types::MPath;
 use remotefilelog::create_getpack_v2_blob;
 use revisionstore_types::Metadata;
 
-use super::{HgDataContext, HgDataId, HgRepoContext};
+use super::HgDataContext;
+use super::HgDataId;
+use super::HgRepoContext;
 
 /// An abstraction around a Mercurial filenode.
 ///
@@ -60,7 +70,7 @@ impl HgFileContext {
         match filenode_id.load(ctx, blobstore).await {
             Ok(envelope) => Ok(Some(Self { repo, envelope })),
             Err(LoadableError::Missing(_)) => Ok(None),
-            Err(e) => return Err(e.into()),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -93,16 +103,14 @@ impl HgFileContext {
         let content_id = self.envelope.content_id();
         let fetch_key = filestore::FetchKey::Canonical(content_id);
         let blobstore = self.repo.blob_repo().blobstore();
-        Ok(
-            filestore::get_metadata(blobstore, self.repo.ctx(), &fetch_key)
-                .await?
-                .ok_or_else(|| {
-                    MononokeError::NotAvailable(format!(
-                        "metadata not found for content id {}",
-                        content_id
-                    ))
-                })?,
-        )
+        filestore::get_metadata(blobstore, self.repo.ctx(), &fetch_key)
+            .await?
+            .ok_or_else(|| {
+                MononokeError::NotAvailable(format!(
+                    "metadata not found for content id {}",
+                    content_id
+                ))
+            })
     }
 
     /// Fetches the metadata that would be present in this file's corresponding FsNode, returning
@@ -196,15 +204,18 @@ impl HgDataId for HgFileNodeId {
 mod tests {
     use super::*;
 
-    use std::{str::FromStr, sync::Arc};
+    use std::str::FromStr;
+    use std::sync::Arc;
 
     use context::CoreContext;
     use fbinit::FacebookInit;
     use fixtures::ManyFilesDirs;
     use fixtures::TestRepoFixture;
     use futures::TryStreamExt;
-    use mercurial_types::{HgChangesetId, NULL_HASH};
-    use mononoke_api::repo::{Repo, RepoContext};
+    use mercurial_types::HgChangesetId;
+    use mercurial_types::NULL_HASH;
+    use mononoke_api::repo::Repo;
+    use mononoke_api::repo::RepoContext;
 
     use crate::RepoContextHgExt;
 
@@ -220,7 +231,7 @@ mod tests {
         //   e2ac7cbe1f85e0d8b416005e905aa2189434ce6c 644   dir1
         //   0eb86721b74ed44cf176ee48b5e95f0192dc2824 644   dir2/file_1_in_dir2
 
-        let repo_ctx = RepoContext::new(ctx, repo).await?;
+        let repo_ctx = RepoContext::new_test(ctx, repo).await?;
         let hg = repo_ctx.hg();
 
         // Test HgFileContext::new.
@@ -259,7 +270,7 @@ mod tests {
         //   e2ac7cbe1f85e0d8b416005e905aa2189434ce6c 644   dir1
         //   0eb86721b74ed44cf176ee48b5e95f0192dc2824 644   dir2/file_1_in_dir2
 
-        let repo_ctx = RepoContext::new(ctx, repo).await?;
+        let repo_ctx = RepoContext::new_test(ctx, repo).await?;
         let hg = repo_ctx.hg();
 
         // Test HgFileContext::new.

@@ -11,7 +11,7 @@ license = "GPLv2+"
 anyhow = "1.0.56"
 async-trait = "0.1.56"
 cached_config = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
-clap = { version = "=3.1.8", features = ["derive", "regex", "unicode", "wrap_help"] }
+clap = { version = "3.2.10", features = ["derive", "regex", "unicode", "wrap_help"] }
 configo_client = { version = "0.1.0", path = "../configo_client" }
 context = { version = "0.1.0", path = "../../server/context" }
 faster-hex = "0.6.1"
@@ -21,7 +21,7 @@ futures = { version = "0.3.13", features = ["async-await", "compat"] }
 maplit = "1.0"
 megarepo_configs = { version = "0.1.0", path = "../../../../configerator/structs/scm/mononoke/megarepo" }
 megarepo_error = { version = "0.1.0", path = "../megarepo_error" }
-sha-1 = "0.8"
+sha-1 = "0.10"
 slog = { version = "2.7", features = ["max_level_trace", "nested-values"] }
 tokio = { version = "1.15", features = ["full", "test-util", "tracing"] }
 version_cconf_index = { version = "0.1.0", path = "../../../../configerator/structs/scm/mononoke/megarepo/version_cconf_index" }

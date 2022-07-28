@@ -17,15 +17,18 @@ use std::io::Write;
 
 use anyhow::anyhow;
 use anyhow::bail;
+use anyhow::Context;
 use anyhow::Result;
 use byteorder::BigEndian;
 use byteorder::ReadBytesExt;
 use byteorder::WriteBytesExt;
 use twox_hash::XxHash;
+use types::hgid::ReadHgIdExt;
 use vlqencoding::VLQDecode;
 use vlqencoding::VLQEncode;
 
 use crate::dirstate::Dirstate;
+use crate::dirstate::TreeStateFields;
 use crate::errors::*;
 use crate::filestate::FileState;
 use crate::filestate::FileStateV2;
@@ -360,19 +363,27 @@ impl Serializable for Metadata {
     }
 }
 
-const DIRSTATE_HEADER: &[u8] = b"\ntreestate\n\0";
+const DIRSTATE_TREESTATE_HEADER: &[u8] = b"\ntreestate\n\0";
 
 impl Serializable for Dirstate {
     fn serialize(&self, w: &mut dyn Write) -> Result<()> {
         w.write_all(self.p0.as_ref())?;
         w.write_all(self.p1.as_ref())?;
-        w.write_all(DIRSTATE_HEADER)?;
+
+        let ts_fields = match &self.tree_state {
+            Some(ts) => ts,
+            None => {
+                bail!("tree state fields are required for serializing dirstate")
+            }
+        };
+
+        w.write_all(DIRSTATE_TREESTATE_HEADER)?;
 
         let mut meta = Metadata(BTreeMap::from([
-            ("filename".to_string(), self.tree_filename.clone()),
-            ("rootid".to_string(), self.tree_root_id.0.to_string()),
+            ("filename".to_string(), ts_fields.tree_filename.clone()),
+            ("rootid".to_string(), ts_fields.tree_root_id.0.to_string()),
         ]));
-        if let Some(threshold) = self.repack_threshold {
+        if let Some(threshold) = ts_fields.repack_threshold {
             meta.0
                 .insert("threshold".to_string(), threshold.to_string());
         }
@@ -382,7 +393,41 @@ impl Serializable for Dirstate {
         Ok(())
     }
 
-    fn deserialize(_r: &mut dyn Read) -> Result<Self> {
-        unimplemented!()
+    /// Best effort parsing of the dirstate. For non-treestate
+    /// dirstates we only parse the parents.
+    fn deserialize(r: &mut dyn Read) -> Result<Self> {
+        let mut ds = Self {
+            p0: r.read_hgid()?,
+            p1: r.read_hgid()?,
+            tree_state: None,
+        };
+
+        let mut header_buf = [0; DIRSTATE_TREESTATE_HEADER.len()];
+        if r.read_exact(&mut header_buf).is_ok() && header_buf == DIRSTATE_TREESTATE_HEADER {
+            let mut meta = Metadata::deserialize(r)?;
+            ds.tree_state = Some(TreeStateFields {
+                tree_filename: meta
+                    .0
+                    .remove("filename")
+                    .ok_or_else(|| anyhow!("no treestate 'filename' in dirstate"))?,
+                tree_root_id: BlockId(
+                    meta.0
+                        .remove("rootid")
+                        .ok_or_else(|| anyhow!("no treestate 'rootid' in dirstate"))?
+                        .parse()
+                        .context("error parsing dirstate rootid")?,
+                ),
+                repack_threshold: meta
+                    .0
+                    .remove("threshold")
+                    .map(|t| {
+                        t.parse()
+                            .with_context(|| format!("error parsing dirstate threshold {:?}", t))
+                    })
+                    .transpose()?,
+            });
+        }
+
+        Ok(ds)
     }
 }

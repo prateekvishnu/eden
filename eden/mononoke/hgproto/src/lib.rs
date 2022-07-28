@@ -12,10 +12,15 @@
 //! protocols, and a Tokio Service framework for them via a trait.
 
 use bytes_old::Bytes;
-use mercurial_types::{HgChangesetId, HgManifestId};
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgManifestId;
 use mononoke_types::MPath;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fmt::{self, Debug};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fmt;
+use std::fmt::Debug;
 use std::sync::Mutex;
 
 pub mod batch;
@@ -36,9 +41,9 @@ pub enum Request {
 impl Request {
     pub fn record_request(&self, record: &Mutex<Vec<String>>) {
         let mut record = record.lock().expect("lock poisoned");
-        match self {
-            &Request::Batch(ref batch) => record.extend(batch.iter().map(|s| s.name().into())),
-            &Request::Single(ref req) => record.push(req.name().into()),
+        match *self {
+            Request::Batch(ref batch) => record.extend(batch.iter().map(|s| s.name().into())),
+            Request::Single(ref req) => record.push(req.name().into()),
         }
     }
 }
@@ -98,27 +103,27 @@ pub enum SingleRequest {
 
 impl SingleRequest {
     pub fn name(&self) -> &'static str {
-        match self {
-            &SingleRequest::Between { .. } => "between",
-            &SingleRequest::Branchmap => "branchmap",
-            &SingleRequest::Capabilities => "capabilities",
-            &SingleRequest::ClientTelemetry { .. } => "clienttelemetry",
-            &SingleRequest::Debugwireargs { .. } => "debugwireargs",
-            &SingleRequest::Getbundle(_) => "getbundle",
-            &SingleRequest::Heads => "heads",
-            &SingleRequest::Hello => "hello",
-            &SingleRequest::Listkeys { .. } => "listkeys",
-            &SingleRequest::Lookup { .. } => "lookup",
-            &SingleRequest::Known { .. } => "known",
-            &SingleRequest::Knownnodes { .. } => "knownnodes",
-            &SingleRequest::Unbundle { .. } => "unbundle",
-            &SingleRequest::UnbundleReplay { .. } => "unbundlereplay",
-            &SingleRequest::Gettreepack(_) => "gettreepack",
-            &SingleRequest::StreamOutShallow { .. } => "stream_out_shallow",
-            &SingleRequest::GetpackV1 => "getpackv1",
-            &SingleRequest::GetpackV2 => "getpackv2",
-            &SingleRequest::ListKeysPatterns { .. } => "listkeyspatterns",
-            &SingleRequest::GetCommitData { .. } => "getcommitdata",
+        match *self {
+            SingleRequest::Between { .. } => "between",
+            SingleRequest::Branchmap => "branchmap",
+            SingleRequest::Capabilities => "capabilities",
+            SingleRequest::ClientTelemetry { .. } => "clienttelemetry",
+            SingleRequest::Debugwireargs { .. } => "debugwireargs",
+            SingleRequest::Getbundle(_) => "getbundle",
+            SingleRequest::Heads => "heads",
+            SingleRequest::Hello => "hello",
+            SingleRequest::Listkeys { .. } => "listkeys",
+            SingleRequest::Lookup { .. } => "lookup",
+            SingleRequest::Known { .. } => "known",
+            SingleRequest::Knownnodes { .. } => "knownnodes",
+            SingleRequest::Unbundle { .. } => "unbundle",
+            SingleRequest::UnbundleReplay { .. } => "unbundlereplay",
+            SingleRequest::Gettreepack(_) => "gettreepack",
+            SingleRequest::StreamOutShallow { .. } => "stream_out_shallow",
+            SingleRequest::GetpackV1 => "getpackv1",
+            SingleRequest::GetpackV2 => "getpackv2",
+            SingleRequest::ListKeysPatterns { .. } => "listkeyspatterns",
+            SingleRequest::GetCommitData { .. } => "getcommitdata",
         }
     }
 }
@@ -144,12 +149,12 @@ impl Debug for GetbundleArgs {
         let bcaps: HashSet<_> = self
             .bundlecaps
             .iter()
-            .map(|s| String::from_utf8_lossy(&s))
+            .map(|s| String::from_utf8_lossy(s))
             .collect();
         let listkeys: Vec<_> = self
             .listkeys
             .iter()
-            .map(|s| String::from_utf8_lossy(&s))
+            .map(|s| String::from_utf8_lossy(s))
             .collect();
         let heads: Vec<_> = self.heads.iter().take(MAX_NODES_TO_LOG).collect();
         let common: Vec<_> = self.common.iter().take(MAX_NODES_TO_LOG).collect();
@@ -226,6 +231,7 @@ impl SingleResponse {
     }
 }
 
-pub use commands::{HgCommandRes, HgCommands};
+pub use commands::HgCommandRes;
+pub use commands::HgCommands;
 pub use errors::ErrorKind;
 pub use handler::HgProtoHandler;

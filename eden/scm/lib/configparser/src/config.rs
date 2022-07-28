@@ -16,17 +16,12 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 use minibytes::Text;
-use pest::Parser;
-use pest::Span;
-use pest::{self};
+use pest_hgrc::parse;
+use pest_hgrc::Instruction;
 use util::path::expand_path;
 
 use crate::convert::FromConfigValue;
 use crate::error::Error;
-use crate::parser::ConfigParser;
-use crate::parser::Rule;
-
-type Pair<'a> = pest::iterators::Pair<'a, Rule>;
 
 /// Collection of config sections loaded from various sources.
 #[derive(Clone, Default, Debug)]
@@ -135,12 +130,34 @@ impl ConfigSet {
         self.sections.keys().cloned().collect()
     }
 
-    /// Get config names in the given section. Sorted by insertion order.
-    pub fn keys(&self, section: impl AsRef<str>) -> Vec<Text> {
-        self.sections
-            .get(section.as_ref())
-            .map(|section| section.items.keys().cloned().collect())
-            .unwrap_or_default()
+    /// Get config names matching the given prefix, sorted by insertion order.
+    ///
+    /// keys("foo") returns keys in section "foo".
+    /// keys(&["foo", "bar"]) returns keys in section "foo" with prefix "bar(.|$)".
+    ///
+    /// As a special case, keys(&[]) returns nothing.
+    pub fn keys(&self, prefix: impl KeyPrefix) -> Vec<Text> {
+        match prefix.section() {
+            None => Vec::new(),
+            Some(section_name) => {
+                let name_prefixes = prefix.name_prefixes();
+                self.sections
+                    .get(section_name)
+                    .map(|section| {
+                        section
+                            .items
+                            .keys()
+                            .filter(|name| {
+                                name.split('.')
+                                    .take(name_prefixes.len())
+                                    .eq(name_prefixes.iter().copied())
+                            })
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+        }
     }
 
     /// Get config value for a given config.
@@ -325,142 +342,64 @@ impl ConfigSet {
             buf.len()
         );
 
-        let mut section = Text::new();
         let shared_path = Arc::new(path.to_path_buf()); // use Arc to do shallow copy
         let skip_include = path.parent().is_none(); // skip handling %include if path is empty
 
-        // Utilities to avoid too much indentation.
-        let handle_value = |this: &mut ConfigSet,
-                            pair: Pair,
-                            section: Text,
-                            name: Text,
-                            location: ValueLocation| {
-            let pairs = pair.into_inner();
-            let mut lines = Vec::with_capacity(1);
-            for pair in pairs {
-                if Rule::line == pair.as_rule() {
-                    lines.push(extract(&buf, pair.as_span()));
-                }
-            }
-
-            let value = match lines.len() {
-                1 => lines[0].clone(),
-                _ => Text::from(lines.join("\n")),
-            };
-
-            let value = strip_whitespace(&value, 0, value.len());
-            this.set_internal(section, name, value.into(), location.into(), opts)
-        };
-
-        let handle_config_item = |this: &mut ConfigSet, pair: Pair, section: Text| {
-            let pairs = pair.into_inner();
-            let mut name = Text::new();
-            for pair in pairs {
-                match pair.as_rule() {
-                    Rule::config_name => name = extract(&buf, pair.as_span()),
-                    Rule::value => {
-                        let span = pair.as_span();
-                        let location = ValueLocation {
-                            path: shared_path.clone(),
-                            content: buf.clone(),
-                            location: span.start()..span.end(),
-                        };
-                        return handle_value(this, pair, section, name, location);
-                    }
-                    _ => {}
-                }
-            }
-            unreachable!();
-        };
-
-        let handle_section = |pair: Pair, section: &mut Text| {
-            let pairs = pair.into_inner();
-            for pair in pairs {
-                if let Rule::section_name = pair.as_rule() {
-                    *section = extract(&buf, pair.as_span());
-                    return;
-                }
-            }
-            unreachable!();
-        };
-
-        let mut handle_include = |this: &mut ConfigSet, pair: Pair, errors: &mut Vec<Error>| {
-            let pairs = pair.into_inner();
-            for pair in pairs {
-                if let Rule::line = pair.as_rule() {
-                    if !skip_include {
-                        let include_path = pair.as_str();
-                        if let Some(content) = crate::builtin::get(include_path) {
-                            let text = Text::from(content);
-                            let path = Path::new(include_path);
-                            this.load_file_content(path, text, opts, visited, errors);
-                        } else {
-                            let full_include_path =
-                                path.parent().unwrap().join(expand_path(include_path));
-                            this.load_file(&full_include_path, opts, visited, errors);
-                        }
-                    }
-                }
-            }
-        };
-
-        let handle_unset = |this: &mut ConfigSet, pair: Pair, section: &Text| {
-            let unset_span = pair.as_span();
-            let pairs = pair.into_inner();
-            for pair in pairs {
-                if let Rule::config_name = pair.as_rule() {
-                    let name = extract(&buf, pair.as_span());
-                    let location = ValueLocation {
-                        path: shared_path.clone(),
-                        content: buf.clone(),
-                        location: unset_span.start()..unset_span.end(),
-                    };
-                    return this.set_internal(section.clone(), name, None, location.into(), opts);
-                }
-            }
-            unreachable!();
-        };
-
-        let mut handle_directive =
-            |this: &mut ConfigSet, pair: Pair, section: &Text, errors: &mut Vec<Error>| {
-                let pairs = pair.into_inner();
-                for pair in pairs {
-                    match pair.as_rule() {
-                        Rule::include => handle_include(this, pair, errors),
-                        Rule::unset => handle_unset(this, pair, section),
-                        _ => {}
-                    }
-                }
-            };
-
-        let text = &buf;
-        let pairs = match ConfigParser::parse(Rule::file, &text) {
-            Ok(pairs) => pairs,
+        let insts = match parse(&buf) {
+            Ok(insts) => insts,
             Err(error) => {
                 return errors.push(Error::ParseFile(path.to_path_buf(), format!("{}", error)));
             }
         };
 
-        for pair in pairs {
-            match pair.as_rule() {
-                Rule::config_item => handle_config_item(self, pair, section.clone()),
-                Rule::section => handle_section(pair, &mut section),
-                Rule::directive => handle_directive(self, pair, &section, errors),
-                Rule::blank_line | Rule::comment_line | Rule::new_line | Rule::EOI => {}
-
-                Rule::comment_start
-                | Rule::compound
-                | Rule::config_name
-                | Rule::equal_sign
-                | Rule::file
-                | Rule::include
-                | Rule::left_bracket
-                | Rule::line
-                | Rule::right_bracket
-                | Rule::section_name
-                | Rule::space
-                | Rule::unset
-                | Rule::value => unreachable!(),
+        for inst in insts {
+            match inst {
+                Instruction::SetConfig {
+                    section,
+                    name,
+                    value,
+                    span,
+                } => {
+                    let section = buf.slice_to_bytes(section);
+                    let name = buf.slice_to_bytes(name);
+                    let value = Some(buf.slice_to_bytes(&value));
+                    let location = ValueLocation {
+                        path: shared_path.clone(),
+                        content: buf.clone(),
+                        location: span,
+                    };
+                    self.set_internal(section, name, value, location.into(), opts);
+                }
+                Instruction::UnsetConfig {
+                    section,
+                    name,
+                    span,
+                } => {
+                    let section = buf.slice_to_bytes(section);
+                    let name = buf.slice_to_bytes(name);
+                    let location = ValueLocation {
+                        path: shared_path.clone(),
+                        content: buf.clone(),
+                        location: span,
+                    };
+                    self.set_internal(section.clone(), name, None, location.into(), opts);
+                }
+                Instruction::Include {
+                    path: include_path,
+                    span: _,
+                } => {
+                    if !skip_include {
+                        if let Some(content) = crate::builtin::get(include_path) {
+                            let text = Text::from(content);
+                            let path = Path::new(include_path);
+                            self.load_file_content(path, text, opts, visited, errors);
+                        } else {
+                            let full_include_path =
+                                path.parent().unwrap().join(expand_path(include_path));
+                            self.load_file(&full_include_path, opts, visited, errors);
+                        }
+                    }
+                }
             }
         }
     }
@@ -610,6 +549,41 @@ impl ConfigSet {
     }
 }
 
+pub trait KeyPrefix {
+    fn section(&self) -> Option<&str>;
+    fn name_prefixes(&self) -> &[&str] {
+        &[]
+    }
+}
+
+impl KeyPrefix for &str {
+    fn section(&self) -> Option<&str> {
+        Some(*self)
+    }
+}
+
+impl KeyPrefix for &Text {
+    fn section(&self) -> Option<&str> {
+        Some(self)
+    }
+}
+
+impl KeyPrefix for String {
+    fn section(&self) -> Option<&str> {
+        Some(self)
+    }
+}
+
+impl<const N: usize> KeyPrefix for &[&str; N] {
+    fn section(&self) -> Option<&str> {
+        self.first().copied()
+    }
+
+    fn name_prefixes(&self) -> &[&str] {
+        &self[1..]
+    }
+}
+
 impl ValueSource {
     /// Return the actual value stored in this config value, or `None` if uset.
     pub fn value(&self) -> &Option<Text> {
@@ -679,23 +653,6 @@ impl<S: Into<Text>> From<S> for Options {
     }
 }
 
-/// Remove space characters from both ends. Remove newline characters from the end.
-/// `start` position is inclusive, `end` is exclusive.
-/// Return the stripped `Text`.
-#[inline]
-fn strip_whitespace(buf: &Text, start: usize, end: usize) -> Text {
-    let slice: &str = &buf.as_ref()[start..end];
-    let trimmed = slice
-        .trim_start_matches(|c| c == '\t' || c == ' ')
-        .trim_end_matches(|c| " \t\r\n".contains(c));
-    buf.slice_to_bytes(trimmed)
-}
-
-#[inline]
-fn extract<'a>(buf: &Text, span: Span<'a>) -> Text {
-    strip_whitespace(buf, span.start(), span.end())
-}
-
 pub struct SupersetVerification {
     // Configs (and their values) not set by the superset config, but should be.
     pub missing: Vec<((Text, Text), Text)>,
@@ -760,6 +717,28 @@ pub(crate) mod tests {
         assert_eq!(sources[0].location(), None);
         assert_eq!(sources[1].location(), None);
         assert_eq!(sources[1].file_content(), None);
+    }
+
+    #[test]
+    fn test_keys() {
+        let mut cfg = ConfigSet::new();
+        cfg.set("foo", "other", Some(""), &"".into());
+        cfg.set("foo", "bar", Some(""), &"".into());
+        cfg.set("foo", "bar.baz", Some(""), &"".into());
+        cfg.set("foo", "bar.qux", Some(""), &"".into());
+        cfg.set("foo", "bar.qux.more", Some(""), &"".into());
+
+        assert_eq!(cfg.keys(&[] as &[&str; 0]), Vec::<Text>::new());
+
+        assert_eq!(
+            cfg.keys("foo"),
+            vec!["other", "bar", "bar.baz", "bar.qux", "bar.qux.more"]
+        );
+
+        assert_eq!(
+            cfg.keys(&["foo", "bar"]),
+            vec!["bar", "bar.baz", "bar.qux", "bar.qux.more"]
+        );
     }
 
     #[test]

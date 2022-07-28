@@ -5,18 +5,19 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{Error, Result};
+use anyhow::Error;
+use anyhow::Result;
 use bytes::Bytes;
-use futures::{
-    future::{self, Future, TryFutureExt},
-    stream::Stream,
-};
+use futures::future;
+use futures::future::Future;
+use futures::future::TryFutureExt;
+use futures::stream::Stream;
 use mononoke_types::hash;
 
 use crate::expected_size::ExpectedSize;
-use crate::incremental_hash::{
-    GitSha1IncrementalHasher, Sha1IncrementalHasher, Sha256IncrementalHasher,
-};
+use crate::incremental_hash::GitSha1IncrementalHasher;
+use crate::incremental_hash::Sha1IncrementalHasher;
+use crate::incremental_hash::Sha256IncrementalHasher;
 use crate::multiplexer::Multiplexer;
 use crate::streamhash::hash_stream;
 
@@ -80,5 +81,5 @@ where
         .await
         .map_err(|e| -> Error { e.into() })?;
 
-    Ok(aliases.await?)
+    aliases.await
 }

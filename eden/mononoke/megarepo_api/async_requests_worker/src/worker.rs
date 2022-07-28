@@ -14,24 +14,30 @@
 //! but not exactly once i.e. the same request might be executed a few times.
 
 use crate::methods::megarepo_async_request_compute;
-use async_requests::{
-    types::MegarepoAsynchronousRequestParams, AsyncMethodRequestQueue, ClaimedBy, RequestId,
-};
+use async_requests::types::MegarepoAsynchronousRequestParams;
+use async_requests::AsyncMethodRequestQueue;
+use async_requests::ClaimedBy;
+use async_requests::RequestId;
 use async_stream::try_stream;
 use cloned::cloned;
 use context::CoreContext;
+use futures::future::abortable;
+use futures::future::select;
+use futures::future::Either;
+use futures::pin_mut;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use futures::Stream;
-use futures::{
-    future::{abortable, select, Either},
-    pin_mut,
-    stream::{StreamExt, TryStreamExt},
-};
 use megarepo_api::MegarepoApi;
 use megarepo_config::Target;
 use megarepo_error::MegarepoError;
-use mononoke_types::{RepositoryId, Timestamp};
-use slog::{debug, error, info};
-use std::sync::atomic::{AtomicBool, Ordering};
+use mononoke_types::RepositoryId;
+use mononoke_types::Timestamp;
+use slog::debug;
+use slog::error;
+use slog::info;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -133,8 +139,8 @@ impl AsyncMethodRequestWorker {
                 for (repo_ids, queue) in &queues_with_repos {
                     Self::cleanup_abandoned_requests(
                         &ctx,
-                        &repo_ids,
-                        &queue,
+                        repo_ids,
+                        queue,
                         abandoned_threshold_secs
                     ).await?;
                     if will_exit.load(Ordering::Relaxed) {
@@ -168,7 +174,7 @@ impl AsyncMethodRequestWorker {
         let abandoned_timestamp =
             Timestamp::from_timestamp_secs(now.timestamp_seconds() - abandoned_threshold_secs);
         let requests = queue
-            .find_abandoned_requests(&ctx, repo_ids, abandoned_timestamp)
+            .find_abandoned_requests(ctx, repo_ids, abandoned_timestamp)
             .await?;
         if !requests.is_empty() {
             ctx.scuba().clone().log_with_msg(
@@ -179,7 +185,7 @@ impl AsyncMethodRequestWorker {
 
         for req_id in requests {
             if queue
-                .mark_abandoned_request_as_new(&ctx, req_id.clone(), abandoned_timestamp)
+                .mark_abandoned_request_as_new(ctx, req_id.clone(), abandoned_timestamp)
                 .await?
             {
                 ctx.scuba()
@@ -297,7 +303,7 @@ impl AsyncMethodRequestWorker {
             let mut scuba = ctx.scuba().clone();
             ctx.perf_counters().insert_perf_counters(&mut scuba);
 
-            let res = queue.update_in_progress_timestamp(&ctx, &req_id).await;
+            let res = queue.update_in_progress_timestamp(ctx, req_id).await;
             match res {
                 Ok(res) => {
                     // Weren't able to update inprogress timestamp - that probably means

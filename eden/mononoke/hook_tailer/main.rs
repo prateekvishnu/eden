@@ -7,33 +7,41 @@
 
 mod tailer;
 
-use anyhow::{bail, format_err, Error, Result};
+use anyhow::bail;
+use anyhow::format_err;
+use anyhow::Error;
+use anyhow::Result;
 use blobrepo::BlobRepo;
 use bookmarks::BookmarkName;
 use clap::Arg;
-use cmdlib::{
-    args::{MononokeClapApp, MononokeMatches},
-    helpers::{block_execute, csid_resolve},
-};
+use cmdlib::args::MononokeClapApp;
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers::block_execute;
+use cmdlib::helpers::csid_resolve;
 use context::CoreContext;
 use fbinit::FacebookInit;
-use futures::{
-    future,
-    stream::{FuturesUnordered, StreamExt, TryStreamExt},
-};
-use hooks::{CrossRepoPushSource, PushAuthoredBy};
+use futures::future;
+use futures::stream::FuturesUnordered;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use hooks::CrossRepoPushSource;
+use hooks::PushAuthoredBy;
 use mononoke_types::ChangesetId;
 use repo_factory::RepoFactory;
-use slog::{debug, info, Logger};
+use slog::debug;
+use slog::info;
+use slog::Logger;
 use std::collections::HashSet;
 use std::time::Duration;
 use time_ext::DurationExt;
-use tokio::{
-    fs::{File, OpenOptions},
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-};
+use tokio::fs::File;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncBufReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader;
 
-use tailer::{HookExecutionInstance, Tailer};
+use tailer::HookExecutionInstance;
+use tailer::Tailer;
 
 async fn get_changesets<'a>(
     matches: &'a MononokeMatches<'a>,
@@ -44,8 +52,9 @@ async fn get_changesets<'a>(
 ) -> Result<HashSet<ChangesetId>> {
     let mut ids = matches
         .values_of(inline_arg)
-        .map(|matches| matches.map(|cs| cs.to_string()).collect())
-        .unwrap_or_else(|| vec![]);
+        .map_or_else(Vec::new, |matches| {
+            matches.map(|cs| cs.to_string()).collect()
+        });
 
     if let Some(path) = matches.value_of(file_arg) {
         let file = File::open(path).await?;
@@ -57,7 +66,7 @@ async fn get_changesets<'a>(
 
     let ret = ids
         .into_iter()
-        .map(|cs| csid_resolve(&ctx, repo, cs))
+        .map(|cs| csid_resolve(ctx, repo, cs))
         .collect::<FuturesUnordered<_>>()
         .try_collect()
         .await?;
@@ -76,10 +85,10 @@ fn main(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::new_with_logger(fb, logger.clone());
 
     block_execute(
-        run_hook_tailer(&ctx, config, repo_name, &matches, &logger),
+        run_hook_tailer(&ctx, config, repo_name, &matches, logger),
         fb,
         "hook_tailer",
-        &logger,
+        logger,
         &matches,
         cmdlib::monitoring::AliveService,
     )
@@ -95,7 +104,7 @@ async fn run_hook_tailer<'a>(
     let config_store = matches.config_store();
     let bookmark_name = matches.value_of("bookmark").unwrap();
     let bookmark = BookmarkName::new(bookmark_name)?;
-    let common_config = cmdlib::args::load_common_config(config_store, &matches)?;
+    let common_config = cmdlib::args::load_common_config(config_store, matches)?;
     let limit = cmdlib::args::get_usize(matches, "limit", 1000);
     let concurrency = cmdlib::args::get_usize(matches, "concurrency", 20);
     let log_interval = cmdlib::args::get_usize(matches, "log_interval", 500);
@@ -129,20 +138,21 @@ async fn run_hook_tailer<'a>(
         None => None,
     };
 
-    let disabled_hooks = cmdlib::args::parse_disabled_hooks_no_repo_prefix(&matches, &logger);
+    let disabled_hooks = cmdlib::args::parse_disabled_hooks_no_repo_prefix(matches, logger);
 
     let repo_factory = RepoFactory::new(matches.environment().clone(), &common_config);
 
     let blobrepo = repo_factory.build(repo_name, config.clone()).await?;
 
     let (exclusions, inclusions) = future::try_join(
-        get_changesets(matches, "exclude", "exclude_file", &ctx, &blobrepo),
-        get_changesets(matches, "changeset", "changeset_file", &ctx, &blobrepo),
+        get_changesets(matches, "exclude", "exclude_file", ctx, &blobrepo),
+        get_changesets(matches, "changeset", "changeset_file", ctx, &blobrepo),
     )
     .await?;
 
     let tail = &Tailer::new(
         ctx.clone(),
+        repo_factory.acl_provider(),
         blobrepo.clone(),
         config,
         bookmark,
@@ -181,7 +191,7 @@ async fn run_hook_tailer<'a>(
             stats_file.write_all(line.as_ref()).await?;
         }
 
-        summary.add_instance(&instance, &logger);
+        summary.add_instance(&instance, logger);
     }
 
     info!(logger, "==== Hooks stats ====");

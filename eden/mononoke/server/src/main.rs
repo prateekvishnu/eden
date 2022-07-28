@@ -7,24 +7,30 @@
 
 #![feature(never_type)]
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+use anyhow::Result;
 use clap::Parser;
 use cloned::cloned;
 use cmdlib_logging::ScribeLoggingArgs;
 use fbinit::FacebookInit;
 use futures::channel::oneshot;
 use futures_watchdog::WatchdogExt;
-use mononoke_api::{Mononoke, MononokeApiEnvironment, WarmBookmarksCacheDerivedData};
-use mononoke_app::args::{HooksAppExtension, McrouterAppExtension, ShutdownTimeoutArgs};
-use mononoke_app::fb303::{Fb303AppExtension, ReadyFlagService};
+use mononoke_api::Mononoke;
+use mononoke_api::MononokeApiEnvironment;
+use mononoke_api::WarmBookmarksCacheDerivedData;
+use mononoke_app::args::HooksAppExtension;
+use mononoke_app::args::McrouterAppExtension;
+use mononoke_app::args::ShutdownTimeoutArgs;
+use mononoke_app::fb303::Fb303AppExtension;
+use mononoke_app::fb303::ReadyFlagService;
 use mononoke_app::MononokeAppBuilder;
 use openssl::ssl::AlpnError;
-use slog::{error, info};
+use slog::error;
+use slog::info;
 use std::path::PathBuf;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 /// Mononoke Server
 #[derive(Parser)]
@@ -42,15 +48,21 @@ struct MononokeServerArgs {
     /// If provided the thrift server will start on this port
     #[clap(long, short = 'p')]
     thrift_port: Option<String>,
-    /// Path to a file with certificate
+    /// Path to a file with server certificate
     #[clap(long)]
     cert: String,
-    /// Path to a file with private keyport
+    /// Path to a file with server private key
     #[clap(long)]
     private_key: String,
     /// Path to a file with CA certificate
     #[clap(long)]
     ca_pem: String,
+    /// Path to a file with SCS client certificate
+    #[clap(long)]
+    scs_client_cert: Option<String>,
+    /// Path to a file with SCS client private key
+    #[clap(long, requires = "scs-client-cert")]
+    scs_client_private_key: Option<String>,
     /// Path to a file with encryption keys for SSL tickets
     #[clap(long)]
     ssl_ticket_seeds: Option<String>,
@@ -74,6 +86,12 @@ fn main(fb: FacebookInit) -> Result<()> {
 
     let cslb_config = args.cslb_config.clone();
     info!(root_log, "Starting up");
+
+    #[cfg(fbcode_build)]
+    if let (Some(cert_path), Some(key_path)) = (&args.scs_client_cert, &args.scs_client_private_key)
+    {
+        pushrebase_client::override_certificate_paths(cert_path, key_path, &args.ca_pem);
+    }
 
     let configs = app.repo_configs().clone();
 
@@ -126,6 +144,8 @@ fn main(fb: FacebookInit) -> Result<()> {
                 warm_bookmarks_cache_enabled: true,
                 warm_bookmarks_cache_scuba_sample_builder: warm_bookmarks_cache_scuba,
                 skiplist_enabled: true,
+                //TODO: add a command line arg for filtering
+                repo_filter: None,
             };
 
             let common = configs.common.clone();
@@ -149,6 +169,7 @@ fn main(fb: FacebookInit) -> Result<()> {
                 will_exit,
                 cslb_config,
                 bound_addr_file,
+                env.acl_provider.as_ref(),
             )
             .await
         }
@@ -161,7 +182,7 @@ fn main(fb: FacebookInit) -> Result<()> {
     cmdlib::helpers::serve_forever(
         runtime,
         repo_listeners,
-        &root_log,
+        root_log,
         move || will_exit.store(true, Ordering::Relaxed),
         args.shutdown_timeout_args.shutdown_grace_period,
         async {
@@ -169,7 +190,7 @@ fn main(fb: FacebookInit) -> Result<()> {
                 Err(err) => error!(root_log, "could not send termination signal: {:?}", err),
                 _ => {}
             }
-            repo_listener::wait_for_connections_closed(&root_log).await;
+            repo_listener::wait_for_connections_closed(root_log).await;
         },
         args.shutdown_timeout_args.shutdown_timeout,
     )

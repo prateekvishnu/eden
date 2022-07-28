@@ -7,40 +7,59 @@
 
 use crate::darkstorm_verifier::DarkstormVerifier;
 use crate::lfs_verifier::LfsVerifier;
-use anyhow::{bail, Error};
-use blobrepo::BlobRepo;
+use crate::Repo;
+use anyhow::bail;
+use anyhow::Error;
 use blobstore::Loadable;
 use bookmarks::BookmarkName;
 use borrowed::borrowed;
 use bytes_old::Bytes as BytesOld;
+use changeset_fetcher::ChangesetFetcherArc;
 use cloned::cloned;
 use context::CoreContext;
 use futures::compat::Future01CompatExt;
-use futures::{stream, Future as NewFuture, FutureExt, StreamExt, TryFutureExt, TryStreamExt};
-use futures_01_ext::{try_boxfuture, FutureExt as _, StreamExt as _};
-use futures_old::{future::IntoFuture, stream as stream_old, Future, Stream};
-use getbundle_response::{
-    create_filenodes, create_manifest_entries_stream, get_manifests_and_filenodes,
-    PreparedFilenodeEntry, SessionLfsParams,
-};
+use futures::stream;
+use futures::Future as NewFuture;
+use futures::FutureExt;
+use futures::StreamExt;
+use futures::TryFutureExt;
+use futures::TryStreamExt;
+use futures_01_ext::try_boxfuture;
+use futures_01_ext::FutureExt as _;
+use futures_01_ext::StreamExt as _;
+use futures_old::future::IntoFuture;
+use futures_old::stream as stream_old;
+use futures_old::Future;
+use futures_old::Stream;
+use getbundle_response::create_filenodes;
+use getbundle_response::create_manifest_entries_stream;
+use getbundle_response::get_manifests_and_filenodes;
+use getbundle_response::PreparedFilenodeEntry;
+use getbundle_response::SessionLfsParams;
 use maplit::hashmap;
-use mercurial_bundles::{
-    capabilities::{encode_capabilities, Capabilities},
-    changegroup::CgVersion,
-    create_bundle_stream, parts,
-};
+use mercurial_bundles::capabilities::encode_capabilities;
+use mercurial_bundles::capabilities::Capabilities;
+use mercurial_bundles::changegroup::CgVersion;
+use mercurial_bundles::create_bundle_stream;
+use mercurial_bundles::parts;
 use mercurial_derived_data::DeriveHgChangeset;
 use mercurial_revlog::RevlogChangeset;
-use mercurial_types::{HgBlobNode, HgChangesetId, MPath};
-use mononoke_types::{datetime::Timestamp, hash::Sha256, ChangesetId};
+use mercurial_types::HgBlobNode;
+use mercurial_types::HgChangesetId;
+use mercurial_types::MPath;
+use mononoke_types::datetime::Timestamp;
+use mononoke_types::hash::Sha256;
+use mononoke_types::ChangesetId;
 use reachabilityindex::LeastCommonAncestorsHint;
+use repo_blobstore::RepoBlobstoreRef;
 use revset::DifferenceOfUnionsOfAncestorsNodeStream;
 use slog::debug;
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 pub fn create_bundle(
     ctx: CoreContext,
-    repo: BlobRepo,
+    repo: Repo,
     lca_hint: Arc<dyn LeastCommonAncestorsHint>,
     bookmark: BookmarkName,
     bookmark_change: BookmarkChange,
@@ -131,7 +150,7 @@ impl BookmarkChange {
     fn get_from_hg(
         &self,
         ctx: CoreContext,
-        repo: &BlobRepo,
+        repo: &Repo,
     ) -> impl Future<Item = Option<HgChangesetId>, Error = Error> {
         Self::maybe_get_hg(ctx, self.get_from(), repo)
     }
@@ -149,7 +168,7 @@ impl BookmarkChange {
     fn get_to_hg(
         &self,
         ctx: CoreContext,
-        repo: &BlobRepo,
+        repo: &Repo,
     ) -> impl Future<Item = Option<HgChangesetId>, Error = Error> {
         Self::maybe_get_hg(ctx, self.get_to(), repo)
     }
@@ -157,7 +176,7 @@ impl BookmarkChange {
     fn maybe_get_hg(
         ctx: CoreContext,
         maybe_cs: Option<ChangesetId>,
-        repo: &BlobRepo,
+        repo: &Repo,
     ) -> impl Future<Item = Option<HgChangesetId>, Error = Error> {
         cloned!(repo);
         async move {
@@ -187,8 +206,7 @@ impl FilenodeVerifier {
     ) -> impl NewFuture<Output = Result<(), Error>> {
         let lfs_blobs: Vec<(Sha256, u64)> = filenode_entries
             .values()
-            .map(|entries| entries.iter())
-            .flatten()
+            .flat_map(|entries| entries.iter())
             .filter_map(|entry| {
                 entry
                     .maybe_get_lfs_pointer()
@@ -220,7 +238,7 @@ impl FilenodeVerifier {
 
 fn create_bundle_impl(
     ctx: CoreContext,
-    repo: BlobRepo,
+    repo: Repo,
     bookmark: BookmarkName,
     bookmark_change: BookmarkChange,
     commits_to_push: Vec<HgChangesetId>,
@@ -233,7 +251,7 @@ fn create_bundle_impl(
             cloned!(ctx, repo);
             move |hg_cs_id| {
                 cloned!(ctx, repo);
-                async move { hg_cs_id.load(&ctx, repo.blobstore()).await }
+                async move { hg_cs_id.load(&ctx, repo.repo_blobstore()).await }
                     .boxed()
                     .compat()
                     .from_err()
@@ -321,21 +339,19 @@ fn create_bundle_impl(
                     )));
 
                     bundle2_parts.push(try_boxfuture!(parts::treepack_part(
-                        create_manifest_entries_stream(ctx, repo.get_blobstore(), manifests),
+                        create_manifest_entries_stream(
+                            ctx,
+                            repo.repo_blobstore().clone(),
+                            manifests
+                        ),
                         parts::StoreInHgCache::Yes
                     )));
                 }
 
                 bundle2_parts.push(try_boxfuture!(parts::bookmark_pushkey_part(
                     bookmark.to_string(),
-                    format!(
-                        "{}",
-                        maybe_from.map(|x| x.to_string()).unwrap_or(String::new())
-                    ),
-                    format!(
-                        "{}",
-                        maybe_to.map(|x| x.to_string()).unwrap_or(String::new())
-                    ),
+                    maybe_from.map(|x| x.to_string()).unwrap_or_default(),
+                    maybe_to.map(|x| x.to_string()).unwrap_or_default(),
                 )));
 
                 let compression = None;
@@ -348,7 +364,7 @@ fn create_bundle_impl(
 
 async fn fetch_timestamps(
     ctx: CoreContext,
-    repo: BlobRepo,
+    repo: Repo,
     hg_cs_ids: impl IntoIterator<Item = (ChangesetId, HgChangesetId)>,
 ) -> Result<HashMap<HgChangesetId, (ChangesetId, Timestamp)>, Error> {
     async move {
@@ -357,7 +373,7 @@ async fn fetch_timestamps(
             .map(move |res| async move {
                 let (cs_id, hg_cs_id) = res?;
                 hg_cs_id
-                    .load(ctx, repo.blobstore())
+                    .load(ctx, repo.repo_blobstore())
                     .err_into()
                     .map_ok(move |hg_blob_cs| (hg_cs_id, (cs_id, hg_blob_cs.time().clone().into())))
                     .await
@@ -371,14 +387,14 @@ async fn fetch_timestamps(
 
 fn find_commits_to_push(
     ctx: CoreContext,
-    repo: BlobRepo,
+    repo: Repo,
     lca_hint_index: Arc<dyn LeastCommonAncestorsHint>,
     hg_server_heads: impl IntoIterator<Item = ChangesetId>,
     maybe_to_cs_id: Option<ChangesetId>,
 ) -> impl Stream<Item = (ChangesetId, HgChangesetId), Error = Error> {
     DifferenceOfUnionsOfAncestorsNodeStream::new_with_excludes(
         ctx.clone(),
-        &repo.get_changeset_fetcher(),
+        &repo.changeset_fetcher_arc(),
         lca_hint_index,
         maybe_to_cs_id.into_iter().collect(),
         hg_server_heads.into_iter().collect(),

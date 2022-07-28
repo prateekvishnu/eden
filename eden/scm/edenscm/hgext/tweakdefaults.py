@@ -47,9 +47,7 @@ Config::
 """
 from __future__ import absolute_import
 
-import inspect
 import json
-import os
 import re
 import subprocess
 import sys
@@ -57,13 +55,11 @@ import time
 
 from edenscm.mercurial import (
     bookmarks,
-    cmdutil,
     commands,
     encoding,
     error,
     extensions,
     hg,
-    hintutil,
     patch,
     pycompat,
     registrar,
@@ -74,7 +70,7 @@ from edenscm.mercurial import (
     util,
 )
 from edenscm.mercurial.i18n import _
-from edenscm.mercurial.node import bin, short
+from edenscm.mercurial.node import short
 
 from . import rebase
 
@@ -105,6 +101,7 @@ configitem("tweakdefaults", "amendkeepdate", default=False)
 configitem("tweakdefaults", "graftkeepdate", default=False)
 configitem("tweakdefaults", "histeditkeepdate", default=False)
 configitem("tweakdefaults", "rebasekeepdate", default=False)
+configitem("tweakdefaults", "absorbkeepdate", default=False)
 
 rebasemsg = _(
     "you must use a bookmark with tracking "
@@ -197,6 +194,13 @@ def extsetup(ui):
         wrapcommand(amendmodule.cmdtable, "amend", amendcmd)
     except KeyError:
         pass
+
+    try:
+        amendmodule = extensions.find("absorb")
+        wrapcommand(amendmodule.cmdtable, "absorb", absorbcmd)
+    except KeyError:
+        pass
+
     try:
         histeditmodule = extensions.find("histedit")
         wrapfunction(histeditmodule, "commitfuncfor", histeditcommitfuncfor)
@@ -312,23 +316,25 @@ def pull(orig, ui, repo, *args, **opts):
         raise error.Abort(mess)
 
     if (isrebase or update) and not dest:
+        mess = None
         if isrebase and repo._activebookmark:
             mess = ui.config("tweakdefaults", "bmnodestmsg")
             hint = ui.config("tweakdefaults", "bmnodesthint")
         elif isrebase:
             mess = ui.config("tweakdefaults", "nodestmsg")
             hint = ui.config("tweakdefaults", "nodesthint")
-        else:  # update
+        elif not opts.get("bookmark") and not opts.get("rev"):  # update
             mess = _("you must specify a destination for the update")
             hint = _("use `hg pull --update --dest <destination>`")
-        raise error.Abort(mess, hint=hint)
+        if mess is not None:
+            raise error.Abort(mess, hint=hint)
 
     if "rebase" in opts:
         del opts["rebase"]
         tool = opts.pop("tool", "")
-    if "update" in opts:
+    if "update" in opts and dest:
         del opts["update"]
-    if "dest" in opts:
+    if "dest" in opts and dest:
         del opts["dest"]
 
     ret = orig(ui, repo, *args, **opts)
@@ -432,7 +438,7 @@ def blame(orig, ui, repo, *pats, **opts):
         res = ""
         try:
             d = repo[mapping["rev"]].description()
-            pat = "https://.*/(D\d+)"
+            pat = r"https://.*/(D\d+)"
             m = re.search(pat, d)
             res = m.group(1) if m else ""
         except Exception:
@@ -611,6 +617,12 @@ def graftcmd(orig, ui, repo, *revs, **opts):
     if not opts.get("date") and not ui.configbool("tweakdefaults", "graftkeepdate"):
         opts["date"] = currentdate()
     return orig(ui, repo, *revs, **opts)
+
+
+def absorbcmd(orig, ui, repo, *pats, **opts):
+    if not opts.get("date") and not ui.configbool("tweakdefaults", "absorbkeepdate"):
+        opts["date"] = currentdate()
+    return orig(ui, repo, *pats, **opts)
 
 
 def amendcmd(orig, ui, repo, *pats, **opts):

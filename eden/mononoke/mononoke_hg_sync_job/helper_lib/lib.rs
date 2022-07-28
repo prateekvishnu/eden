@@ -5,24 +5,34 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Error, Result};
-use blobrepo::BlobRepo;
-use blobstore::{Blobstore, Loadable};
+use anyhow::format_err;
+use anyhow::Error;
+use anyhow::Result;
+use blobstore::Blobstore;
+use blobstore::Loadable;
+use bookmarks::BookmarkUpdateLogRef;
 use bookmarks::Freshness;
 use context::CoreContext;
 use futures::stream::TryStreamExt;
 use mononoke_types::RawBundle2Id;
 use mutable_counters::MutableCountersRef;
+use repo_identity::RepoIdentityRef;
 use slog::info;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
+use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::NamedTempFile;
-use tokio::{
-    fs::{File as AsyncFile, OpenOptions},
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    time::{self, sleep, timeout},
-};
+use tokio::fs::File as AsyncFile;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncBufReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader;
+use tokio::time;
+use tokio::time::sleep;
+use tokio::time::timeout;
 
 pub const LATEST_REPLAYED_REQUEST_KEY: &str = "latest-replayed-request";
 
@@ -164,7 +174,7 @@ pub fn read_file_contents<F: Seek + Read>(f: &mut F) -> Result<String> {
 /// Wait until all of the entries in the queue have been synced to hg
 pub async fn wait_for_latest_log_id_to_be_synced(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &(impl BookmarkUpdateLogRef + RepoIdentityRef + MutableCountersRef),
     sleep_duration: Duration,
 ) -> Result<(), Error> {
     wait_for_latest_log_id_for_repo_to_be_synced(ctx, repo, repo, sleep_duration).await
@@ -172,11 +182,11 @@ pub async fn wait_for_latest_log_id_to_be_synced(
 
 pub async fn wait_for_latest_log_id_for_repo_to_be_synced(
     ctx: &CoreContext,
-    repo: &BlobRepo,
-    target_repo: &BlobRepo,
+    repo: &impl BookmarkUpdateLogRef,
+    target_repo: &(impl RepoIdentityRef + MutableCountersRef),
     sleep_duration: Duration,
 ) -> Result<(), Error> {
-    let target_repo_id = target_repo.get_repoid();
+    let target_repo_id = target_repo.repo_identity().id();
     let largest_id = match repo
         .bookmark_update_log()
         .get_largest_log_id(ctx.clone(), Freshness::MostRecent)
@@ -211,7 +221,7 @@ pub async fn wait_for_latest_log_id_for_repo_to_be_synced(
                 "Waiting for {} to be replayed to hg, the latest replayed is {}, repo: {}",
                 largest_id,
                 mut_counters_value,
-                target_repo.name(),
+                target_repo.repo_identity().name(),
             );
             time::sleep(sleep_duration).await;
         } else {

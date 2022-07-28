@@ -5,19 +5,26 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{bail, Result};
+use anyhow::bail;
+use anyhow::Result;
 use async_trait::async_trait;
 use bookmarks::BookmarkName;
 use context::CoreContext;
-use mononoke_types::{RepositoryId, Timestamp};
+use mononoke_types::RepositoryId;
+use mononoke_types::Timestamp;
 use sql::queries;
-use sql_construct::{SqlConstruct, SqlConstructFromMetadataDatabaseConfig};
+use sql_construct::SqlConstruct;
+use sql_construct::SqlConstructFromMetadataDatabaseConfig;
 use sql_ext::SqlConnections;
 
+use crate::BlobstoreKey;
+use crate::ClaimedBy;
+use crate::LongRunningRequestEntry;
 use crate::LongRunningRequestsQueue;
-use crate::{
-    BlobstoreKey, ClaimedBy, LongRunningRequestEntry, RequestId, RequestStatus, RequestType, RowId,
-};
+use crate::RequestId;
+use crate::RequestStatus;
+use crate::RequestType;
+use crate::RowId;
 
 queries! {
     read TestGetRequest(id: RowId) -> (
@@ -311,8 +318,8 @@ impl LongRunningRequestsQueue for SqlLongRunningRequestsQueue {
         let res = AddRequest::query(
             &self.connections.write_connection,
             request_type,
-            &repo_id,
-            &bookmark,
+            repo_id,
+            bookmark,
             args_blobstore_key,
             &Timestamp::now(),
         )
@@ -383,7 +390,7 @@ impl LongRunningRequestsQueue for SqlLongRunningRequestsQueue {
             &req_id.0,
             &req_id.1,
             &Timestamp::now(),
-            &claimed_by,
+            claimed_by,
         )
         .await?;
         Ok(res.affected_rows() > 0)
@@ -413,7 +420,7 @@ impl LongRunningRequestsQueue for SqlLongRunningRequestsQueue {
         let rows = FindAbandonedRequests::query(
             &self.connections.write_connection,
             &abandoned_timestamp,
-            &repo_ids,
+            repo_ids,
         )
         .await?;
         Ok(rows.into_iter().map(|(id, ty)| RequestId(id, ty)).collect())
@@ -467,7 +474,7 @@ impl LongRunningRequestsQueue for SqlLongRunningRequestsQueue {
         row_id: &RowId,
         status: RequestStatus,
     ) -> Result<bool> {
-        let res = TestMark::query(&self.connections.write_connection, &row_id, &status).await?;
+        let res = TestMark::query(&self.connections.write_connection, row_id, &status).await?;
         Ok(res.affected_rows() > 0)
     }
 

@@ -5,13 +5,21 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Error};
-use blobrepo::{save_bonsai_changesets, BlobRepo};
-use bookmarks::{BookmarkName, BookmarkUpdateReason};
+use anyhow::format_err;
+use anyhow::Error;
+use blobrepo::save_bonsai_changesets;
+use blobrepo::BlobRepo;
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
 use context::CoreContext;
 use mercurial_derived_data::DeriveHgChangeset;
-use mercurial_types::{HgChangesetId, MPath};
-use mononoke_types::{BonsaiChangeset, BonsaiChangesetMut, ChangesetId, DateTime, FileChange};
+use mercurial_types::HgChangesetId;
+use mercurial_types::MPath;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::BonsaiChangesetMut;
+use mononoke_types::ChangesetId;
+use mononoke_types::DateTime;
+use mononoke_types::FileChange;
 use phases::PhasesRef;
 use slog::info;
 use sorted_vector_map::SortedVectorMap;
@@ -59,7 +67,7 @@ pub async fn create_and_save_bonsai(
         mark_public,
     } = changeset_args;
     let bcs = create_bonsai_changeset_only(parents, file_changes, author, message, datetime)?;
-    let bcs_id = save_and_maybe_mark_public(&ctx, &repo, bcs, mark_public).await?;
+    let bcs_id = save_and_maybe_mark_public(ctx, repo, bcs, mark_public).await?;
 
     if let Some(bookmark) = maybe_bookmark {
         create_bookmark(ctx, repo, bookmark, bcs_id).await?;
@@ -112,7 +120,7 @@ async fn create_bookmark(
         "Setting bookmark {:?} to point to {:?}", bookmark, bcs_id
     );
     let mut transaction = repo.update_bookmark_transaction(ctx.clone());
-    transaction.force_set(&bookmark, bcs_id, BookmarkUpdateReason::ManualMove, None)?;
+    transaction.force_set(&bookmark, bcs_id, BookmarkUpdateReason::ManualMove)?;
 
     let commit_result = transaction.commit().await?;
 

@@ -58,7 +58,7 @@ def _getbkfile(repo):
 
 
 class bmstore(dict):
-    """Storage for bookmarks.
+    r"""Storage for bookmarks.
 
     This object should do all bookmark-related reads and writes, so
     that it's fairly simple to replace the storage underlying
@@ -79,7 +79,6 @@ class bmstore(dict):
         self._clean = True
         self._aclean = True
         nm = repo.changelog.nodemap
-        tonode = bin  # force local lookup
         setitem = dict.__setitem__
         with _getbkfile(repo) as bkfile:
             data = bkfile.read()
@@ -1081,7 +1080,6 @@ def saveremotenames(repo, remotebookmarks, override=True):
 
     from . import extensions
 
-    svfs = repo.svfs
     with repo.wlock(), repo.lock():
         if extensions.isenabled(repo.ui, "remotenames"):
             transition(repo, repo.ui)

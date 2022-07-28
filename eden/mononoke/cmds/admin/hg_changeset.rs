@@ -5,17 +5,25 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Error};
+use anyhow::format_err;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use blobstore::Loadable;
-use clap_old::{App, ArgMatches, SubCommand};
-use cmdlib::args::{self, MononokeMatches};
+use clap_old::App;
+use clap_old::ArgMatches;
+use clap_old::SubCommand;
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
 use context::CoreContext;
 use fbinit::FacebookInit;
-use futures::{compat::Stream01CompatExt, TryStreamExt};
-use manifest::{bonsai_diff, BonsaiDiffFileChange};
+use futures::compat::Stream01CompatExt;
+use futures::TryStreamExt;
+use manifest::bonsai_diff;
+use manifest::BonsaiDiffFileChange;
 use mercurial_derived_data::DeriveHgChangeset;
-use mercurial_types::{HgChangesetId, HgManifestId, MPath};
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgManifestId;
+use mercurial_types::MPath;
 use revset::RangeNodeStream;
 use serde_derive::Serialize;
 use slog::Logger;
@@ -63,14 +71,14 @@ pub async fn subcommand_hg_changeset<'a>(
         (HG_CHANGESET_DIFF, Some(sub_m)) => {
             let left_cs = sub_m
                 .value_of("LEFT_CS")
-                .ok_or(format_err!("LEFT_CS argument expected"))
+                .ok_or_else(|| format_err!("LEFT_CS argument expected"))
                 .and_then(HgChangesetId::from_str)?;
             let right_cs = sub_m
                 .value_of("RIGHT_CS")
-                .ok_or(format_err!("RIGHT_CS argument expected"))
+                .ok_or_else(|| format_err!("RIGHT_CS argument expected"))
                 .and_then(HgChangesetId::from_str)?;
 
-            let repo = args::open_repo(fb, &logger, &matches).await?;
+            let repo = args::open_repo(fb, &logger, matches).await?;
             let diff = hg_changeset_diff(ctx, repo, left_cs, right_cs).await?;
             serde_json::to_writer(io::stdout(), &diff).map_err(Error::from)?;
             Ok(())
@@ -78,14 +86,14 @@ pub async fn subcommand_hg_changeset<'a>(
         (HG_CHANGESET_RANGE, Some(sub_m)) => {
             let start_cs = sub_m
                 .value_of("START_CS")
-                .ok_or(format_err!("START_CS argument expected"))
+                .ok_or_else(|| format_err!("START_CS argument expected"))
                 .and_then(HgChangesetId::from_str)?;
             let stop_cs = sub_m
                 .value_of("STOP_CS")
-                .ok_or(format_err!("STOP_CS argument expected"))
+                .ok_or_else(|| format_err!("STOP_CS argument expected"))
                 .and_then(HgChangesetId::from_str)?;
 
-            let repo: BlobRepo = args::open_repo(fb, &logger, &matches).await?;
+            let repo: BlobRepo = args::open_repo(fb, &logger, matches).await?;
             let (start_cs_opt, stop_cs_opt) = futures::try_join!(
                 repo.bonsai_hg_mapping().get_bonsai_from_hg(&ctx, start_cs),
                 repo.bonsai_hg_mapping().get_bonsai_from_hg(&ctx, stop_cs),

@@ -5,13 +5,20 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{bail, Error};
+use anyhow::bail;
+use anyhow::Error;
 use failure_ext::SlogKVErrorKey;
-use slog::{self, Drain, Never, OwnedKVList, Record, Serializer, KV};
+use slog::Drain;
+use slog::Never;
+use slog::OwnedKVList;
+use slog::Record;
+use slog::Serializer;
+use slog::KV;
 use slog_term::Decorator;
 use std::collections::HashSet;
+use std::fmt;
+use std::io;
 use std::str::FromStr;
-use std::{fmt, io};
 
 // Allow us to switch drain types without runtime check
 enum EitherDrain<L, R> {
@@ -197,7 +204,7 @@ impl Serializer for ErrorSerializer {
 }
 
 fn non_empty_str_maybe(s: String) -> Option<String> {
-    if s == "" { None } else { Some(s) }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 fn fix_indentation(s: String) -> String {

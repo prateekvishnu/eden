@@ -9,11 +9,11 @@
 #include <folly/Exception.h>
 #include <folly/Likely.h>
 #include <folly/init/Init.h>
+#include <folly/portability/GFlags.h>
+#include <folly/portability/Unistd.h>
 #include <folly/synchronization/test/Barrier.h>
-#include <gflags/gflags.h>
 #include <inttypes.h>
 #include <string.h>
-#include <unistd.h>
 #include <limits>
 #include <mutex>
 #include <system_error>

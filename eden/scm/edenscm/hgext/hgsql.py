@@ -59,7 +59,6 @@ from edenscm.mercurial import (
     localrepo,
     lock as lockmod,
     mdiff,
-    phases,
     progress,
     pycompat,
     registrar,
@@ -473,14 +472,7 @@ def backfilltree(orig, ui, repo, *args, **kwargs):
 def _memcommit(orig, *args, **kwargs):
     repo = args[0]
     if issqlrepo(repo):
-
-        def _memcommitchecklock(*args, **kwargs):
-            readonly, _reason = repo.sqlreporeadonlystate()
-            if readonly:
-                raise error.Abort(_x("repo is locked"))
-            return orig(*args, **kwargs)
-
-        return executewithsql(repo, _memcommitchecklock, True, *args, **kwargs)
+        return executewithsql(repo, orig, True, *args, **kwargs)
     else:
         return orig(*args, **kwargs)
 
@@ -786,38 +778,6 @@ def wraprepo(repo):
             self.sqlcursor = None
             self.sqlconn = None
 
-        def sqlreporeadonlystate(self):
-            NO_WRITE = 0
-            MONONOKE_WRITE = 2
-            DEFAULT_REASON = "no reason was provided"
-            MONONOKE_REASON = "writes are being served by Mononoke (fburl.com/mononoke)"
-            query = "SELECT state, reason FROM repo_lock WHERE repo = %s"
-
-            self.sqlconnect()
-
-            self.sqlcursor.execute(query, (self.sqlreponame,))
-            rows = self.sqlcursor.fetchall()
-
-            if not rows:
-                # If there isn't an entry for this repo, let's treat it as
-                # unlocked.
-                return (False, DEFAULT_REASON)
-
-            state, reason = rows[0]
-
-            readonly = state == NO_WRITE or state == MONONOKE_WRITE
-
-            if reason is None:
-                reason = {MONONOKE_WRITE: MONONOKE_REASON}.get(state, DEFAULT_REASON)
-            else:
-                reason = decodeutf8(reason)
-
-            return (readonly, reason)
-
-        def sqlisreporeadonly(self):
-            """deprecated: use sqlreporeadonlystate() to also get the reason"""
-            return self.sqlreporeadonlystate()[0]
-
         def _hgsqlnote(self, message):
             if self.ui.configbool("hgsql", "verbose"):
                 self.ui.write_err("[hgsql] %s\n" % message)
@@ -891,12 +851,12 @@ def wraprepo(repo):
             lockname = self._lockname(name)
             self.sqlcursor.execute("SELECT IS_USED_LOCK('%s')" % (lockname,))
             lockheldby = self.sqlcursor.fetchall()[0][0]
-            if lockheldby == None:
+            if lockheldby is None:
                 raise Exception("unable to check %s lock" % lockname)
 
             self.sqlcursor.execute("SELECT CONNECTION_ID()")
             myconnectid = self.sqlcursor.fetchall()[0][0]
-            if myconnectid == None:
+            if myconnectid is None:
                 raise Exception("unable to read connection id")
 
             return lockheldby == myconnectid
@@ -1459,7 +1419,7 @@ def wraprepo(repo):
             if self.disablesync:
                 return
 
-            if self.sqlconn == None:
+            if self.sqlconn is None:
                 raise util.Abort(
                     "invalid repo change - only hg push and pull are allowed"
                 )
@@ -1626,7 +1586,7 @@ def wraprepo(repo):
                 or not self.sqlreplaytransaction
             ):
                 minlinkrev = min(revisions, key=lambda x: x[1])[1]
-                if maxlinkrev == None or maxlinkrev != minlinkrev - 1:
+                if maxlinkrev is None or maxlinkrev != minlinkrev - 1:
                     raise CorruptionException(
                         "attempting to write non-sequential "
                         + "linkrev %s, expected %s" % (minlinkrev, maxlinkrev + 1)
@@ -2112,7 +2072,7 @@ def addgroup(orig, self, deltas, linkmapper, transaction):
                 raise LookupError(deltabase, self.indexfile, _("unknown delta base"))
 
             baserev = self.rev(deltabase)
-            chain = self._addrevision(
+            self._addrevision(
                 node, None, transaction, link, p1, p2, flags, (baserev, delta), ifh, dfh
             )
 

@@ -13,14 +13,22 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tunables::tunables;
 
+use crate::dag::errors;
 use crate::dag::errors::programming;
-use crate::dag::errors::{self, BackendError, DagError};
-use crate::dag::id::{Group, Id};
+use crate::dag::errors::BackendError;
+use crate::dag::errors::DagError;
+use crate::dag::id::Group;
+use crate::dag::id::Id;
 use crate::dag::idmap::IdMapWrite;
-use crate::dag::ops::{IdConvert, PrefixLookup};
-use crate::dag::{Result, VerLink, VertexName};
-use crate::idmap::{ConcurrentMemIdMap, IdMapVersion};
-use crate::{DagId, IdMap};
+use crate::dag::ops::IdConvert;
+use crate::dag::ops::PrefixLookup;
+use crate::dag::Result;
+use crate::dag::VerLink;
+use crate::dag::VertexName;
+use crate::idmap::ConcurrentMemIdMap;
+use crate::idmap::IdMapVersion;
+use crate::DagId;
+use crate::IdMap;
 
 use stats::prelude::*;
 
@@ -235,7 +243,7 @@ impl IdMapWrapper {
         Self {
             verlink: VerLink::new(),
             inner: idmap_memwrites,
-            ctx: ctx.clone(),
+            ctx,
         }
     }
 
@@ -300,7 +308,7 @@ impl IdConvert for IdMapWrapper {
             .await
             .map_err(BackendError::from)?
             .map(|id| vertex_name_from_cs_id(&id))
-            .ok_or_else(|| DagError::IdNotFound(id))
+            .ok_or(DagError::IdNotFound(id))
     }
     async fn contains_vertex_name(&self, name: &VertexName) -> Result<bool> {
         self.vertex_id_with_max_group(name, Group::MASTER)
@@ -328,7 +336,7 @@ impl IdConvert for IdMapWrapper {
             .map_err(BackendError::from)?;
 
         Ok(name
-            .into_iter()
+            .iter()
             .map(|name| found.contains_key(&cs_id_from_vertex_name(name)))
             .collect())
     }
@@ -343,10 +351,10 @@ impl IdConvert for IdMapWrapper {
             .map_err(BackendError::from)?;
 
         Ok(id
-            .into_iter()
+            .iter()
             .map(|id| {
                 found
-                    .get(&id)
+                    .get(id)
                     .map(vertex_name_from_cs_id)
                     .ok_or(DagError::IdNotFound(*id))
             })
@@ -364,7 +372,7 @@ impl IdConvert for IdMapWrapper {
             .map_err(BackendError::from)?;
 
         Ok(names
-            .into_iter()
+            .iter()
             .map(|name| {
                 found
                     .get(&cs_id_from_vertex_name(name))

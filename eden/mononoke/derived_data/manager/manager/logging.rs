@@ -7,8 +7,10 @@
 
 use std::time::Duration;
 
-use anyhow::{Error, Result};
-use context::{CoreContext, PerfCounters};
+use anyhow::Error;
+use anyhow::Result;
+use context::CoreContext;
+use context::PerfCounters;
 use futures_stats::FutureStats;
 use mononoke_types::ChangesetId;
 use scuba_ext::MononokeScubaSampleBuilder;
@@ -60,7 +62,7 @@ impl DerivedDataManager {
         };
 
         let mut ctx_scuba = ctx.scuba().clone();
-        ctx_scuba.add_future_stats(&stats);
+        ctx_scuba.add_future_stats(stats);
         if let Some(error_str) = &error_str {
             ctx_scuba.add("Derive error", error_str.as_str());
         };
@@ -68,7 +70,7 @@ impl DerivedDataManager {
 
         ctx.perf_counters().insert_perf_counters(derived_data_scuba);
 
-        derived_data_scuba.add_future_stats(&stats);
+        derived_data_scuba.add_future_stats(stats);
         derived_data_scuba.log_with_msg(tag, error_str);
     }
 
@@ -113,7 +115,7 @@ impl DerivedDataManager {
             };
 
             let mut ctx_scuba = ctx.scuba().clone();
-            ctx_scuba.add_future_stats(&stats);
+            ctx_scuba.add_future_stats(stats);
             if let Some(error_str) = &error_str {
                 ctx_scuba.add("Derive error", error_str.as_str());
             };
@@ -121,7 +123,7 @@ impl DerivedDataManager {
 
             ctx.perf_counters().insert_perf_counters(derived_data_scuba);
 
-            derived_data_scuba.add_future_stats(&stats);
+            derived_data_scuba.add_future_stats(stats);
             derived_data_scuba.log_with_msg(tag, error_str);
         }
     }
@@ -152,7 +154,7 @@ impl DerivedDataManager {
         }
 
         derived_data_scuba
-            .add_future_stats(&stats)
+            .add_future_stats(stats)
             .log_with_msg(tag, error_str);
     }
 
@@ -178,7 +180,7 @@ impl DerivedDataManager {
         let mut scuba = ctx.scuba().clone();
         pc.insert_perf_counters(&mut scuba);
 
-        scuba.add_future_stats(&stats);
+        scuba.add_future_stats(stats);
         scuba.add("changeset_id", csid.to_string());
         scuba.add("derived_data_type", Derivable::NAME);
         scuba.add("repo", self.repo_name());

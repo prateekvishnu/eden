@@ -5,26 +5,31 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Error, Result};
+use anyhow::format_err;
+use anyhow::Error;
+use anyhow::Result;
 use blobstore::Blobstore;
 use borrowed::borrowed;
 use bytes::Bytes;
 use context::CoreContext;
 use fbinit::FacebookInit;
-use futures::{
-    future::{self, TryFutureExt},
-    stream,
-};
-use quickcheck::{Arbitrary, Gen};
+use futures::future;
+use futures::future::TryFutureExt;
+use futures::stream;
+use quickcheck::Arbitrary;
+use quickcheck::Gen;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate as filestore;
-use crate::incremental_hash::{
-    hash_bytes, ContentIdIncrementalHasher, GitSha1IncrementalHasher, Sha1IncrementalHasher,
-    Sha256IncrementalHasher,
-};
-use crate::{Alias, FetchKey, FilestoreConfig};
+use crate::incremental_hash::hash_bytes;
+use crate::incremental_hash::ContentIdIncrementalHasher;
+use crate::incremental_hash::GitSha1IncrementalHasher;
+use crate::incremental_hash::Sha1IncrementalHasher;
+use crate::incremental_hash::Sha256IncrementalHasher;
+use crate::Alias;
+use crate::FetchKey;
+use crate::FilestoreConfig;
 
 use super::failing_blobstore::FailingBlobstore;
 use super::request;
@@ -35,10 +40,10 @@ async fn check_consistency<B: Blobstore>(
     ctx: &CoreContext,
     bytes: &Bytes,
 ) -> Result<bool, Error> {
-    let content_id = hash_bytes(ContentIdIncrementalHasher::new(), &bytes);
-    let sha1 = hash_bytes(Sha1IncrementalHasher::new(), &bytes);
-    let sha256 = hash_bytes(Sha256IncrementalHasher::new(), &bytes);
-    let git_sha1 = hash_bytes(GitSha1IncrementalHasher::new(*&bytes), &bytes);
+    let content_id = hash_bytes(ContentIdIncrementalHasher::new(), bytes);
+    let sha1 = hash_bytes(Sha1IncrementalHasher::new(), bytes);
+    let sha256 = hash_bytes(Sha256IncrementalHasher::new(), bytes);
+    let git_sha1 = hash_bytes(GitSha1IncrementalHasher::new(bytes), bytes);
 
     let content_id = FetchKey::Canonical(content_id);
     let sha1 = FetchKey::Aliased(Alias::Sha1(sha1));
@@ -73,7 +78,7 @@ async fn check_metadata<B: Blobstore>(
     ctx: &CoreContext,
     bytes: &Bytes,
 ) -> Result<bool, Error> {
-    let content_id = hash_bytes(ContentIdIncrementalHasher::new(), &bytes);
+    let content_id = hash_bytes(ContentIdIncrementalHasher::new(), bytes);
 
     filestore::get_metadata(blobstore, ctx, &FetchKey::Canonical(content_id))
         .await

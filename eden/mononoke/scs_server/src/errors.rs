@@ -30,6 +30,26 @@ impl From<thrift::InternalError> for ServiceError {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum Status {
+    RequestError,
+    InternalError,
+}
+
+/// Error can be logged to SCS scuba table
+pub(crate) trait LoggableError {
+    fn status_and_description(&self) -> (Status, String);
+}
+
+impl LoggableError for ServiceError {
+    fn status_and_description(&self) -> (Status, String) {
+        match self {
+            Self::Request(err) => (Status::RequestError, format!("{:?}", err)),
+            Self::Internal(err) => (Status::InternalError, format!("{:?}", err)),
+        }
+    }
+}
+
 impl ServiceError {
     pub fn context(self, context: &str) -> Self {
         match self {
@@ -130,11 +150,6 @@ impl From<MononokeError> for ServiceError {
                 reason: error.to_string(),
                 ..Default::default()
             }),
-            error @ MononokeError::PermissionDenied { .. } => Self::Request(thrift::RequestError {
-                kind: thrift::RequestErrorKind::PERMISSION_DENIED,
-                reason: error.to_string(),
-                ..Default::default()
-            }),
             error @ MononokeError::ServicePermissionDenied { .. } => {
                 Self::Request(thrift::RequestError {
                     kind: thrift::RequestErrorKind::PERMISSION_DENIED,
@@ -142,19 +157,22 @@ impl From<MononokeError> for ServiceError {
                     ..Default::default()
                 })
             }
-            error @ MononokeError::ServiceRestricted { .. } => {
-                Self::Request(thrift::RequestError {
-                    kind: thrift::RequestErrorKind::PERMISSION_DENIED,
-                    reason: error.to_string(),
-                    ..Default::default()
-                })
-            }
+            error @ MononokeError::AuthorizationError(_) => Self::Request(thrift::RequestError {
+                kind: thrift::RequestErrorKind::PERMISSION_DENIED,
+                reason: error.to_string(),
+                ..Default::default()
+            }),
             error @ MononokeError::NotAvailable(_) => Self::Request(thrift::RequestError {
                 kind: thrift::RequestErrorKind::NOT_AVAILABLE,
                 reason: error.to_string(),
                 ..Default::default()
             }),
             error @ MononokeError::HookFailure(_) => Self::Request(thrift::RequestError {
+                kind: thrift::RequestErrorKind::INVALID_REQUEST,
+                reason: error.to_string(),
+                ..Default::default()
+            }),
+            error @ MononokeError::PushrebaseConflicts(_) => Self::Request(thrift::RequestError {
                 kind: thrift::RequestErrorKind::INVALID_REQUEST,
                 reason: error.to_string(),
                 ..Default::default()

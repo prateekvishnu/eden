@@ -37,11 +37,9 @@ stackpush tries to minimize steps inside the critical section:
 
 from __future__ import absolute_import
 
-import time
-
 from edenscm.mercurial import context, error, mutation, pycompat
 from edenscm.mercurial.i18n import _
-from edenscm.mercurial.node import hex, nullid, nullrev
+from edenscm.mercurial.node import hex, nullrev
 
 from .errors import ConflictsError, StackPushUnsupportedError
 
@@ -276,7 +274,7 @@ class pushrequest(object):
 
         return context.memctx(
             repo,
-            [ctx.node(), nullid],
+            [ctx],
             commit.desc,
             sorted(commit.filechanges),
             getfilectx,

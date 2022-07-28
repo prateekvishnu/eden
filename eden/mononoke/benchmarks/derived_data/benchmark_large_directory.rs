@@ -17,7 +17,8 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 use blobrepo::BlobRepo;
 use context::CoreContext;
-use deleted_manifest::{RootDeletedManifestIdCommon, RootDeletedManifestV2Id};
+use deleted_manifest::RootDeletedManifestIdCommon;
+use deleted_manifest::RootDeletedManifestV2Id;
 use derived_data::BonsaiDerived;
 use derived_data_manager::BonsaiDerivable as NewBonsaiDerivable;
 use fbinit::FacebookInit;
@@ -25,8 +26,10 @@ use fsnodes::RootFsnodeId;
 use futures_stats::TimedFutureExt;
 use mercurial_derived_data::MappedHgChangesetId;
 use mononoke_types::ChangesetId;
-use rand::distributions::{Alphanumeric, Uniform};
-use rand::{thread_rng, Rng};
+use rand::distributions::Alphanumeric;
+use rand::distributions::Uniform;
+use rand::thread_rng;
+use rand::Rng;
 use skeleton_manifest::RootSkeletonManifestId;
 use tests_utils::CreateCommitContext;
 use unodes::RootUnodeManifestId;
@@ -128,17 +131,17 @@ async fn modify_large_directory(
 
 async fn derive(ctx: &CoreContext, repo: &BlobRepo, data: &str, csid: ChangesetId) -> String {
     match data {
-        MappedHgChangesetId::NAME => MappedHgChangesetId::derive(&ctx, &repo, csid)
+        MappedHgChangesetId::NAME => MappedHgChangesetId::derive(ctx, repo, csid)
             .await
             .unwrap()
             .hg_changeset_id()
             .to_string(),
-        RootSkeletonManifestId::NAME => RootSkeletonManifestId::derive(&ctx, &repo, csid)
+        RootSkeletonManifestId::NAME => RootSkeletonManifestId::derive(ctx, repo, csid)
             .await
             .unwrap()
             .skeleton_manifest_id()
             .to_string(),
-        RootUnodeManifestId::NAME => RootUnodeManifestId::derive(&ctx, &repo, csid)
+        RootUnodeManifestId::NAME => RootUnodeManifestId::derive(ctx, repo, csid)
             .await
             .unwrap()
             .manifest_unode_id()
@@ -148,7 +151,7 @@ async fn derive(ctx: &CoreContext, repo: &BlobRepo, data: &str, csid: ChangesetI
             .unwrap()
             .id()
             .to_string(),
-        RootFsnodeId::NAME => RootFsnodeId::derive(&ctx, &repo, csid)
+        RootFsnodeId::NAME => RootFsnodeId::derive(ctx, repo, csid)
             .await
             .unwrap()
             .fsnode_id()

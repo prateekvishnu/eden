@@ -98,6 +98,84 @@ TEST_F(CheckoutConfigTest, testLoadWithIgnoredSettings) {
   EXPECT_EQ("/tmp/someplace", config->getMountPath());
 }
 
+namespace {
+class CheckoutConfigProtocolTest
+    : public ::testing::TestWithParam<MountProtocol> {
+ protected:
+  void SetUp() override {
+    edenDir_ = std::make_unique<TemporaryDirectory>("eden_config_test_");
+    auto clientDir = edenDir_->path() / "client";
+    folly::fs::create_directory(clientDir);
+    clientDir_ = AbsolutePath(clientDir.string());
+    mountPoint_ = AbsolutePath("/tmp/someplace");
+
+    auto snapshotPath = clientDir_ + "SNAPSHOT"_pc;
+    auto snapshotContents = folly::StringPiece{
+        "eden\00\00\00\01"
+        "\x12\x34\x56\x78\x12\x34\x56\x78\x12\x34"
+        "\x56\x78\x12\x34\x56\x78\x12\x34\x56\x78",
+        28};
+    writeFile(snapshotPath, snapshotContents).value();
+
+    configDotToml_ = clientDir_ + "config.toml"_pc;
+  }
+
+  void TearDown() override {
+    edenDir_.reset();
+  }
+
+  std::unique_ptr<TemporaryDirectory> edenDir_;
+  AbsolutePath clientDir_;
+  AbsolutePath mountPoint_;
+  AbsolutePath configDotToml_;
+};
+} // namespace
+
+TEST_P(CheckoutConfigProtocolTest, testProtocolRoundtrip) {
+  auto protocol = GetParam();
+  auto localData = fmt::format(
+      "[repository]\n"
+      "path = \"/data/users/carenthomas/fbsource\"\n"
+      "type = \"git\"\n"
+      "protocol = \"{}\"\n",
+      FieldConverter<MountProtocol>{}.toDebugString(protocol));
+  writeFile(configDotToml_, folly::StringPiece{localData}).value();
+
+  auto config =
+      CheckoutConfig::loadFromClientDirectory(mountPoint_, clientDir_);
+  EXPECT_EQ(config->getRawMountProtocol(), protocol);
+}
+
+INSTANTIATE_TEST_CASE_P(
+    Protocol,
+    CheckoutConfigProtocolTest,
+    ::testing::Values(
+        MountProtocol::FUSE,
+        MountProtocol::PRJFS,
+        MountProtocol::NFS),
+    [](const ::testing::TestParamInfo<MountProtocol>& info) {
+      return FieldConverter<MountProtocol>{}.toDebugString(info.param);
+    });
+
+TEST_F(CheckoutConfigTest, testInvalidProtocol) {
+  auto localData =
+      "[repository]\n"
+      "path = \"/data/users/carenthomas/fbsource\"\n"
+      "type = \"git\"\n"
+      "protocol = \"INVALID\"\n";
+  writeFile(configDotToml_, folly::StringPiece{localData}).value();
+
+  auto config =
+      CheckoutConfig::loadFromClientDirectory(mountPoint_, clientDir_);
+  EXPECT_EQ(config->getMountProtocol(), kMountProtocolDefault);
+}
+
+TEST_F(CheckoutConfigTest, testMountProtocolDefault) {
+  auto config =
+      CheckoutConfig::loadFromClientDirectory(mountPoint_, clientDir_);
+  EXPECT_EQ(config->getMountProtocol(), kMountProtocolDefault);
+}
+
 TEST_F(CheckoutConfigTest, testVersion1MultipleParents) {
   auto config =
       CheckoutConfig::loadFromClientDirectory(mountPoint_, clientDir_);
@@ -162,7 +240,8 @@ TEST_F(CheckoutConfigTest, testInProgress) {
 
   ParentCommit inProgress = ParentCommit::CheckoutInProgress{
       RootId{"99887766554433221100aabbccddeeffabcdef99"},
-      RootId{"fedcba99887766554433221100ffeeddccbbaa99"}};
+      RootId{"fedcba99887766554433221100ffeeddccbbaa99"},
+      123};
 
   auto parent = config->getParentCommit();
   EXPECT_EQ(inProgress, parent);
@@ -174,7 +253,7 @@ TEST_F(CheckoutConfigTest, testInProgressRoundtrip) {
 
   auto from = RootId{"99887766554433221100aabbccddeeffabcdef99"};
   auto to = RootId{"fedcba998887766554433221100ffeeddccbbaa99"};
-  ParentCommit inProgress = ParentCommit::CheckoutInProgress{from, to};
+  ParentCommit inProgress = ParentCommit::CheckoutInProgress{from, to, 123};
 
   config->setCheckoutInProgress(from, to);
 

@@ -13,20 +13,22 @@
 #include <folly/experimental/TestUtil.h>
 #include <folly/io/IOBuf.h>
 #include <folly/logging/xlog.h>
+#include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
-#include <gflags/gflags.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include "eden/fs/config/CheckoutConfig.h"
 #include "eden/fs/config/EdenConfig.h"
 #include "eden/fs/inodes/EdenDispatcherFactory.h"
 #include "eden/fs/inodes/FileInode.h"
+#include "eden/fs/inodes/InodeMap.h"
 #include "eden/fs/inodes/Overlay.h"
 #include "eden/fs/inodes/TreeInode.h"
 #include "eden/fs/model/Blob.h"
 #include "eden/fs/model/Hash.h"
 #include "eden/fs/model/Tree.h"
 #include "eden/fs/notifications/CommandNotifier.h"
+#include "eden/fs/service/PrettyPrinters.h"
 #include "eden/fs/store/BackingStore.h"
 #include "eden/fs/store/BlobCache.h"
 #include "eden/fs/store/LocalStore.h"
@@ -126,6 +128,7 @@ TestMount::TestMount(FakeTreeBuilder& rootBuilder, bool startReady)
     : TestMount() {
   // Create treeCache
   edenConfig_ = EdenConfig::createTestEdenConfig();
+
   auto edenConfig = std::make_shared<ReloadableConfig>(
       edenConfig_, ConfigReloadBehavior::NoReload);
   treeCache_ = TreeCache::create(edenConfig);
@@ -144,6 +147,7 @@ TestMount::TestMount(
     bool startReady)
     : TestMount() {
   edenConfig_ = EdenConfig::createTestEdenConfig();
+
   // Create treeCache
   auto edenConfig = std::make_shared<ReloadableConfig>(
       edenConfig_, ConfigReloadBehavior::NoReload);
@@ -190,9 +194,10 @@ void TestMount::initialize(const RootId& commitHash, ObjectId rootTreeHash) {
 void TestMount::initialize(
     const RootId& initialCommitHash,
     FakeTreeBuilder& rootBuilder,
-    bool startReady) {
+    bool startReady,
+    Overlay::OverlayType overlayType) {
   createMountWithoutInitializing(
-      initialCommitHash, rootBuilder, /*startReady=*/startReady);
+      initialCommitHash, rootBuilder, startReady, overlayType);
   initializeEdenMount();
 }
 
@@ -203,7 +208,8 @@ void TestMount::initializeEdenMount() {
 void TestMount::createMountWithoutInitializing(
     const RootId& initialCommitHash,
     FakeTreeBuilder& rootBuilder,
-    bool startReady) {
+    bool startReady,
+    Overlay::OverlayType overlayType) {
   // Finalize rootBuilder and get the root Tree
   rootBuilder.finalize(backingStore_, startReady);
   auto rootTree = rootBuilder.getRoot();
@@ -215,10 +221,10 @@ void TestMount::createMountWithoutInitializing(
   setInitialCommit(initialCommitHash, rootTree->get().getHash());
 
   // Create edenMount_
-  createMount();
+  createMount(overlayType);
 }
 
-void TestMount::createMount() {
+void TestMount::createMount(Overlay::OverlayType overlayType) {
   shared_ptr<ObjectStore> objectStore = ObjectStore::create(
       localStore_,
       backingStore_,
@@ -234,7 +240,8 @@ void TestMount::createMount() {
       std::move(objectStore),
       blobCache_,
       serverState_,
-      std::move(journal));
+      std::move(journal),
+      overlayType);
 #ifndef _WIN32
   dispatcher_ = EdenDispatcherFactory::makeFuseDispatcher(edenMount_.get());
 #endif
@@ -253,6 +260,12 @@ RootId TestMount::nextCommitHash() {
 
 void TestMount::initialize(FakeTreeBuilder& rootBuilder, bool startReady) {
   initialize(nextCommitHash(), rootBuilder, startReady);
+}
+
+void TestMount::initialize(
+    FakeTreeBuilder& rootBuilder,
+    Overlay::OverlayType overlayType) {
+  initialize(nextCommitHash(), rootBuilder, /* startReady */ true, overlayType);
 }
 
 void TestMount::createMountWithoutInitializing(
@@ -475,7 +488,7 @@ void TestMount::addSymlink(
 }
 #endif
 
-void TestMount::overwriteFile(
+FileInodePtr TestMount::overwriteFile(
     folly::StringPiece path,
     folly::StringPiece contents) {
   RelativePathPiece relativePath(path);
@@ -504,6 +517,8 @@ void TestMount::overwriteFile(
   file->write(contents, offset, ObjectFetchContext::getNullContext()).get(0ms);
   file->fsync(/*datasync*/ true);
 #endif
+
+  return file;
 }
 
 void TestMount::move(folly::StringPiece src, folly::StringPiece dest) {
@@ -537,13 +552,12 @@ std::string TestMount::readFile(folly::StringPiece path) {
 
 bool TestMount::hasFileAt(folly::StringPiece path) {
   auto relativePath = RelativePathPiece{path};
-  mode_t mode;
   try {
     auto child =
         edenMount_
             ->getInodeSlow(relativePath, ObjectFetchContext::getNullContext())
             .get();
-    mode = child->stat(ObjectFetchContext::getNullContext()).get().st_mode;
+    return child->getType() == dtype_t::Regular;
   } catch (const std::system_error& e) {
     if (e.code().value() == ENOENT) {
       return false;
@@ -551,8 +565,6 @@ bool TestMount::hasFileAt(folly::StringPiece path) {
       throw;
     }
   }
-
-  return S_ISREG(mode);
 }
 
 void TestMount::mkdir(folly::StringPiece path) {
@@ -645,17 +657,15 @@ FileInodePtr TestMount::getFileInode(folly::StringPiece path) const {
   return getFileInode(RelativePathPiece{path});
 }
 
-InodeOrTreeOrEntry TestMount::getInodeOrTreeOrEntry(
-    RelativePathPiece path) const {
+VirtualInode TestMount::getVirtualInode(RelativePathPiece path) const {
   return edenMount_
-      ->getInodeOrTreeOrEntry(
+      ->getVirtualInode(
           RelativePathPiece{path}, ObjectFetchContext::getNullContext())
       .get();
 }
 
-InodeOrTreeOrEntry TestMount::getInodeOrTreeOrEntry(
-    folly::StringPiece path) const {
-  return getInodeOrTreeOrEntry(RelativePathPiece{path});
+VirtualInode TestMount::getVirtualInode(folly::StringPiece path) const {
+  return getVirtualInode(RelativePathPiece{path});
 }
 
 void TestMount::loadAllInodes() {
@@ -705,13 +715,5 @@ Future<Unit> TestMount::loadAllInodesFuture(const TreeInodePtr& treeInode) {
 std::shared_ptr<const Tree> TestMount::getRootTree() const {
   return edenMount_->getCheckedOutRootTree();
 }
-
-std::string TestMount::loadFileContentsFromPath(std::string path) {
-  return edenMount_
-      ->loadFileContentsFromPath(
-          ObjectFetchContext::getNullContext(),
-          RelativePathPiece{folly::StringPiece{path}})
-      .get(std::chrono::milliseconds(1));
-};
 
 } // namespace facebook::eden

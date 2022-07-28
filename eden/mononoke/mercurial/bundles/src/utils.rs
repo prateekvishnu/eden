@@ -10,12 +10,19 @@
 use std::ops::Deref;
 use std::str;
 
-use anyhow::{bail, Context, Error, Result};
-use byteorder::{BigEndian, ByteOrder};
-use bytes_old::{Bytes, BytesMut};
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
+use byteorder::BigEndian;
+use byteorder::ByteOrder;
+use bytes_old::Bytes;
+use bytes_old::BytesMut;
 
-use async_compression::{CompressorType, DecompressorType};
-use mercurial_types::{HgNodeHash, MPath};
+use async_compression::CompressorType;
+use async_compression::DecompressorType;
+use mercurial_types::HgNodeHash;
+use mercurial_types::MPath;
 
 use crate::errors::ErrorKind;
 
@@ -144,11 +151,11 @@ pub fn get_decompressor_type(compression: Option<&str>) -> Result<Option<Decompr
 }
 
 pub fn get_compression_param(ct: &Option<CompressorType>) -> &'static str {
-    match ct {
-        &Some(CompressorType::Bzip2(_)) => "BZ",
-        &Some(CompressorType::Gzip(_)) => "GZ",
-        &Some(CompressorType::Zstd { .. }) => "ZS",
-        &None => "UN",
+    match *ct {
+        Some(CompressorType::Bzip2(_)) => "BZ",
+        Some(CompressorType::Gzip(_)) => "GZ",
+        Some(CompressorType::Zstd { .. }) => "ZS",
+        None => "UN",
     }
 }
 
@@ -169,13 +176,14 @@ mod test {
 
     #[test]
     fn test_is_mandatory_param() {
-        let f = |x: &str| is_mandatory_param(x.into());
-
-        assert!(f("Foo").unwrap());
-        assert!(!f("bar").unwrap());
-        assert_eq!(format!("{}", f("").unwrap_err()), "string is empty");
+        assert!(is_mandatory_param("Foo").unwrap());
+        assert!(!is_mandatory_param("bar").unwrap());
         assert_eq!(
-            format!("{}", f("123").unwrap_err()),
+            format!("{}", is_mandatory_param("").unwrap_err()),
+            "string is empty"
+        );
+        assert_eq!(
+            format!("{}", is_mandatory_param("123").unwrap_err()),
             "'123': first char '1' is not alphabetic"
         );
     }

@@ -8,31 +8,51 @@
 use std::fmt;
 use std::sync::Arc;
 
-use anyhow::{format_err, Error, Result};
-use clap_old::{App, Arg, ArgMatches, SubCommand};
+use anyhow::format_err;
+use anyhow::Error;
+use anyhow::Result;
+use clap_old::App;
+use clap_old::Arg;
+use clap_old::ArgMatches;
+use clap_old::SubCommand;
 use fbinit::FacebookInit;
 use futures::future::try_join;
 
-use blobstore::{Blobstore, BlobstoreGetData};
-use blobstore_factory::{make_blobstore, BlobstoreOptions, ReadOnlyStorage};
-use cacheblob::{new_memcache_blobstore, CacheBlobstoreExt};
+use blobstore::Blobstore;
+use blobstore::BlobstoreGetData;
+use blobstore_factory::make_blobstore;
+use blobstore_factory::BlobstoreOptions;
+use blobstore_factory::ReadOnlyStorage;
+use cacheblob::new_memcache_blobstore;
+use cacheblob::CacheBlobstoreExt;
 use cached_config::ConfigStore;
-use cmdlib::args::{self, MononokeMatches};
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
 use context::CoreContext;
 use git_types::Tree as GitTree;
-use mercurial_types::{HgChangesetEnvelope, HgFileEnvelope, HgManifestEnvelope};
-use metaconfig_types::{BlobConfig, BlobstoreId, Redaction, StorageConfig};
-use mononoke_types::{FileContents, RepositoryId};
+use mercurial_types::HgChangesetEnvelope;
+use mercurial_types::HgFileEnvelope;
+use mercurial_types::HgManifestEnvelope;
+use metaconfig_types::BlobConfig;
+use metaconfig_types::BlobstoreId;
+use metaconfig_types::Redaction;
+use metaconfig_types::StorageConfig;
+use mononoke_types::FileContents;
+use mononoke_types::RepositoryId;
 use prefixblob::PrefixBlobstore;
-use redactedblobstore::{
-    RedactedBlobs, RedactedBlobstore, RedactedBlobstoreConfig, RedactionConfigBlobstore,
-    SqlRedactedContentStore,
-};
+use redactedblobstore::RedactedBlobs;
+use redactedblobstore::RedactedBlobstore;
+use redactedblobstore::RedactedBlobstoreConfig;
+use redactedblobstore::RedactionConfigBlobstore;
+use redactedblobstore::SqlRedactedContentStore;
 use scuba_ext::MononokeScubaSampleBuilder;
-use slog::{info, warn, Logger};
+use slog::info;
+use slog::warn;
+use slog::Logger;
 use sql_ext::facebook::MysqlOptions;
 use std::ffi::OsStr;
-use tokio::{fs::File, io::AsyncWriteExt};
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
 use tunables::tunables;
 
 use crate::error::SubcommandError;
@@ -101,10 +121,9 @@ fn get_blobconfig(blob_config: BlobConfig, inner_blobstore_id: Option<u64>) -> R
                             None
                         }
                     })
-                    .ok_or(format_err!(
-                        "could not find a blobstore with id {}",
-                        inner_blobstore_id
-                    ))
+                    .ok_or_else(|| {
+                        format_err!("could not find a blobstore with id {}", inner_blobstore_id)
+                    })
             }
             _ => Err(format_err!(
                 "inner-blobstore-id supplied but blobstore is not multiplexed"
@@ -146,8 +165,8 @@ pub async fn subcommand_blobstore_fetch<'a>(
     sub_m: &'a ArgMatches<'a>,
 ) -> Result<(), SubcommandError> {
     let config_store = matches.config_store();
-    let repo_id = args::get_repo_id(config_store, &matches)?;
-    let (_, config) = args::get_config(config_store, &matches)?;
+    let repo_id = args::get_repo_id(config_store, matches)?;
+    let (_, config) = args::get_config(config_store, matches)?;
     let redaction = config.redaction;
     let storage_config = config.storage_config;
     let inner_blobstore_id = args::get_u64_opt(&sub_m, "inner-blobstore-id");
@@ -165,7 +184,7 @@ pub async fn subcommand_blobstore_fetch<'a>(
         config_store,
     );
 
-    let common_config = args::load_common_config(config_store, &matches)?;
+    let common_config = args::load_common_config(config_store, matches)?;
     let censored_scuba_params = common_config.censored_scuba_params;
     let mut scuba_redaction_builder =
         MononokeScubaSampleBuilder::with_opt_table(fb, censored_scuba_params.table);
@@ -332,19 +351,19 @@ where
 
 fn detect_decode(key: &str, logger: &Logger) -> Option<&'static str> {
     // Use a simple heuristic to figure out how to decode this key.
-    if key.find("hgchangeset.").is_some() {
+    if key.contains("hgchangeset.") {
         info!(logger, "Detected changeset key");
         Some("changeset")
-    } else if key.find("hgmanifest.").is_some() {
+    } else if key.contains("hgmanifest.") {
         info!(logger, "Detected manifest key");
         Some("manifest")
-    } else if key.find("hgfilenode.").is_some() {
+    } else if key.contains("hgfilenode.") {
         info!(logger, "Detected file key");
         Some("file")
-    } else if key.find("content.").is_some() {
+    } else if key.contains("content.") {
         info!(logger, "Detected content key");
         Some("contents")
-    } else if key.find("git.tree.").is_some() {
+    } else if key.contains("git.tree.") {
         info!(logger, "Detected git-tree key");
         Some("git-tree")
     } else {

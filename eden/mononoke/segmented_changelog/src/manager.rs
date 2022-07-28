@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{format_err, Context, Result};
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Result;
 use async_trait::async_trait;
 
 use futures_stats::TimedFutureExt;
@@ -17,17 +19,21 @@ use futures_stats::TimedFutureExt;
 use bookmarks::Bookmarks;
 use changeset_fetcher::ArcChangesetFetcher;
 use context::CoreContext;
-use mononoke_types::{ChangesetId, RepositoryId};
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
 
 use crate::iddag::IdDagSaveStore;
 use crate::idmap::IdMapFactory;
 use crate::on_demand::OnDemandUpdateSegmentedChangelog;
 use crate::owned::OwnedSegmentedChangelog;
+use crate::segmented_changelog_delegate;
 use crate::types::SegmentedChangelogVersion;
 use crate::version_store::SegmentedChangelogVersionStore;
-use crate::{
-    segmented_changelog_delegate, CloneData, CloneHints, Location, SeedHead, SegmentedChangelog,
-};
+use crate::CloneData;
+use crate::CloneHints;
+use crate::Location;
+use crate::SeedHead;
+use crate::SegmentedChangelog;
 
 pub enum SegmentedChangelogType {
     OnDemand {
@@ -151,7 +157,7 @@ impl SegmentedChangelogManager {
         let sc_version = self.latest_version(ctx).await?;
         let iddag = self
             .iddag_save_store
-            .load(&ctx, sc_version.iddag_version)
+            .load(ctx, sc_version.iddag_version)
             .await
             .with_context(|| format!("repo {}: failed to load iddag", self.repo_id))?;
         let idmap = self
@@ -170,8 +176,7 @@ impl SegmentedChangelogManager {
     }
 
     pub async fn latest_version(&self, ctx: &CoreContext) -> Result<SegmentedChangelogVersion> {
-        Ok(self
-            .sc_version_store
+        self.sc_version_store
             .get(ctx)
             .await
             .with_context(|| {
@@ -185,7 +190,7 @@ impl SegmentedChangelogManager {
                     "repo {}: segmented changelog metadata not found, maybe repo is not seeded",
                     self.repo_id
                 )
-            })?)
+            })
     }
 
     /// Checks if given changeset is indexed by given segmented changelog version.

@@ -6,32 +6,50 @@
  */
 
 use std::collections::BTreeMap;
-use std::convert::identity;
 
 use blobstore::Loadable;
-use borrowed::borrowed;
 use bytes::Bytes;
-use chrono::{DateTime, FixedOffset, Local};
+use chrono::DateTime;
+use chrono::FixedOffset;
+use chrono::Local;
 use context::CoreContext;
 use futures::future::try_join_all;
-use futures::stream::{FuturesOrdered, StreamExt, TryStreamExt};
+use futures::stream::FuturesOrdered;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use futures::try_join;
-use manifest::{Entry, Manifest};
+use manifest::Entry;
+use manifest::Manifest;
 use maplit::btreemap;
-use mononoke_api::{
-    BookmarkFreshness, ChangesetPrefixSpecifier, ChangesetSpecifier,
-    ChangesetSpecifierPrefixResolution, CreateChange, CreateChangeFile, CreateCopyInfo, FileId,
-    FileType, MononokePath,
-};
+use mononoke_api::BookmarkFreshness;
+use mononoke_api::ChangesetPrefixSpecifier;
+use mononoke_api::ChangesetSpecifier;
+use mononoke_api::ChangesetSpecifierPrefixResolution;
+use mononoke_api::CreateChange;
+use mononoke_api::CreateChangeFile;
+use mononoke_api::CreateCopyInfo;
+use mononoke_api::FileId;
+use mononoke_api::FileType;
+use mononoke_api::MononokePath;
 use mononoke_api_hg::RepoContextHgExt;
-use mononoke_types::hash::{GitSha1, Sha1, Sha256};
+use mononoke_types::hash::GitSha1;
+use mononoke_types::hash::Sha1;
+use mononoke_types::hash::Sha256;
 use source_control as thrift;
 
-use crate::commit_id::{map_commit_identities, map_commit_identity, CommitIdExt};
-use crate::errors::{self, ServiceErrorResultExt};
-use crate::from_request::{check_range_and_convert, convert_pushvars, FromRequest};
-use crate::into_response::{AsyncIntoResponseWith, IntoResponse};
+use crate::commit_id::map_commit_identities;
+use crate::commit_id::map_commit_identity;
+use crate::commit_id::CommitIdExt;
+use crate::errors;
+use crate::errors::ServiceErrorResultExt;
+use crate::from_request::check_range_and_convert;
+use crate::from_request::convert_pushvars;
+use crate::from_request::FromRequest;
+use crate::into_response::AsyncIntoResponseWith;
+use crate::into_response::IntoResponse;
 use crate::source_control_impl::SourceControlServiceImpl;
+
+mod land_stack;
 
 impl SourceControlServiceImpl {
     /// Resolve a bookmark to a changeset.
@@ -114,7 +132,7 @@ impl SourceControlServiceImpl {
                 )
                 .into()),
                 Some(cs) => Ok(Response {
-                    ids: Some(map_commit_identity(&cs, &params.identity_schemes).await?),
+                    ids: Some(map_commit_identity(cs, &params.identity_schemes).await?),
                     resolved_type: ResponseType::RESOLVED,
                     ..Default::default()
                 }),
@@ -211,12 +229,9 @@ impl SourceControlServiceImpl {
         repo: thrift::RepoSpecifier,
         params: thrift::RepoCreateCommitParams,
     ) -> Result<thrift::RepoCreateCommitResponse, errors::ServiceError> {
-        let repo = self.repo(ctx, &repo).await?;
-        let repo = match params.service_identity {
-            Some(service_identity) => repo.service_draft(service_identity).await?,
-            None => repo.draft().await?,
-        };
-
+        let repo = self
+            .repo_for_service(ctx, &repo, params.service_identity.clone())
+            .await?;
         let parents: Vec<_> = params
             .parents
             .into_iter()
@@ -356,17 +371,20 @@ impl SourceControlServiceImpl {
             .await?;
 
         let author = params.info.author;
-        let author_date = params
-            .info
-            .date
-            .as_ref()
-            .map(<DateTime<FixedOffset>>::from_request)
-            .unwrap_or_else(|| {
+        let author_date = params.info.date.as_ref().map_or_else(
+            || {
                 let now = Local::now();
                 Ok(now.with_timezone(now.offset()))
-            })?;
-        let committer = None;
-        let committer_date = None;
+            },
+            <DateTime<FixedOffset>>::from_request,
+        )?;
+        let committer = params.info.committer;
+        let committer_date = params
+            .info
+            .committer_date
+            .as_ref()
+            .map(<DateTime<FixedOffset>>::from_request)
+            .transpose()?;
         let message = params.info.message;
         let extra = params.info.extra;
         let bubble = None;
@@ -384,6 +402,17 @@ impl SourceControlServiceImpl {
                 bubble,
             )
             .await?;
+
+        // If you ask for a git identity back, then we'll assume that you supplied one to us
+        // and set it. Later, when we can derive a git commit hash, this'll become more
+        // open, because we'll only do the check if you ask for a hash different to the
+        // one we would derive
+        if params
+            .identity_schemes
+            .contains(&thrift::CommitIdentityScheme::GIT)
+        {
+            repo.set_git_mapping_from_changeset(&changeset).await?;
+        }
         let ids = map_commit_identity(&changeset, &params.identity_schemes).await?;
         Ok(thrift::RepoCreateCommitResponse {
             ids,
@@ -423,6 +452,7 @@ impl SourceControlServiceImpl {
 
         // convert changeset specifiers to bonsai changeset ids
         // missing changesets are skipped
+        #[allow(clippy::filter_map_identity)]
         let heads_ids = try_join_all(
             head_specifiers
                 .into_iter()
@@ -430,7 +460,7 @@ impl SourceControlServiceImpl {
         )
         .await?
         .into_iter()
-        .filter_map(identity)
+        .filter_map(std::convert::identity)
         .collect::<Vec<_>>();
 
         // get stack
@@ -501,11 +531,9 @@ impl SourceControlServiceImpl {
         repo: thrift::RepoSpecifier,
         params: thrift::RepoCreateBookmarkParams,
     ) -> Result<thrift::RepoCreateBookmarkResponse, errors::ServiceError> {
-        let repo = self.repo(ctx, &repo).await?;
-        let repo = match params.service_identity {
-            Some(service_identity) => repo.service_write(service_identity).await?,
-            None => repo.write().await?,
-        };
+        let repo = self
+            .repo_for_service(ctx, &repo, params.service_identity)
+            .await?;
         let target = &params.target;
         let changeset = repo
             .changeset(ChangesetSpecifier::from_request(target)?)
@@ -526,11 +554,9 @@ impl SourceControlServiceImpl {
         repo: thrift::RepoSpecifier,
         params: thrift::RepoMoveBookmarkParams,
     ) -> Result<thrift::RepoMoveBookmarkResponse, errors::ServiceError> {
-        let repo = self.repo(ctx, &repo).await?;
-        let repo = match params.service_identity {
-            Some(service_identity) => repo.service_write(service_identity).await?,
-            None => repo.write().await?,
-        };
+        let repo = self
+            .repo_for_service(ctx, &repo, params.service_identity)
+            .await?;
         let target = &params.target;
         let changeset = repo
             .changeset(ChangesetSpecifier::from_request(target)?)
@@ -567,11 +593,9 @@ impl SourceControlServiceImpl {
         repo: thrift::RepoSpecifier,
         params: thrift::RepoDeleteBookmarkParams,
     ) -> Result<thrift::RepoDeleteBookmarkResponse, errors::ServiceError> {
-        let repo = self.repo(ctx, &repo).await?;
-        let repo = match params.service_identity {
-            Some(service_identity) => repo.service_write(service_identity).await?,
-            None => repo.write().await?,
-        };
+        let repo = self
+            .repo_for_service(ctx, &repo, params.service_identity)
+            .await?;
         let old_changeset_id = match &params.old_target {
             Some(old_target) => Some(
                 repo.changeset(ChangesetSpecifier::from_request(old_target)?)
@@ -586,46 +610,6 @@ impl SourceControlServiceImpl {
         repo.delete_bookmark(&params.bookmark, old_changeset_id, pushvars.as_ref())
             .await?;
         Ok(thrift::RepoDeleteBookmarkResponse {
-            ..Default::default()
-        })
-    }
-
-    pub(crate) async fn repo_land_stack(
-        &self,
-        ctx: CoreContext,
-        repo: thrift::RepoSpecifier,
-        params: thrift::RepoLandStackParams,
-    ) -> Result<thrift::RepoLandStackResponse, errors::ServiceError> {
-        let repo = self.repo(ctx, &repo).await?;
-        let repo = match params.service_identity {
-            Some(service_identity) => repo.service_write(service_identity).await?,
-            None => repo.write().await?,
-        };
-        borrowed!(params.head, params.base);
-        let head = repo
-            .changeset(ChangesetSpecifier::from_request(head)?)
-            .await
-            .context("failed to resolve head commit")?
-            .ok_or_else(|| errors::commit_not_found(head.to_string()))?;
-        let base = repo
-            .changeset(ChangesetSpecifier::from_request(base)?)
-            .await
-            .context("failed to resolve base commit")?
-            .ok_or_else(|| errors::commit_not_found(base.to_string()))?;
-        let pushvars = convert_pushvars(params.pushvars);
-
-        let pushrebase_outcome = repo
-            .land_stack(&params.bookmark, head.id(), base.id(), pushvars.as_ref())
-            .await?
-            .into_response_with(&(
-                repo.clone(),
-                params.identity_schemes,
-                params.old_identity_schemes,
-            ))
-            .await?;
-
-        Ok(thrift::RepoLandStackResponse {
-            pushrebase_outcome,
             ..Default::default()
         })
     }

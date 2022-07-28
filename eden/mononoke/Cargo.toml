@@ -87,7 +87,7 @@ cacheblob = { version = "0.1.0", path = "blobstore/cacheblob" }
 cached_config = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 changesets = { version = "0.1.0", path = "changesets" }
 check_git_wc = { version = "0.1.0", path = "git/check_git_wc" }
-clap = { version = "=3.1.8", features = ["derive", "regex", "unicode", "wrap_help"] }
+clap = { version = "3.2.10", features = ["derive", "regex", "unicode", "wrap_help"] }
 clap-old = { package = "clap", version = "2.33" }
 cloned = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 cmdlib = { version = "0.1.0", path = "cmdlib" }
@@ -95,7 +95,7 @@ cmdlib_logging = { version = "0.1.0", path = "cmdlib/log" }
 context = { version = "0.1.0", path = "server/context" }
 criterion = "=0.3.1"
 dashmap = { version = "4.0.2", features = ["rayon", "serde"] }
-derive_more = "0.99.3"
+derive_more = "0.99.17"
 derived_data = { version = "0.1.0", path = "derived_data" }
 environment = { version = "0.1.0", path = "cmdlib/environment" }
 failure_ext = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
@@ -116,8 +116,8 @@ mononoke_app = { version = "0.1.0", path = "cmdlib/mononoke_app" }
 mononoke_types = { version = "0.1.0", path = "mononoke_types" }
 packblob = { version = "0.1.0", path = "blobstore/packblob" }
 phases = { version = "0.1.0", path = "phases" }
-prefixblob = { version = "0.1.0", path = "blobstore/prefixblob" }
 rand = { version = "0.8", features = ["small_rng"] }
+repo_blobstore = { version = "0.1.0", path = "blobrepo/repo_blobstore" }
 repo_factory = { version = "0.1.0", path = "repo_factory" }
 retry = { version = "0.1.0", path = "common/retry" }
 revset = { version = "0.1.0", path = "revset" }
@@ -140,20 +140,24 @@ toml = "=0.5.8"
 [patch.crates-io]
 aes-gcm-siv = { git = "https://github.com/lei2022/AEADs", rev = "d9d03399fbc1347a1c2941801c0743e847980757" }
 async-compression = { git = "https://github.com/lei2022/async-compression", rev = "08331f1421eee9d662d172ca7d670347054f8664" }
+bundlr-sdk = { git = "https://github.com/kaustavha/rust-sdk", rev = "beab2a990edfb71eeeffa7f42e93ff121b08286e" }
 curve25519-dalek = { git = "https://github.com/hariria/curve25519-dalek", rev = "1f39e7b369dc70f432370c9703229a45bfa9664e" }
 daemonize = { git = "https://github.com/krallin/daemonize", rev = "f7be28efa1b4a70e43bb37b5f4ff4d664992edca" }
 git-config = { git = "https://github.com/mzr/gitoxide", rev = "28c51a1d99af3f4e5ea8f6bb2319e0a5d812c891" }
+graphql-parser = { git = "https://github.com/vmagro/graphql-parser", rev = "1d155d96e6052767380ab5e67c57e3d6608a31ac" }
 lru-disk-cache = { git = "https://github.com/mozilla/sccache", rev = "fdbf843d174c6796d736b2b61dab0297670390f8" }
 mysql_async = { git = "https://github.com/mzr/mysql_async", rev = "76b6fa05d7bb3408402033e6f94042a756ab55ab" }
 quickcheck = { git = "https://github.com/jakoschiko/quickcheck", rev = "6ecdf5bb4b0132ce66670b4d46453aa022ea892c" }
-reqwest = { git = "https://github.com/vmagro/reqwest", rev = "9b5781af416c942260ebbda970795c5414cbf694" }
+reqwest = { git = "https://github.com/vmagro/reqwest", rev = "f9490c06756a9d35ab874c44657db790a87af80b" }
 rustfilt = { git = "https://github.com/jsgf/rustfilt.git", rev = "8141fa7f1caee562ee8daffb2ddeca3d1f0d36e5" }
 shellexpand = { git = "https://github.com/fanzeyi/shellexpand.git", rev = "179447a3f8fccd765acfd2eed15a54c716c49cfe" }
+spl-token = { git = "https://github.com/omertxyz/solana-program-library.git", rev = "4230d3ddf8e52d99919e44b8097a01a03f029fbb" }
 tar = { package = "tar", git = "https://github.com/jrwats/tar-rs.git", rev = "21eeccdc08d9b87f6ad610f9b20a5839aabe5974" }
 tempfile = { git = "https://github.com/Stebalien/tempfile.git", rev = "66aa57f7d3a38234fcd393077366b61d36171e42" }
 terminfo = { git = "https://github.com/rust-terminfo/terminfo", rev = "9b4e1c6aae79644c9da7a2e312e3c10ee4759930" }
 toml = { git = "https://github.com/fbsource/toml", branch = "dotted-table-0.5.8" }
 windows-sys = { git = "https://github.com/fanzeyi/windows-rs", rev = "8775afca5d2017da427d34b291ae4f85f5820740" }
+windows-sys028 = { package = "windows-sys", git = "https://github.com/wilfred/windows-rs", rev = "eacf60132fc798a8e59174a7f25471bad541a042" }
 
 [workspace]
 members = [
@@ -190,6 +194,7 @@ members = [
   "blobstore/logblob",
   "blobstore/memblob",
   "blobstore/multiplexedblob",
+  "blobstore/multiplexedblob_wal",
   "blobstore/packblob",
   "blobstore/packblob/if",
   "blobstore/prefixblob",
@@ -197,6 +202,7 @@ members = [
   "blobstore/redactedblobstore",
   "blobstore/samplingblob",
   "blobstore/sqlblob",
+  "blobstore/test_utils",
   "blobstore/throttledblob",
   "blobstore/virtually_sharded_blobstore",
   "blobstore_healer",
@@ -224,6 +230,7 @@ members = [
   "changesets/changesets_impl",
   "changesets/if",
   "cmdlib",
+  "cmdlib/base_app",
   "cmdlib/caching",
   "cmdlib/displaying",
   "cmdlib/environment",
@@ -249,6 +256,7 @@ members = [
   "common/async_limiter",
   "common/async_limiter/examples/tokio_v2",
   "common/bounded_traversal",
+  "common/connection_security_checker",
   "common/copy_utils",
   "common/dedupmap",
   "common/futures_watchdog",
@@ -286,6 +294,7 @@ members = [
   "derived_data/unodes",
   "derived_data/utils",
   "edenapi_service",
+  "features/history_traversal",
   "filenodes",
   "filenodes/if",
   "filestore",
@@ -294,6 +303,7 @@ members = [
   "git/git_types",
   "git/git_types/if",
   "git/gitimport",
+  "git/import_direct",
   "git/import_tools",
   "gotham_ext",
   "hgproto",
@@ -301,7 +311,6 @@ members = [
   "hooks",
   "hooks/content-stores",
   "hooks/hook_manager_factory",
-  "lfs_import",
   "lfs_import_lib",
   "lfs_protocol",
   "lfs_server",
@@ -316,9 +325,9 @@ members = [
   "megarepo_api/megarepo_config",
   "megarepo_api/megarepo_error",
   "megarepo_api/requests_table",
-  "mercurial/bundle_replay_data",
   "mercurial/bundles",
   "mercurial/mutation",
+  "mercurial/mutation/if",
   "mercurial/revlog",
   "mercurial/types",
   "mercurial/types/if",
@@ -355,17 +364,18 @@ members = [
   "reachabilityindex/skiplist",
   "reachabilityindex/test-helpers",
   "regenerate_hg_filenodes",
+  "repo_attributes/repo_bookmark_attrs",
   "repo_attributes/repo_cross_repo",
   "repo_attributes/repo_derived_data",
   "repo_attributes/repo_identity",
   "repo_attributes/repo_lock/repo_lock",
   "repo_attributes/repo_permission_checker",
+  "repo_attributes/repo_sparse_profiles",
+  "repo_authorization",
   "repo_client",
   "repo_client/getbundle_response",
-  "repo_client/mononoke_repo",
   "repo_client/obsolete",
   "repo_client/remotefilelog",
-  "repo_client/repo_read_write_status",
   "repo_client/scribe_commit_queue",
   "repo_client/streaming_clone",
   "repo_client/unbundle",
@@ -395,6 +405,7 @@ members = [
   "tools/admin",
   "tools/example",
   "tools/executor",
+  "tools/import",
   "tools/testtool",
   "tunables",
   "tunables/tunables-derive",

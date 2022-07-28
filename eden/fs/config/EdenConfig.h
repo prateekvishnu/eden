@@ -262,6 +262,17 @@ class EdenConfig : private ConfigSettingManager {
 
   ConfigSetting<bool> useMononoke{"mononoke:use-mononoke", false, this};
 
+  // [mount]
+
+  /**
+   * After checkout completes with conflicts, how many conflicts should be
+   * printed in the edenfs.log?
+   */
+  ConfigSetting<uint64_t> numConflictsToLog{
+      "mount:num-conflicts-to-log",
+      10,
+      this};
+
   // [store]
 
   /**
@@ -480,6 +491,34 @@ class EdenConfig : private ConfigSettingManager {
       1,
       this};
 
+  /**
+   * Not sure if a Windows behavior, or a ProjectedFS one, but symlinks
+   * aren't created atomically, they start their life as a directory, and
+   * then a reparse tag is added to them to change them to a symlink. This
+   * is an issue for EdenFS as the call to symlink_status above will race
+   * with this 2 step process and thus may detect a symlink as a
+   * directory...
+   *
+   * This is bad for EdenFS for a number of reason. The main one being that
+   * EdenFS will attempt to recursively add all the childrens of that
+   * directory to the inode hierarchy. If the symlinks points to a very
+   * large directory, this can be extremely slow, leading to a very poor
+   * user experience.
+   *
+   * How to solve this? Since notifications are handled completely
+   * asynchronously, we can simply wait a bit and retry if the notification
+   * has been received semi-recently. We still run the
+   * risk of winning the race if the system is overloaded, but the
+   * probability should be much lower.
+   *
+   * This config controls how long to wait after a directory creation
+   * notification has been received.
+   */
+  ConfigSetting<std::chrono::nanoseconds> prjfsDirectoryCreationDelay{
+      "prjfs:directory-creation-delay",
+      std::chrono::milliseconds(100),
+      this};
+
   // [hg]
 
   /**
@@ -623,10 +662,27 @@ class EdenConfig : private ConfigSettingManager {
    */
   ConfigSetting<bool> enableActivityBuffer{
       "telemetry:enable-activitybuffer",
-      false,
+      true,
+      this};
+
+  /**
+   * Sets the maximum number of events an ActivityBuffer can store before
+   * evicting old events
+   */
+  ConfigSetting<uint32_t> ActivityBufferMaxEvents{
+      "telemetry:activitybuffer-max-events",
+      100,
       this};
 
   // [experimental]
+
+  /**
+   * Controls whether interrupted checkouts can be resumed.
+   */
+  ConfigSetting<bool> allowResumeCheckout{
+      "experimental:allow-resume-checkout",
+      false,
+      this};
 
   /**
    * Controls whether if EdenFS caches blobs in local store.
@@ -801,6 +857,22 @@ class EdenConfig : private ConfigSettingManager {
   ConfigSetting<std::chrono::nanoseconds> overlayMaintenanceInterval{
       "overlay:maintenance-interval",
       std::chrono::minutes(1),
+      this};
+
+  /**
+   * Determines if EdenFS should enable the option to buffer overlay writes.
+   * This only works with tree overlays.
+   */
+  ConfigSetting<bool> overlayBuffered{"overlay:buffered", false, this};
+
+  /**
+   * Number of bytes worth of Overlay data to keep in memory before pausing
+   * enqueues to the BufferedTreeOverlay's worker thread. This is a per overlay
+   * setting.
+   */
+  ConfigSetting<size_t> overlayBufferSize{
+      "overlay:buffer-size",
+      64 * 1024 * 1024,
       this};
 
   // [clone]

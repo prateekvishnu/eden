@@ -5,85 +5,133 @@
  * GNU General Public License version 2.
  */
 
+use std::collections::HashMap;
 use std::fmt;
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::Arc;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use acl_regions::build_disabled_acl_regions;
-use anyhow::{anyhow, format_err, Error};
-use blobrepo::{AsBlobRepo, BlobRepo};
+use anyhow::anyhow;
+use anyhow::format_err;
+use anyhow::Error;
+use blobrepo::AsBlobRepo;
+use blobrepo::BlobRepo;
 use blobrepo_hg::BlobRepoHg;
 use blobstore::Loadable;
-use blobstore_factory::{make_metadata_sql_factory, ReadOnlyStorage};
+use blobstore_factory::make_metadata_sql_factory;
+use blobstore_factory::ReadOnlyStorage;
+use bookmarks::BookmarkKind;
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkPagination;
+use bookmarks::BookmarkPrefix;
 pub use bookmarks::Freshness as BookmarkFreshness;
-use bookmarks::{BookmarkKind, BookmarkName, BookmarkPagination, BookmarkPrefix, Freshness};
-use cacheblob::{InProcessLease, LeaseOps};
+use bookmarks::Freshness;
+use cacheblob::InProcessLease;
+use cacheblob::LeaseOps;
 use changeset_info::ChangesetInfo;
-use changesets::{Changesets, ChangesetsArc, ChangesetsRef};
+use changesets::Changesets;
+use changesets::ChangesetsArc;
+use changesets::ChangesetsRef;
 use context::CoreContext;
-use cross_repo_sync::{
-    types::Target, CandidateSelectionHint, CommitSyncContext, CommitSyncRepos, CommitSyncer,
-};
+use cross_repo_sync::types::Target;
+use cross_repo_sync::CandidateSelectionHint;
+use cross_repo_sync::CommitSyncContext;
+use cross_repo_sync::CommitSyncRepos;
+use cross_repo_sync::CommitSyncer;
 use derived_data_manager::BonsaiDerivable as NewBonsaiDerivable;
+use ephemeral_blobstore::Bubble;
+use ephemeral_blobstore::BubbleId;
 use ephemeral_blobstore::RepoEphemeralStore;
-use ephemeral_blobstore::{Bubble, BubbleId, StorageLocation};
+use ephemeral_blobstore::StorageLocation;
 use fbinit::FacebookInit;
-use filestore::{Alias, FetchKey};
+use filestore::Alias;
+use filestore::FetchKey;
 use futures::compat::Stream01CompatExt;
-use futures::stream::{self, Stream, StreamExt, TryStreamExt};
-use futures::{try_join, Future, FutureExt};
+use futures::stream;
+use futures::stream::Stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use futures::try_join;
+use futures::Future;
+use futures::FutureExt;
 use futures_watchdog::WatchdogExt;
 use hook_manager_factory::make_hook_manager;
+use hooks::ArcHookManager;
 use hooks::HookManager;
+use hooks_content_stores::RepoFileContentManager;
 use itertools::Itertools;
-use live_commit_sync_config::{LiveCommitSyncConfig, TestLiveCommitSyncConfig};
+use live_commit_sync_config::LiveCommitSyncConfig;
+use live_commit_sync_config::TestLiveCommitSyncConfig;
 use mercurial_derived_data::MappedHgChangesetId;
 use mercurial_types::Globalrev;
-use metaconfig_types::{
-    HookManagerParams, InfinitepushNamespace, InfinitepushParams, LfsParams, RepoConfig,
-    SourceControlServiceParams,
-};
+use metaconfig_types::HookManagerParams;
+use metaconfig_types::InfinitepushNamespace;
+use metaconfig_types::InfinitepushParams;
+use metaconfig_types::LfsParams;
+use metaconfig_types::RepoConfig;
+use metaconfig_types::SourceControlServiceParams;
 use mononoke_api_types::InnerRepo;
-use mononoke_types::{
-    hash::{GitSha1, Sha1, Sha256},
-    Generation, RepositoryId, Svnrev, Timestamp,
-};
-use mutable_renames::{MutableRenames, SqlMutableRenamesStore};
-use permission_checker::{ArcPermissionChecker, PermissionCheckerBuilder};
+use mononoke_types::hash::GitSha1;
+use mononoke_types::hash::Sha1;
+use mononoke_types::hash::Sha256;
+use mononoke_types::Generation;
+use mononoke_types::RepositoryId;
+use mononoke_types::Svnrev;
+use mononoke_types::Timestamp;
+use mutable_renames::MutableRenames;
+use mutable_renames::SqlMutableRenamesStore;
+use permission_checker::DefaultAclProvider;
 use phases::PhasesRef;
 use reachabilityindex::LeastCommonAncestorsHint;
 use regex::Regex;
+use repo_authorization::AuthorizationContext;
+use repo_blobstore::RepoBlobstoreArc;
 use repo_cross_repo::RepoCrossRepo;
-use repo_read_write_status::{RepoReadWriteFetcher, SqlRepoReadWriteStatus};
+use repo_sparse_profiles::RepoSparseProfiles;
 use revset::AncestorsNodeStream;
-use segmented_changelog::{CloneData, DisabledSegmentedChangelog, Location, SegmentedChangelog};
+use segmented_changelog::CloneData;
+use segmented_changelog::DisabledSegmentedChangelog;
+use segmented_changelog::Location;
+use segmented_changelog::SegmentedChangelog;
 use skiplist::SkiplistIndex;
-use slog::{debug, error, o};
-use sql_construct::facebook::FbSqlConstruct;
+use slog::debug;
+use slog::error;
+use slog::o;
 use sql_construct::SqlConstruct;
 use sql_ext::facebook::MysqlOptions;
 use stats::prelude::*;
 use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
-use synced_commit_mapping::{SqlSyncedCommitMapping, SyncedCommitMapping};
-use warm_bookmarks_cache::{BookmarksCache, NoopBookmarksCache, WarmBookmarksCacheBuilder};
+use std::hash::Hash;
+use std::hash::Hasher;
+use streaming_clone::StreamingCloneBuilder;
+use synced_commit_mapping::SqlSyncedCommitMapping;
+use synced_commit_mapping::SyncedCommitMapping;
+use warm_bookmarks_cache::BookmarksCache;
+use warm_bookmarks_cache::NoopBookmarksCache;
+use warm_bookmarks_cache::WarmBookmarksCacheBuilder;
 
 use crate::changeset::ChangesetContext;
 use crate::errors::MononokeError;
-use crate::file::{FileContext, FileId};
-use crate::permissions::WritePermissionsModel;
-use crate::repo_draft::RepoDraftContext;
-use crate::repo_write::RepoWriteContext;
-use crate::specifiers::{
-    ChangesetId, ChangesetPrefixSpecifier, ChangesetSpecifier, ChangesetSpecifierPrefixResolution,
-    HgChangesetId,
-};
-use crate::tree::{TreeContext, TreeId};
+use crate::file::FileContext;
+use crate::file::FileId;
+use crate::specifiers::ChangesetId;
+use crate::specifiers::ChangesetPrefixSpecifier;
+use crate::specifiers::ChangesetSpecifier;
+use crate::specifiers::ChangesetSpecifierPrefixResolution;
+use crate::specifiers::HgChangesetId;
+use crate::tree::TreeContext;
+use crate::tree::TreeId;
 use crate::xrepo::CandidateSelectionHintArgs;
-use crate::{MononokeApiEnvironment, WarmBookmarksCacheDerivedData};
+use crate::MononokeApiEnvironment;
+use crate::WarmBookmarksCacheDerivedData;
+
+pub mod create_bookmark;
+pub mod create_changeset;
+pub mod delete_bookmark;
+pub mod land_stack;
+pub mod move_bookmark;
+pub mod set_git_mapping;
 
 define_stats! {
     prefix = "mononoke.api";
@@ -105,10 +153,7 @@ pub struct Repo {
     pub(crate) inner: InnerRepo,
     pub(crate) name: String,
     pub(crate) warm_bookmarks_cache: Arc<dyn BookmarksCache>,
-    pub(crate) repo_permission_checker: ArcPermissionChecker,
-    pub(crate) service_permission_checker: ArcPermissionChecker,
-    pub(crate) hook_manager: Arc<HookManager>,
-    pub(crate) readonly_fetcher: RepoReadWriteFetcher,
+    pub(crate) hook_manager: ArcHookManager,
 }
 
 impl AsBlobRepo for Repo {
@@ -120,12 +165,50 @@ impl AsBlobRepo for Repo {
 #[derive(Clone)]
 pub struct RepoContext {
     ctx: CoreContext,
+    authz: Arc<AuthorizationContext>,
     repo: Arc<Repo>,
 }
 
 impl fmt::Debug for RepoContext {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "RepoContext(repo={:?})", self.name())
+    }
+}
+
+pub struct RepoContextBuilder {
+    ctx: CoreContext,
+    authz: Option<AuthorizationContext>,
+    repo: Arc<Repo>,
+    bubble_id: Option<BubbleId>,
+}
+
+impl RepoContextBuilder {
+    pub(crate) fn new(ctx: CoreContext, repo: Arc<Repo>) -> Self {
+        RepoContextBuilder {
+            ctx,
+            authz: None,
+            repo,
+            bubble_id: None,
+        }
+    }
+
+    pub async fn with_bubble<F, R>(mut self, bubble_fetcher: F) -> Result<Self, MononokeError>
+    where
+        F: FnOnce(RepoEphemeralStore) -> R,
+        R: Future<Output = anyhow::Result<Option<BubbleId>>>,
+    {
+        self.bubble_id = bubble_fetcher(self.repo.ephemeral_store().as_ref().clone()).await?;
+        Ok(self)
+    }
+
+    pub fn with_authorization_context(mut self, authz: AuthorizationContext) -> Self {
+        self.authz = Some(authz);
+        self
+    }
+
+    pub async fn build(self) -> Result<RepoContext, MononokeError> {
+        let authz = Arc::new(self.authz.unwrap_or_else(AuthorizationContext::new));
+        RepoContext::new(self.ctx, authz, self.repo, self.bubble_id).await
     }
 }
 
@@ -158,13 +241,6 @@ impl Repo {
             config.skiplist_index_blobstore_key = None;
         }
         let logger = env.repo_factory.env.logger.new(o!("repo" => name.clone()));
-        let disabled_hooks = env
-            .repo_factory
-            .env
-            .disabled_hooks
-            .get(&name)
-            .cloned()
-            .unwrap_or_default();
 
         let inner: InnerRepo = env
             .repo_factory
@@ -174,39 +250,11 @@ impl Repo {
 
         let ctx = CoreContext::new_with_logger(fb, logger.clone());
 
-        let repo_permission_checker = async {
-            let checker = match &config.hipster_acl {
-                Some(acl) => PermissionCheckerBuilder::acl_for_repo(fb, acl).await?,
-                None => PermissionCheckerBuilder::always_allow(),
-            };
-            Ok::<_, Error>(ArcPermissionChecker::from(checker))
-        };
-
-        let service_permission_checker = async {
-            let checker = match &config.source_control_service.service_write_hipster_acl {
-                Some(acl) => PermissionCheckerBuilder::acl_for_tier(fb, acl).await?,
-                None => PermissionCheckerBuilder::always_allow(),
-            };
-            Ok::<_, Error>(ArcPermissionChecker::from(checker))
-        };
-
-        let hook_manager = {
-            let blob_repo = &inner.blob_repo;
-            let config = config.clone();
-            let name = name.as_str();
-            async move {
-                let hook_manager =
-                    make_hook_manager(fb, blob_repo, &config, name, &disabled_hooks).await?;
-                Ok::<_, Error>(Arc::new(hook_manager))
-            }
-        };
-
         let warm_bookmarks_cache = if env.warm_bookmarks_cache_enabled {
             let mut scuba_sample_builder = env.warm_bookmarks_cache_scuba_sample_builder.clone();
             scuba_sample_builder.add("repo", inner.blob_repo.name().clone());
             let ctx = ctx.with_mutated_scuba(|_| scuba_sample_builder);
-            let mut warm_bookmarks_cache_builder =
-                WarmBookmarksCacheBuilder::new(ctx.clone(), &inner);
+            let mut warm_bookmarks_cache_builder = WarmBookmarksCacheBuilder::new(ctx, &inner);
             match env.warm_bookmarks_cache_derived_data {
                 WarmBookmarksCacheDerivedData::HgOnly => {
                     warm_bookmarks_cache_builder.add_hg_warmers()?;
@@ -232,44 +280,35 @@ impl Repo {
             .boxed()
         };
 
-        let sql_read_write_status = if let Some(addr) = &config.write_lock_db_address {
-            let r = SqlRepoReadWriteStatus::with_mysql(
-                fb,
-                addr.clone(),
-                &env.repo_factory.env.mysql_options,
-                env.repo_factory.env.readonly_storage.0,
-            )?;
-            Result::<_, Error>::Ok(Some(r))
-        } else {
-            Ok(None)
-        }?;
+        let content_store = RepoFileContentManager::new(&inner.blob_repo);
 
-        let (
-            repo_permission_checker,
-            service_permission_checker,
-            warm_bookmarks_cache,
-            hook_manager,
-        ): (_, _, Arc<dyn BookmarksCache>, _) = try_join!(
-            repo_permission_checker.watched(&logger),
-            service_permission_checker.watched(&logger),
+        let disabled_hooks = env
+            .repo_factory
+            .env
+            .disabled_hooks
+            .get(&name)
+            .cloned()
+            .unwrap_or_default();
+
+        let hook_manager = make_hook_manager(
+            fb,
+            env.repo_factory.acl_provider(),
+            content_store,
+            &config,
+            name.clone(),
+            &disabled_hooks,
+        );
+
+        let (warm_bookmarks_cache, hook_manager): (Arc<dyn BookmarksCache>, _) = try_join!(
             warm_bookmarks_cache.watched(&logger),
             hook_manager.watched(&logger),
         )?;
-
-        let readonly_fetcher = RepoReadWriteFetcher::new(
-            sql_read_write_status,
-            config.readonly.clone(),
-            config.hgsql_name.clone(),
-        );
 
         Ok(Self {
             name,
             inner,
             warm_bookmarks_cache,
-            repo_permission_checker,
-            service_permission_checker,
-            hook_manager,
-            readonly_fetcher,
+            hook_manager: Arc::new(hook_manager),
         })
     }
 
@@ -284,10 +323,7 @@ impl Repo {
             name: self.name.clone(),
             inner,
             warm_bookmarks_cache: self.warm_bookmarks_cache.clone(),
-            repo_permission_checker: self.repo_permission_checker.clone(),
-            service_permission_checker: self.service_permission_checker.clone(),
             hook_manager: self.hook_manager.clone(),
-            readonly_fetcher: self.readonly_fetcher.clone(),
         }
     }
 
@@ -365,6 +401,10 @@ impl Repo {
             ..Default::default()
         };
 
+        let content_store = RepoFileContentManager::new(&blob_repo);
+        let name = blob_repo.name().clone();
+        let repo_blobstore = blob_repo.repo_blobstore_arc();
+
         let inner = InnerRepo {
             blob_repo,
             repo_config: Arc::new(config.clone()),
@@ -382,6 +422,10 @@ impl Repo {
                 Arc::new(InProcessLease::new()),
             )),
             acl_regions: build_disabled_acl_regions(),
+            sparse_profiles: Arc::new(RepoSparseProfiles::new(None)),
+            streaming_clone: Arc::new(
+                StreamingCloneBuilder::with_sqlite_in_memory()?.build(repo_id, repo_blobstore),
+            ),
         };
 
         let mut warm_bookmarks_cache_builder = WarmBookmarksCacheBuilder::new(ctx.clone(), &inner);
@@ -391,25 +435,23 @@ impl Repo {
         warm_bookmarks_cache_builder.wait_until_warmed();
         let warm_bookmarks_cache = warm_bookmarks_cache_builder.build().await?;
 
-        let hook_manager = Arc::new(
-            make_hook_manager(ctx.fb, &inner.blob_repo, &config, "test", &HashSet::new()).await?,
-        );
-
-        let readonly_fetcher =
-            RepoReadWriteFetcher::new(None, config.readonly.clone(), config.hgsql_name.clone());
+        let acl_provider = DefaultAclProvider::new(ctx.fb);
 
         Ok(Self {
-            name: String::from("test"),
+            name: name.clone(),
             inner,
             warm_bookmarks_cache: Arc::new(warm_bookmarks_cache),
-            repo_permission_checker: ArcPermissionChecker::from(
-                PermissionCheckerBuilder::always_allow(),
+            hook_manager: Arc::new(
+                make_hook_manager(
+                    ctx.fb,
+                    &acl_provider,
+                    content_store,
+                    &config,
+                    name.clone(),
+                    &HashSet::new(),
+                )
+                .await?,
             ),
-            service_permission_checker: ArcPermissionChecker::from(
-                PermissionCheckerBuilder::always_allow(),
-            ),
-            hook_manager,
-            readonly_fetcher,
         })
     }
 
@@ -472,11 +514,6 @@ impl Repo {
         &self.hook_manager
     }
 
-    /// The Read/Write or Read-Only status fetcher.
-    pub fn readonly_fetcher(&self) -> &RepoReadWriteFetcher {
-        &self.readonly_fetcher
-    }
-
     /// The configuration for the referenced repository.
     pub fn config(&self) -> &RepoConfig {
         &self.inner.repo_config
@@ -486,12 +523,16 @@ impl Repo {
         &self.inner.mutable_renames
     }
 
+    pub fn sparse_profiles(&self) -> &Arc<RepoSparseProfiles> {
+        &self.inner.sparse_profiles
+    }
+
     pub async fn report_monitoring_stats(&self, ctx: &CoreContext) -> Result<(), MononokeError> {
         match self.config().source_control_service_monitoring.as_ref() {
             None => {}
             Some(monitoring_config) => {
                 for bookmark in monitoring_config.bookmarks_to_report_age.iter() {
-                    self.report_bookmark_age_difference(ctx, &bookmark).await?;
+                    self.report_bookmark_age_difference(ctx, bookmark).await?;
                 }
             }
         }
@@ -558,8 +599,8 @@ impl Repo {
     ) -> Result<(), MononokeError> {
         let repo = self.blob_repo();
 
-        let maybe_bcs_id_from_service = self.warm_bookmarks_cache.get(&ctx, bookmark).await?;
-        let maybe_bcs_id_from_blobrepo = repo.get_bonsai_bookmark(ctx.clone(), &bookmark).await?;
+        let maybe_bcs_id_from_service = self.warm_bookmarks_cache.get(ctx, bookmark).await?;
+        let maybe_bcs_id_from_blobrepo = repo.get_bonsai_bookmark(ctx.clone(), bookmark).await?;
 
         if maybe_bcs_id_from_blobrepo.is_none() {
             self.report_bookmark_missing_from_repo(ctx, bookmark);
@@ -613,7 +654,7 @@ impl Repo {
                 let compare_bcs_id = maybe_child.unwrap_or(service_bcs_id);
 
                 let compare_timestamp = compare_bcs_id
-                    .load(&ctx, repo.blobstore())
+                    .load(ctx, repo.blobstore())
                     .await?
                     .author_date()
                     .timestamp_secs();
@@ -685,63 +726,7 @@ impl Repo {
             .blob_repo()
             .get_generation_number(ctx.clone(), *cs_id)
             .await?;
-        maybe_gen_num.ok_or(format_err!("gen num for {} not found", cs_id))
-    }
-
-    async fn check_permissions(&self, ctx: &CoreContext, mode: &str) -> Result<(), MononokeError> {
-        let identities = ctx.metadata().identities();
-
-        if !self
-            .repo_permission_checker
-            .check_set(&*identities, &[mode])
-            .await?
-        {
-            debug!(
-                ctx.logger(),
-                "Permission denied: {} access to {}", mode, self.name
-            );
-            let identities = if identities.is_empty() {
-                "<none>".to_string()
-            } else {
-                identities.iter().join(",")
-            };
-            return Err(MononokeError::PermissionDenied {
-                mode: mode.to_string(),
-                identities,
-                reponame: self.name.clone(),
-            });
-        }
-        Ok(())
-    }
-
-    async fn check_service_permissions(
-        &self,
-        ctx: &CoreContext,
-        service_identity: String,
-    ) -> Result<(), MononokeError> {
-        let identities = ctx.metadata().identities();
-
-        if !self
-            .service_permission_checker
-            .check_set(&*identities, &[&service_identity])
-            .await?
-        {
-            debug!(
-                ctx.logger(),
-                "Permission denied: access to {} on behalf of {}", self.name, service_identity,
-            );
-            let identities = if identities.is_empty() {
-                "<none>".to_string()
-            } else {
-                identities.iter().join(",")
-            };
-            return Err(MononokeError::ServicePermissionDenied {
-                identities,
-                reponame: self.name.clone(),
-                service_identity,
-            });
-        }
-        Ok(())
+        maybe_gen_num.ok_or_else(|| format_err!("gen num for {} not found", cs_id))
     }
 }
 
@@ -760,40 +745,34 @@ pub struct BookmarkInfo {
 
 /// A context object representing a query to a particular repo.
 impl RepoContext {
-    pub async fn new(ctx: CoreContext, repo: Arc<Repo>) -> Result<Self, MononokeError> {
-        Self::new_with_bubble(ctx, repo, |_| async { Ok(None) }).await
-    }
-
-    pub async fn new_with_bubble<F, R>(
+    pub async fn new(
         ctx: CoreContext,
+        authz: Arc<AuthorizationContext>,
         repo: Arc<Repo>,
-        bubble_fetcher: F,
-    ) -> Result<Self, MononokeError>
-    where
-        F: FnOnce(RepoEphemeralStore) -> R,
-        R: Future<Output = anyhow::Result<Option<BubbleId>>>,
-    {
-        // Check the user is permitted to access this repo.
-        repo.check_permissions(&ctx, "read").await?;
-        let repo =
-            if let Some(bubble_id) = bubble_fetcher((**repo.ephemeral_store()).clone()).await? {
-                let bubble = repo.ephemeral_store().open_bubble(bubble_id).await?;
-                Arc::new(repo.with_bubble(bubble))
-            } else {
-                repo.clone()
-            };
-        Ok(Self { repo, ctx })
-    }
-
-    /// Initializes the repo without the ACL check.
-    ///
-    /// Should be used in the internal services that don't serve user queries so all operations are
-    /// trusted.
-    pub async fn new_bypass_acl_check(
-        ctx: CoreContext,
-        repo: Arc<Repo>,
+        bubble_id: Option<BubbleId>,
     ) -> Result<Self, MononokeError> {
-        Ok(Self { repo, ctx })
+        let ctx = ctx.with_mutated_scuba(|mut scuba| {
+            scuba.add("permissions_model", format!("{:?}", authz));
+            scuba
+        });
+
+        // Check the user is permitted to access this repo.
+        authz.require_full_repo_read(&ctx, &repo.inner).await?;
+
+        // Open the bubble if necessary.
+        let repo = if let Some(bubble_id) = bubble_id {
+            let bubble = repo.ephemeral_store().open_bubble(bubble_id).await?;
+            Arc::new(repo.with_bubble(bubble))
+        } else {
+            repo
+        };
+
+        Ok(Self { ctx, authz, repo })
+    }
+
+    pub async fn new_test(ctx: CoreContext, repo: Arc<Repo>) -> Result<Self, MononokeError> {
+        let authz = Arc::new(AuthorizationContext::new_bypass_access_control());
+        RepoContext::new(ctx, authz, repo, None).await
     }
 
     /// The context for this query.
@@ -803,12 +782,17 @@ impl RepoContext {
 
     /// The name of the underlying repo.
     pub fn name(&self) -> &str {
-        &self.repo.name()
+        self.repo.name()
     }
 
     /// The internal id of the repo. Used for comparing the repo objects with each other.
     pub fn repoid(&self) -> RepositoryId {
         self.repo.repoid()
+    }
+
+    /// The authorization context of the request.
+    pub fn authorization_context(&self) -> &AuthorizationContext {
+        &self.authz
     }
 
     /// The underlying `InnerRepo`.
@@ -856,18 +840,17 @@ impl RepoContext {
         self.repo.hook_manager()
     }
 
-    /// The Read/Write or Read-Only status fetcher.
-    pub fn readonly_fetcher(&self) -> &RepoReadWriteFetcher {
-        self.repo.readonly_fetcher()
-    }
-
     /// The configuration for the referenced repository.
     pub fn config(&self) -> &RepoConfig {
         self.repo.config()
     }
 
     pub fn mutable_renames(&self) -> &Arc<MutableRenames> {
-        &self.repo.mutable_renames()
+        self.repo.mutable_renames()
+    }
+
+    pub fn sparse_profiles(&self) -> &Arc<RepoSparseProfiles> {
+        self.repo.sparse_profiles()
     }
 
     pub fn derive_changeset_info_enabled(&self) -> bool {
@@ -1037,7 +1020,7 @@ impl RepoContext {
     ) -> Result<Option<ChangesetContext>, MononokeError> {
         let specifier = specifier.into();
         let changeset = self
-            .resolve_specifier(specifier.into())
+            .resolve_specifier(specifier)
             .await?
             .map(|cs_id| ChangesetContext::new(self.clone(), cs_id));
         Ok(changeset)
@@ -1070,6 +1053,18 @@ impl RepoContext {
         Ok(mapping)
     }
 
+    /// Get changeset ID from Mercurial ID for multiple changesets
+    pub async fn many_changeset_ids_from_hg(
+        &self,
+        changesets: Vec<HgChangesetId>,
+    ) -> Result<Vec<(HgChangesetId, ChangesetId)>, MononokeError> {
+        let mapping = self
+            .blob_repo()
+            .get_hg_bonsai_mapping(self.ctx.clone(), changesets)
+            .await?;
+        Ok(mapping)
+    }
+
     /// Similar to many_changeset_hg_ids, but returning Git-SHA1s.
     pub async fn many_changeset_git_sha1s(
         &self,
@@ -1086,6 +1081,22 @@ impl RepoContext {
         Ok(mapping)
     }
 
+    /// Get changeset ID from Git-SHA1 for multiple changesets
+    pub async fn many_changeset_ids_from_git_sha1(
+        &self,
+        changesets: Vec<GitSha1>,
+    ) -> Result<Vec<(GitSha1, ChangesetId)>, MononokeError> {
+        let mapping = self
+            .blob_repo()
+            .bonsai_git_mapping()
+            .get(&self.ctx, changesets.into())
+            .await?
+            .into_iter()
+            .map(|entry| (entry.git_sha1, entry.bcs_id))
+            .collect();
+        Ok(mapping)
+    }
+
     /// Similar to many_changeset_hg_ids, but returning Globalrevs.
     pub async fn many_changeset_globalrev_ids(
         &self,
@@ -1098,6 +1109,22 @@ impl RepoContext {
             .await?
             .into_iter()
             .map(|entry| (entry.bcs_id, entry.globalrev))
+            .collect();
+        Ok(mapping)
+    }
+
+    /// Get changeset ID from Globalrev for multiple changesets
+    pub async fn many_changeset_ids_from_globalrev(
+        &self,
+        changesets: Vec<Globalrev>,
+    ) -> Result<Vec<(Globalrev, ChangesetId)>, MononokeError> {
+        let mapping = self
+            .blob_repo()
+            .bonsai_globalrev_mapping()
+            .get(&self.ctx, changesets.into())
+            .await?
+            .into_iter()
+            .map(|entry| (entry.globalrev, entry.bcs_id))
             .collect();
         Ok(mapping)
     }
@@ -1245,7 +1272,7 @@ impl RepoContext {
                     self.ctx.clone(),
                     BookmarkFreshness::MaybeStale,
                     &prefix,
-                    &BookmarkKind::ALL,
+                    BookmarkKind::ALL,
                     &pagination,
                     limit.unwrap_or(std::u64::MAX),
                 )
@@ -1311,7 +1338,7 @@ impl RepoContext {
             .partition(|cs_id| public_phases.contains(cs_id));
 
         // initialize the queue
-        let mut queue: Vec<_> = draft.iter().cloned().collect();
+        let mut queue: Vec<_> = draft.to_vec();
 
         while !queue.is_empty() {
             // get the unique parents for all changesets in the queue & skip visited & update visited
@@ -1321,8 +1348,7 @@ impl RepoContext {
                 .get_many(self.ctx.clone(), queue.clone())
                 .await?
                 .into_iter()
-                .map(|cs_entry| cs_entry.parents)
-                .flatten()
+                .flat_map(|cs_entry| cs_entry.parents)
                 .filter(|cs_id| !visited.contains(cs_id))
                 .unique()
                 .collect();
@@ -1496,7 +1522,7 @@ impl RepoContext {
             })?;
 
         let candidate_selection_hint: CandidateSelectionHint = self
-            .build_candidate_selection_hint(maybe_candidate_selection_hint_args, &other)
+            .build_candidate_selection_hint(maybe_candidate_selection_hint_args, other)
             .await?;
 
         let commit_sync_repos = CommitSyncRepos::new(
@@ -1506,13 +1532,9 @@ impl RepoContext {
         )?;
 
         let specifier = specifier.into();
-        let changeset =
-            self.resolve_specifier(specifier)
-                .await?
-                .ok_or(MononokeError::InvalidRequest(format!(
-                    "unknown commit specifier {}",
-                    specifier
-                )))?;
+        let changeset = self.resolve_specifier(specifier).await?.ok_or_else(|| {
+            MononokeError::InvalidRequest(format!("unknown commit specifier {}", specifier))
+        })?;
 
         let commit_syncer = CommitSyncer::new(
             &self.ctx,
@@ -1533,120 +1555,26 @@ impl RepoContext {
         Ok(maybe_cs_id.map(|cs_id| ChangesetContext::new(other.clone(), cs_id)))
     }
 
-    /// Get a draft context to make draft changes to this repository.
-    pub async fn draft(mut self) -> Result<RepoDraftContext, MononokeError> {
-        if !self.config().source_control_service.permit_writes {
+    /// Start a write to the repo.
+    pub fn start_write(&self) -> Result<(), MononokeError> {
+        if self.authz.is_service() {
+            if !self.config().source_control_service.permit_service_writes {
+                return Err(MononokeError::InvalidRequest(String::from(
+                    "Service writes are disabled in configuration for this repo",
+                )));
+            }
+        } else if !self.config().source_control_service.permit_writes {
             return Err(MononokeError::InvalidRequest(String::from(
-                "source control service writes are not enabled for this repo",
+                "Writes are disabled in configuration for this repo",
             )));
         }
-
-        // TODO(T105334556): This should require draft permission
-        self.ctx = self.ctx.with_mutated_scuba(|mut scuba| {
-            scuba.add("write_permissions_model", "any");
-            scuba
-        });
 
         self.ctx
             .scuba()
             .clone()
             .log_with_msg("Write request start", None);
 
-        Ok(RepoDraftContext::new(
-            self,
-            WritePermissionsModel::AllowAnyWrite,
-        ))
-    }
-
-    /// Get a draft context to make draft changes to this repository on behalf of a service.
-    pub async fn service_draft(
-        mut self,
-        service_identity: String,
-    ) -> Result<RepoDraftContext, MononokeError> {
-        if !self.config().source_control_service.permit_service_writes {
-            return Err(MononokeError::InvalidRequest(String::from(
-                "source control service writes are not enabled for this repo",
-            )));
-        }
-
-        // Check the user is permitted to speak for the named service.
-        self.repo
-            .check_service_permissions(&self.ctx, service_identity.clone())
-            .await?;
-
-        self.ctx = self.ctx.with_mutated_scuba(|mut scuba| {
-            scuba.add("write_permissions_model", "service");
-            scuba
-        });
-
-        self.ctx
-            .scuba()
-            .clone()
-            .log_with_msg("Write request start", None);
-
-        Ok(RepoDraftContext::new(
-            self,
-            WritePermissionsModel::ServiceIdentity(service_identity),
-        ))
-    }
-
-    /// Get a write context to make changes to this repository.
-    pub async fn write(mut self) -> Result<RepoWriteContext, MononokeError> {
-        if !self.config().source_control_service.permit_writes {
-            return Err(MononokeError::InvalidRequest(String::from(
-                "source control service writes are not enabled for this repo",
-            )));
-        }
-
-        // Check the user is permitted to write to this repo.
-        self.repo.check_permissions(&self.ctx, "write").await?;
-
-        self.ctx = self.ctx.with_mutated_scuba(|mut scuba| {
-            scuba.add("write_permissions_model", "any");
-            scuba
-        });
-
-        self.ctx
-            .scuba()
-            .clone()
-            .log_with_msg("Write request start", None);
-
-        Ok(RepoWriteContext::new(
-            self,
-            WritePermissionsModel::AllowAnyWrite,
-        ))
-    }
-
-    /// Get a write context to make changes to this repository on behalf of a service.
-    pub async fn service_write(
-        mut self,
-        service_identity: String,
-    ) -> Result<RepoWriteContext, MononokeError> {
-        if !self.config().source_control_service.permit_service_writes {
-            return Err(MononokeError::InvalidRequest(String::from(
-                "source control service writes are not enabled for this repo",
-            )));
-        }
-
-        // Check the user is permitted to speak for the named service.
-        self.repo
-            .check_service_permissions(&self.ctx, service_identity.clone())
-            .await?;
-
-        self.ctx = self.ctx.with_mutated_scuba(|mut scuba| {
-            scuba.add("write_permissions_model", "service");
-            scuba
-        });
-
-        self.ctx
-            .scuba()
-            .clone()
-            .log_with_msg("Write request start", None);
-
-        Ok(RepoWriteContext::new(
-            self,
-            WritePermissionsModel::ServiceIdentity(service_identity),
-        ))
+        Ok(())
     }
 
     /// Reads a value out of the underlying config, indicating if we support writes without parents in this repo.
@@ -1741,8 +1669,9 @@ impl RepoContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fixtures::Linear;
+    use fixtures::MergeEven;
     use fixtures::TestRepoFixture;
-    use fixtures::{Linear, MergeEven};
     use std::str::FromStr;
 
     #[fbinit::test]

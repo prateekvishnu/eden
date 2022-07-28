@@ -7,26 +7,80 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use blobstore::{Blobstore, Loadable, LoadableError, Storable};
+use blobstore::Blobstore;
+use blobstore::Loadable;
+use blobstore::LoadableError;
+use blobstore::Storable;
 use context::CoreContext;
-use mononoke_types::{
-    fsnode::{Fsnode, FsnodeEntry, FsnodeFile},
-    skeleton_manifest::{SkeletonManifest, SkeletonManifestEntry},
-    unode::{ManifestUnode, UnodeEntry},
-    FileUnodeId, FsnodeId, MPath, MPathElement, ManifestUnodeId, SkeletonManifestId,
-};
-use serde_derive::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    hash::{Hash, Hasher},
-};
 
-pub trait Manifest: Sized + 'static {
-    type TreeId;
-    type LeafId;
+use futures::stream;
+use futures::stream::BoxStream;
+use futures::stream::StreamExt;
+use mononoke_types::fsnode::Fsnode;
+use mononoke_types::fsnode::FsnodeEntry;
+use mononoke_types::fsnode::FsnodeFile;
+use mononoke_types::skeleton_manifest::SkeletonManifest;
+use mononoke_types::skeleton_manifest::SkeletonManifestEntry;
+use mononoke_types::unode::ManifestUnode;
+use mononoke_types::unode::UnodeEntry;
+use mononoke_types::FileUnodeId;
+use mononoke_types::FsnodeId;
+use mononoke_types::MPath;
+use mononoke_types::MPathElement;
+use mononoke_types::ManifestUnodeId;
+use mononoke_types::SkeletonManifestId;
+use serde_derive::Deserialize;
+use serde_derive::Serialize;
+use std::collections::BTreeMap;
+use std::hash::Hash;
+use std::hash::Hasher;
 
+#[async_trait]
+pub trait AsyncManifest<Store: Send + Sync>: Sized + 'static {
+    type TreeId: Send + Sync;
+    type LeafId: Send + Sync;
+
+    async fn list(
+        &self,
+        ctx: &CoreContext,
+        blobstore: &Store,
+    ) -> Result<BoxStream<'_, Result<(MPathElement, Entry<Self::TreeId, Self::LeafId>)>>>;
+    async fn lookup(
+        &self,
+        ctx: &CoreContext,
+        blobstore: &Store,
+        name: &MPathElement,
+    ) -> Result<Option<Entry<Self::TreeId, Self::LeafId>>>;
+}
+
+pub trait Manifest: Sync + Sized + 'static {
+    type TreeId: Send + Sync;
+    type LeafId: Send + Sync;
     fn list(&self) -> Box<dyn Iterator<Item = (MPathElement, Entry<Self::TreeId, Self::LeafId>)>>;
     fn lookup(&self, name: &MPathElement) -> Option<Entry<Self::TreeId, Self::LeafId>>;
+}
+
+#[async_trait]
+impl<M: Manifest, Store: Send + Sync> AsyncManifest<Store> for M {
+    type TreeId = <Self as Manifest>::TreeId;
+    type LeafId = <Self as Manifest>::LeafId;
+
+    async fn list(
+        &self,
+        _ctx: &CoreContext,
+        _blobstore: &Store,
+    ) -> Result<BoxStream<'_, Result<(MPathElement, Entry<Self::TreeId, Self::LeafId>)>>> {
+        Ok(stream::iter(Manifest::list(self).map(anyhow::Ok).collect::<Vec<_>>()).boxed())
+    }
+
+    async fn lookup(
+        &self,
+        _ctx: &CoreContext,
+        _blobstore: &Store,
+        name: &MPathElement,
+    ) -> Result<Option<Entry<Self::TreeId, Self::LeafId>>> {
+        anyhow::Ok(Manifest::lookup(self, name))
+    }
 }
 
 impl Manifest for ManifestUnode {
@@ -122,6 +176,55 @@ pub trait OrderedManifest: Manifest {
             ),
         >,
     >;
+}
+
+#[async_trait]
+pub trait AsyncOrderedManifest<Store: Send + Sync>: AsyncManifest<Store> {
+    async fn list_weighted(
+        &self,
+        ctx: &CoreContext,
+        blobstore: &Store,
+    ) -> Result<
+        BoxStream<
+            'async_trait,
+            Result<(MPathElement, Entry<(Weight, Self::TreeId), Self::LeafId>)>,
+        >,
+    >;
+    async fn lookup_weighted(
+        &self,
+        ctx: &CoreContext,
+        blobstore: &Store,
+        name: &MPathElement,
+    ) -> Result<Option<Entry<(Weight, Self::TreeId), Self::LeafId>>>;
+}
+
+#[async_trait]
+impl<M: OrderedManifest, Store: Send + Sync> AsyncOrderedManifest<Store> for M {
+    async fn list_weighted(
+        &self,
+        _ctx: &CoreContext,
+        _blobstore: &Store,
+    ) -> Result<
+        BoxStream<
+            'async_trait,
+            Result<(MPathElement, Entry<(Weight, Self::TreeId), Self::LeafId>)>,
+        >,
+    > {
+        Ok(stream::iter(
+            OrderedManifest::list_weighted(self)
+                .map(anyhow::Ok)
+                .collect::<Vec<_>>(),
+        )
+        .boxed())
+    }
+    async fn lookup_weighted(
+        &self,
+        _ctx: &CoreContext,
+        _blobstore: &Store,
+        name: &MPathElement,
+    ) -> Result<Option<Entry<(Weight, Self::TreeId), Self::LeafId>>> {
+        anyhow::Ok(OrderedManifest::lookup_weighted(self, name))
+    }
 }
 
 impl OrderedManifest for SkeletonManifest {
@@ -463,18 +566,18 @@ impl<I: Copy, E> Traced<I, E> {
     }
 }
 
-impl<I, TreeId, LeafId> Into<Entry<TreeId, LeafId>>
-    for Entry<Traced<I, TreeId>, Traced<I, LeafId>>
+impl<I, TreeId, LeafId> From<Entry<Traced<I, TreeId>, Traced<I, LeafId>>>
+    for Entry<TreeId, LeafId>
 {
-    fn into(self: Self) -> Entry<TreeId, LeafId> {
-        match self {
+    fn from(entry: Entry<Traced<I, TreeId>, Traced<I, LeafId>>) -> Self {
+        match entry {
             Entry::Tree(Traced(_, t)) => Entry::Tree(t),
             Entry::Leaf(Traced(_, l)) => Entry::Leaf(l),
         }
     }
 }
 
-impl<I: Copy + 'static, M: Manifest> Manifest for Traced<I, M> {
+impl<I: Send + Sync + Copy + 'static, M: Manifest> Manifest for Traced<I, M> {
     type TreeId = Traced<I, <M as Manifest>::TreeId>;
     type LeafId = Traced<I, <M as Manifest>::LeafId>;
 

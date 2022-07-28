@@ -5,27 +5,24 @@ test rust clone
   $ configure modern
   $ setconfig clone.use-rust=True
   $ setconfig remotefilelog.reponame=test-repo
+  $ setconfig format.use-eager-repo=True
   $ export LOG=hgcommands::commands::clone
 
 
  Prepare Source:
 
-  $ newremoterepo repo1
-  $ setconfig paths.default=test:e1
+  $ newrepo e1
   $ drawdag << 'EOS'
-  > E
+  > E  # bookmark master = E
   > |
   > D
   > |
-  > C
+  > C  # bookmark stable = C
   > |
   > B
   > |
   > A
   > EOS
-
-  $ hg push -r $E --to master --create -q
-  $ hg push -r $C --to stable --create -q
 
 Test that nonsupported options fallback to python:
 
@@ -40,9 +37,14 @@ Test that nonsupported options fallback to python:
   $ hg clone --git "$TESTTMP/git-source" $TESTTMP/git-clone
 
 Test rust clone
-  $ hg clone -U test:e1 $TESTTMP/rust-clone --config remotenames.selectivepulldefault='master, stable'
-  TRACE hgcommands::commands::clone: performing rust clone
-  TRACE hgcommands::commands::clone: fetching lazy commit data and bookmarks
+  $ hg clone -Uq test:e1 $TESTTMP/rust-clone --config remotenames.selectivepulldefault='master, stable'
+   INFO clone_metadata{repo="test-repo"}: hgcommands::commands::clone: enter
+  TRACE clone_metadata{repo="test-repo"}: hgcommands::commands::clone: performing rust clone
+  TRACE clone_metadata{repo="test-repo"}: hgcommands::commands::clone: fetching lazy commit data and bookmarks
+   INFO clone_metadata{repo="test-repo"}: hgcommands::commands::clone: exit
+   INFO get_update_target: hgcommands::commands::clone: enter
+   INFO get_update_target: hgcommands::commands::clone: return=None
+   INFO get_update_target: hgcommands::commands::clone: exit
   $ cd $TESTTMP/rust-clone
 
 Check metalog is written and keys are tracked correctly
@@ -73,9 +75,14 @@ Check basic operations
 
 Test cloning with default destination
   $ cd $TESTTMP
-  $ hg clone -U test:e1
-  TRACE hgcommands::commands::clone: performing rust clone
-  TRACE hgcommands::commands::clone: fetching lazy commit data and bookmarks
+  $ hg clone -Uq test:e1
+   INFO clone_metadata{repo="test-repo"}: hgcommands::commands::clone: enter
+  TRACE clone_metadata{repo="test-repo"}: hgcommands::commands::clone: performing rust clone
+  TRACE clone_metadata{repo="test-repo"}: hgcommands::commands::clone: fetching lazy commit data and bookmarks
+   INFO clone_metadata{repo="test-repo"}: hgcommands::commands::clone: exit
+   INFO get_update_target: hgcommands::commands::clone: enter
+   INFO get_update_target: hgcommands::commands::clone: return=None
+   INFO get_update_target: hgcommands::commands::clone: exit
   $ cd test-repo
   $ hg log -r tip -T "{desc}\n"
   E
@@ -83,9 +90,12 @@ Test cloning with default destination
 Test cloning failures
 
   $ cd $TESTTMP
-  $ FAILPOINTS=run::clone=return hg clone -U test:e1 $TESTTMP/failure-clone
-  TRACE hgcommands::commands::clone: performing rust clone
-  TRACE hgcommands::commands::clone: fetching lazy commit data and bookmarks
+  $ FAILPOINTS=run::clone=return hg clone -Uq test:e1 $TESTTMP/failure-clone
+   INFO clone_metadata{repo="test-repo"}: hgcommands::commands::clone: enter
+  TRACE clone_metadata{repo="test-repo"}: hgcommands::commands::clone: performing rust clone
+  TRACE clone_metadata{repo="test-repo"}: hgcommands::commands::clone: fetching lazy commit data and bookmarks
+  ERROR clone_metadata{repo="test-repo"}: hgcommands::commands::clone: error=Injected clone failure
+   INFO clone_metadata{repo="test-repo"}: hgcommands::commands::clone: exit
   abort: Injected clone failure
   [255]
   $ [ -d $TESTTMP/failure-clone ]
@@ -93,9 +103,12 @@ Test cloning failures
 
 Check that preexisting directory is not removed in failure case
   $ mkdir failure-clone
-  $ FAILPOINTS=run::clone=return hg clone -U test:e1 $TESTTMP/failure-clone
-  TRACE hgcommands::commands::clone: performing rust clone
-  TRACE hgcommands::commands::clone: fetching lazy commit data and bookmarks
+  $ FAILPOINTS=run::clone=return hg clone -Uq test:e1 $TESTTMP/failure-clone
+   INFO clone_metadata{repo="test-repo"}: hgcommands::commands::clone: enter
+  TRACE clone_metadata{repo="test-repo"}: hgcommands::commands::clone: performing rust clone
+  TRACE clone_metadata{repo="test-repo"}: hgcommands::commands::clone: fetching lazy commit data and bookmarks
+  ERROR clone_metadata{repo="test-repo"}: hgcommands::commands::clone: error=Injected clone failure
+   INFO clone_metadata{repo="test-repo"}: hgcommands::commands::clone: exit
   abort: Injected clone failure
   [255]
   $ [ -d $TESTTMP/failure-clone ]
@@ -104,27 +117,59 @@ Check that preexisting directory is not removed in failure case
 
 Check that prexisting repo is not modified
   $ mkdir $TESTTMP/failure-clone/.hg
-  $ hg clone -U test:e1 $TESTTMP/failure-clone
-  abort: .hg directory already exists at clone destination
+  $ hg clone -Uq test:e1 $TESTTMP/failure-clone
+  abort: .hg directory already exists at clone destination $TESTTMP/failure-clone
   [255]
   $ [ -d $TESTTMP/failure-clone/.hg ]
 
 Test default-destination-dir
-  $ hg clone -U test:e1 --config clone.default-destination-dir="$TESTTMP/manually-set-dir"
-  TRACE hgcommands::commands::clone: performing rust clone
-  TRACE hgcommands::commands::clone: fetching lazy commit data and bookmarks
+  $ hg clone -Uq test:e1 --config clone.default-destination-dir="$TESTTMP/manually-set-dir"
+   INFO clone_metadata{repo="test-repo"}: hgcommands::commands::clone: enter
+  TRACE clone_metadata{repo="test-repo"}: hgcommands::commands::clone: performing rust clone
+  TRACE clone_metadata{repo="test-repo"}: hgcommands::commands::clone: fetching lazy commit data and bookmarks
+   INFO clone_metadata{repo="test-repo"}: hgcommands::commands::clone: exit
+   INFO get_update_target: hgcommands::commands::clone: enter
+   INFO get_update_target: hgcommands::commands::clone: return=None
+   INFO get_update_target: hgcommands::commands::clone: exit
   $ ls $TESTTMP | grep manually-set-dir
   manually-set-dir
 
 Test that we get an error when not specifying a destination directory and running in plain mode
-  $ HGPLAIN=1 hg clone -U test:e1
-  abort: DEST was not specified
+  $ HGPLAIN=1 hg clone -Uq test:e1
+  abort: DEST must be specified because HGPLAIN is enabled
   [255]
-  $ HGPLAINEXCEPT=default_clone_dir hg clone -U test:e1 --config remotefilelog.reponame=test-repo-notquite
-  TRACE hgcommands::commands::clone: performing rust clone
-  TRACE hgcommands::commands::clone: fetching lazy commit data and bookmarks
+  $ HGPLAINEXCEPT=default_clone_dir hg clone -Uq test:e1 --config remotefilelog.reponame=test-repo-notquite
+   INFO clone_metadata{repo="test-repo-notquite"}: hgcommands::commands::clone: enter
+  TRACE clone_metadata{repo="test-repo-notquite"}: hgcommands::commands::clone: performing rust clone
+  TRACE clone_metadata{repo="test-repo-notquite"}: hgcommands::commands::clone: fetching lazy commit data and bookmarks
+   INFO clone_metadata{repo="test-repo-notquite"}: hgcommands::commands::clone: exit
+   INFO get_update_target: hgcommands::commands::clone: enter
+   INFO get_update_target: hgcommands::commands::clone: return=None
+   INFO get_update_target: hgcommands::commands::clone: exit
 
 Not an error for bookmarks to not exist
-  $ hg clone -U test:e1 $TESTTMP/no-bookmarks --config remotenames.selectivepulldefault=banana
-  TRACE hgcommands::commands::clone: performing rust clone
-  TRACE hgcommands::commands::clone: fetching lazy commit data and bookmarks
+  $ hg clone -Uq test:e1 $TESTTMP/no-bookmarks --config remotenames.selectivepulldefault=banana
+   INFO clone_metadata{repo="test-repo"}: hgcommands::commands::clone: enter
+  TRACE clone_metadata{repo="test-repo"}: hgcommands::commands::clone: performing rust clone
+  TRACE clone_metadata{repo="test-repo"}: hgcommands::commands::clone: fetching lazy commit data and bookmarks
+   INFO clone_metadata{repo="test-repo"}: hgcommands::commands::clone: exit
+   INFO get_update_target: hgcommands::commands::clone: enter
+   INFO get_update_target: hgcommands::commands::clone: return=None
+   INFO get_update_target: hgcommands::commands::clone: exit
+
+Test various --eden errors:
+  $ hg clone -Uq test:e1 --eden-backing-repo /foo/bar
+  abort: --eden-backing-repo requires --eden
+  [255]
+  $ hg clone -q test:e1 --eden --enable-profile foo
+  abort: --enable-profile is not compatible with --eden
+  [255]
+  $ hg clone -q test:e1 -u foo --eden
+  abort: some specified options are not compatible with --eden
+  [255]
+  $ hg clone -Uq test:e1 --eden
+  abort: --noupdate is not compatible with --eden
+  [255]
+  $ hg clone -q test:e1 --eden --config clone.use-rust=0
+  abort: --eden requires --config clone.use-rust=True
+  [255]

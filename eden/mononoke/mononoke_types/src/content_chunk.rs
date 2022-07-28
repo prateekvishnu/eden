@@ -5,20 +5,26 @@
  * GNU General Public License version 2.
  */
 
-use std::fmt::{self, Debug};
+use std::fmt;
+use std::fmt::Debug;
 
-use anyhow::{bail, Context, Result};
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Result;
 use bytes::Bytes;
 use fbthrift::compact_protocol;
-use quickcheck::{single_shrinker, Arbitrary, Gen};
+use quickcheck::single_shrinker;
+use quickcheck::Arbitrary;
+use quickcheck::Gen;
 
-use crate::{
-    blob::{Blob, BlobstoreValue, ContentChunkBlob},
-    errors::ErrorKind,
-    file_contents::ContentChunkPointer,
-    thrift,
-    typed_hash::{ContentChunkId, ContentChunkIdContext},
-};
+use crate::blob::Blob;
+use crate::blob::BlobstoreValue;
+use crate::blob::ContentChunkBlob;
+use crate::errors::ErrorKind;
+use crate::file_contents::ContentChunkPointer;
+use crate::thrift;
+use crate::typed_hash::ContentChunkId;
+use crate::typed_hash::ContentChunkIdContext;
 
 /// Chunk of a file's contents.
 #[derive(Clone, Eq, PartialEq)]
@@ -31,7 +37,7 @@ impl ContentChunk {
 
     pub(crate) fn from_thrift(fc: thrift::ContentChunk) -> Result<Self> {
         match fc {
-            thrift::ContentChunk::Bytes(bytes) => Ok(ContentChunk(bytes.into())),
+            thrift::ContentChunk::Bytes(bytes) => Ok(ContentChunk(bytes)),
             thrift::ContentChunk::UnknownField(x) => bail!(ErrorKind::InvalidThrift(
                 "ContentChunk".into(),
                 format!("unknown ContentChunk variant: {}", x)

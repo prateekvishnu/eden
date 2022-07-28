@@ -27,34 +27,26 @@
 #include <folly/system/Shell.h>
 #include <thrift/lib/cpp/util/EnumUtils.h>
 
-#ifndef _WIN32
-#include "eden/fs/fuse/FuseChannel.h"
-#include "eden/fs/inodes/InodeTable.h"
-#include "eden/fs/inodes/Overlay.h"
-#include "eden/fs/nfs/Nfsd3.h"
-#else
-#include "eden/fs/prjfs/PrjfsChannel.h" // @manual
-#endif // !_WIN32
-
-#ifdef EDEN_HAVE_USAGE_SERVICE
-#include "eden/fs/service/facebook/EdenFSSmartPlatformServiceEndpoint.h" // @manual
-#endif
-
 #include "eden/common/utils/ProcessNameCache.h"
 #include "eden/fs/config/CheckoutConfig.h"
+#include "eden/fs/fuse/FuseChannel.h"
 #include "eden/fs/inodes/EdenMount.h"
 #include "eden/fs/inodes/FileInode.h"
 #include "eden/fs/inodes/GlobNode.h"
 #include "eden/fs/inodes/InodeError.h"
 #include "eden/fs/inodes/InodeMap.h"
-#include "eden/fs/inodes/InodeOrTreeOrEntryLoader.h"
+#include "eden/fs/inodes/InodeTable.h"
+#include "eden/fs/inodes/Overlay.h"
 #include "eden/fs/inodes/Traverse.h"
 #include "eden/fs/inodes/TreeInode.h"
+#include "eden/fs/inodes/VirtualInodeLoader.h"
 #include "eden/fs/model/Blob.h"
 #include "eden/fs/model/BlobMetadata.h"
 #include "eden/fs/model/Hash.h"
 #include "eden/fs/model/Tree.h"
 #include "eden/fs/model/TreeEntry.h"
+#include "eden/fs/nfs/Nfsd3.h"
+#include "eden/fs/prjfs/PrjfsChannel.h"
 #include "eden/fs/service/EdenServer.h"
 #include "eden/fs/service/ThriftGlobImpl.h"
 #include "eden/fs/service/ThriftPermissionChecker.h"
@@ -81,6 +73,10 @@
 #include "eden/fs/utils/ProcUtil.h"
 #include "eden/fs/utils/StatTimes.h"
 #include "eden/fs/utils/UnboundedQueueExecutor.h"
+
+#ifdef EDEN_HAVE_USAGE_SERVICE
+#include "eden/fs/service/facebook/EdenFSSmartPlatformServiceEndpoint.h" // @manual
+#endif
 
 using folly::Future;
 using folly::makeFuture;
@@ -224,6 +220,8 @@ class PrefetchFetchContext : public ObjectFetchContext {
   folly::StringPiece endpoint_;
 };
 
+constexpr size_t kTraceBusCapacity = 25000;
+
 // Helper class to log where the request completes in Future
 class ThriftLogHelper {
  public:
@@ -232,28 +230,48 @@ class ThriftLogHelper {
 
   template <typename... Args>
   ThriftLogHelper(
+      std::shared_ptr<TraceBus<ThriftRequestTraceEvent>> traceBus,
       const folly::Logger& logger,
       folly::LogLevel level,
       folly::StringPiece itcFunctionName,
       folly::StringPiece itcFileName,
       uint32_t itcLineNumber,
+      std::shared_ptr<EdenStats> edenStats,
+      ThriftThreadStats::StatPtr statPtr,
       std::optional<pid_t> pid)
-      : itcFunctionName_(itcFunctionName),
+      : traceBus_{std::move(traceBus)},
+        requestId_(generateUniqueID()),
+        itcFunctionName_(itcFunctionName),
         itcFileName_(itcFileName),
         itcLineNumber_(itcLineNumber),
+        edenStats_{std::move(edenStats)},
+        statPtr_{std::move(statPtr)},
         level_(level),
         itcLogger_(logger),
         fetchContext_{pid, itcFunctionName},
-        prefetchFetchContext_{pid, itcFunctionName} {}
+        prefetchFetchContext_{pid, itcFunctionName} {
+    traceBus_->publish(
+        ThriftRequestTraceEvent::start(requestId_, itcFunctionName_, pid));
+  }
 
   ~ThriftLogHelper() {
     // Logging completion time for the request
     // The line number points to where the object was originally created
-    TLOG(itcLogger_, level_, itcFileName_, itcLineNumber_) << fmt::format(
-        "{}() took {} {}",
-        itcFunctionName_,
-        itcTimer_.elapsed().count(),
-        EDEN_MICRO);
+    auto elapsed = itcTimer_.elapsed();
+    auto level = level_;
+    if (elapsed > std::chrono::seconds(1)) {
+      // When a request takes over a second, let's raise the loglevel to draw
+      // attention to it
+      level += 1;
+    }
+    TLOG(itcLogger_, level, itcFileName_, itcLineNumber_) << fmt::format(
+        "{}() took {} {}", itcFunctionName_, elapsed.count(), EDEN_MICRO);
+    if (edenStats_) {
+      auto thriftStats = edenStats_->getThriftStatsForCurrentThread();
+      thriftStats.recordLatency(statPtr_, elapsed);
+    }
+    traceBus_->publish(ThriftRequestTraceEvent::finish(
+        requestId_, itcFunctionName_, fetchContext_.getClientPid()));
   }
 
   PrefetchFetchContext& getPrefetchFetchContext() {
@@ -269,9 +287,13 @@ class ThriftLogHelper {
   }
 
  private:
+  std::shared_ptr<TraceBus<ThriftRequestTraceEvent>> traceBus_;
+  uint64_t requestId_;
   folly::StringPiece itcFunctionName_;
   folly::StringPiece itcFileName_;
   uint32_t itcLineNumber_;
+  std::shared_ptr<EdenStats> edenStats_;
+  ThriftThreadStats::StatPtr statPtr_;
   folly::LogLevel level_;
   folly::Logger itcLogger_;
   folly::stop_watch<std::chrono::microseconds> itcTimer_ = {};
@@ -328,36 +350,51 @@ facebook::eden::InodePtr inodeFromUserPath(
     TLOG(logger, folly::LogLevel::level, fileName, lineNumber)        \
         << functionName << "(" << toDelimWrapper(__VA_ARGS__) << ")"; \
     return std::make_unique<ThriftLogHelper>(                         \
+        this->thriftRequestTraceBus_,                                 \
         logger,                                                       \
         folly::LogLevel::level,                                       \
         functionName,                                                 \
         fileName,                                                     \
         lineNumber,                                                   \
+        nullptr,                                                      \
+        nullptr,                                                      \
         getAndRegisterClientPid());                                   \
   }(__func__, __FILE__, __LINE__))
 
-// INSTRUMENT_THRIFT_CALL_WITH_FUNCTION_NAME_AND_PID works in the same way
-// as INSTRUMENT_THRIFT_CALL but takes the function name and pid
-// as a parameter in case of using inside of a lambda (in which case
-// __func__ is "()"). Also, the pid passed to this function must be
-// obtained from a Thrift worker thread because the calling pid is
-// stored in a thread local variable.
-
-#define INSTRUMENT_THRIFT_CALL_WITH_FUNCTION_NAME_AND_PID(            \
-    level, functionName, pid, ...)                                    \
-  ([&](folly::StringPiece fileName, uint32_t lineNumber) {            \
-    static folly::Logger logger(                                      \
-        "eden.thrift." + folly::to<string>(functionName));            \
+#define INSTRUMENT_THRIFT_CALL_WITH_STAT(level, stat, ...)            \
+  ([&](folly::StringPiece functionName,                               \
+       folly::StringPiece fileName,                                   \
+       uint32_t lineNumber) {                                         \
+    static folly::Logger logger("eden.thrift." + functionName.str()); \
     TLOG(logger, folly::LogLevel::level, fileName, lineNumber)        \
         << functionName << "(" << toDelimWrapper(__VA_ARGS__) << ")"; \
     return std::make_unique<ThriftLogHelper>(                         \
+        this->thriftRequestTraceBus_,                                 \
         logger,                                                       \
         folly::LogLevel::level,                                       \
         functionName,                                                 \
         fileName,                                                     \
         lineNumber,                                                   \
-        pid);                                                         \
-  }(__FILE__, __LINE__))
+        server_->getSharedStats(),                                    \
+        stat,                                                         \
+        getAndRegisterClientPid());                                   \
+  }(__func__, __FILE__, __LINE__))
+
+ThriftRequestTraceEvent ThriftRequestTraceEvent::start(
+    uint64_t requestId,
+    folly::StringPiece method,
+    std::optional<pid_t> clientPid) {
+  return ThriftRequestTraceEvent{
+      ThriftRequestTraceEvent::START, requestId, method, clientPid};
+}
+
+ThriftRequestTraceEvent ThriftRequestTraceEvent::finish(
+    uint64_t requestId,
+    folly::StringPiece method,
+    std::optional<pid_t> clientPid) {
+  return ThriftRequestTraceEvent{
+      ThriftRequestTraceEvent::START, requestId, method, clientPid};
+}
 
 namespace facebook::eden {
 
@@ -368,7 +405,10 @@ EdenServiceHandler::EdenServiceHandler(
     EdenServer* server)
     : BaseService{kServiceName},
       originalCommandLine_{std::move(originalCommandLine)},
-      server_{server} {
+      server_{server},
+      thriftRequestTraceBus_(TraceBus<ThriftRequestTraceEvent>::create(
+          "ThriftRequestTrace",
+          kTraceBusCapacity)) {
   struct HistConfig {
     int64_t bucketSize{250};
     int64_t min{0};
@@ -411,6 +451,21 @@ EdenServiceHandler::EdenServiceHandler(
       server_->getServerState()->getThreadPool(),
       server_->getServerState()->getEdenConfig());
 #endif
+
+  thriftRequestTraceSubscriptionHandles_.push_back(
+      thriftRequestTraceBus_->subscribeFunction(
+          "Outstanding Thrift request tracing",
+          [this](const ThriftRequestTraceEvent& event) {
+            switch (event.type) {
+              case ThriftRequestTraceEvent::START:
+                outstandingThriftRequests_.wlock()->emplace(
+                    event.requestId, event);
+                break;
+              case ThriftRequestTraceEvent::FINISH:
+                outstandingThriftRequests_.wlock()->erase(event.requestId);
+                break;
+            }
+          }));
 }
 
 EdenServiceHandler::~EdenServiceHandler() = default;
@@ -529,24 +584,29 @@ void EdenServiceHandler::resetParentCommits(
 }
 
 namespace {
-/**
- * Convert the passed in SyncBehavior to a chrono type.
- *
- * When the SyncBehavior is unset, this default to a timeout of 60 seconds.
- */
-std::chrono::seconds getSyncTimeout(const SyncBehavior& sync) {
-  auto seconds = sync.syncTimeoutSeconds_ref().value_or(60);
-  return std::chrono::seconds{seconds};
+int64_t getSyncTimeout(const SyncBehavior& sync) {
+  return sync.syncTimeoutSeconds().value_or(60);
 }
 
+/**
+ * Wait for all the pending notifications to be processed.
+ *
+ * When the SyncBehavior is unset, this default to a timeout of 60 seconds. A
+ * negative SyncBehavior mean to wait indefinitely.
+ */
 ImmediateFuture<folly::Unit> waitForPendingNotifications(
     const EdenMount& mount,
-    std::chrono::seconds timeout) {
-  if (timeout.count() == 0) {
+    const SyncBehavior& sync) {
+  auto seconds = getSyncTimeout(sync);
+  if (seconds == 0) {
     return folly::unit;
   }
 
-  return mount.waitForPendingNotifications().semi().within(timeout);
+  auto future = mount.waitForPendingNotifications().semi();
+  if (seconds > 0) {
+    future = std::move(future).within(std::chrono::seconds{seconds});
+  }
+  return std::move(future);
 }
 } // namespace
 
@@ -554,61 +614,70 @@ folly::SemiFuture<folly::Unit>
 EdenServiceHandler::semifuture_synchronizeWorkingCopy(
     std::unique_ptr<std::string> mountPoint,
     std::unique_ptr<SynchronizeWorkingCopyParams> params) {
-  auto timeout = getSyncTimeout(*params->sync_ref());
-  auto helper = INSTRUMENT_THRIFT_CALL(DBG3, *mountPoint, timeout.count());
+  auto helper = INSTRUMENT_THRIFT_CALL(
+      DBG3, *mountPoint, getSyncTimeout(*params->sync()));
   auto mountPath = AbsolutePathPiece{*mountPoint};
   auto edenMount = server_->getMount(mountPath);
 
   return wrapImmediateFuture(
              std::move(helper),
-             waitForPendingNotifications(*edenMount, timeout))
+             waitForPendingNotifications(*edenMount, *params->sync()))
       .semi();
 }
 
-void EdenServiceHandler::getSHA1(
-    vector<SHA1Result>& out,
-    unique_ptr<string> mountPoint,
-    unique_ptr<vector<string>> paths,
+folly::SemiFuture<std::unique_ptr<std::vector<SHA1Result>>>
+EdenServiceHandler::semifuture_getSHA1(
+    std::unique_ptr<string> mountPoint,
+    std::unique_ptr<vector<string>> paths,
     std::unique_ptr<SyncBehavior> sync) {
   TraceBlock block("getSHA1");
-  auto syncTimeout = getSyncTimeout(*sync);
   auto helper = INSTRUMENT_THRIFT_CALL(
-      DBG3, *mountPoint, syncTimeout.count(), toLogArg(*paths));
-  vector<ImmediateFuture<Hash20>> futures;
-  auto mountPath = AbsolutePathPiece{*mountPoint};
+      DBG3, *mountPoint, getSyncTimeout(*sync), toLogArg(*paths));
+  auto& fetchContext = helper->getFetchContext();
+  auto mountPath = AbsolutePath{std::move(*mountPoint)};
+  auto mount = server_->getMount(mountPath);
 
-  waitForPendingNotifications(*server_->getMount(mountPath), syncTimeout)
-      .thenValue([&](auto&&) {
-        for (const auto& path : *paths) {
-          futures.emplace_back(getSHA1ForPathDefensively(
-              mountPath, path, helper->getFetchContext()));
-        }
+  auto notificationFuture = waitForPendingNotifications(*mount, *sync);
+  return wrapImmediateFuture(
+             std::move(helper),
+             std::move(notificationFuture)
+                 .thenValue([this,
+                             mount = std::move(mount),
+                             paths = std::move(paths),
+                             &fetchContext](auto&&) mutable {
+                   std::vector<ImmediateFuture<Hash20>> futures;
+                   futures.reserve(paths->size());
+                   for (auto& path : *paths) {
+                     futures.push_back(makeImmediateFutureWith([&]() mutable {
+                       return getSHA1ForPath(
+                           *mount, RelativePath{std::move(path)}, fetchContext);
+                     }));
+                   }
 
-        auto results = collectAll(std::move(futures)).get();
-        for (auto& result : results) {
-          out.emplace_back();
-          SHA1Result& sha1Result = out.back();
-          if (result.hasValue()) {
-            sha1Result.sha1_ref() = thriftHash20(result.value());
-          } else {
-            sha1Result.error_ref() = newEdenError(result.exception());
-          }
-        }
-      })
-      .get();
-}
+                   return collectAll(std::move(futures))
+                       .ensure([mount = std::move(mount)] {});
+                 })
+                 .thenValue([](std::vector<folly::Try<Hash20>> results) {
+                   auto out = std::make_unique<std::vector<SHA1Result>>();
+                   out->reserve(results.size());
 
-ImmediateFuture<Hash20> EdenServiceHandler::getSHA1ForPathDefensively(
-    AbsolutePathPiece mountPoint,
-    StringPiece path,
-    ObjectFetchContext& fetchContext) noexcept {
-  return makeImmediateFutureWith(
-      [&] { return getSHA1ForPath(mountPoint, path, fetchContext); });
+                   for (auto& result : results) {
+                     auto& sha1Result = out->emplace_back();
+                     if (result.hasValue()) {
+                       sha1Result.sha1_ref() = thriftHash20(result.value());
+                     } else {
+                       sha1Result.error_ref() =
+                           newEdenError(result.exception());
+                     }
+                   }
+                   return out;
+                 }))
+      .semi();
 }
 
 ImmediateFuture<Hash20> EdenServiceHandler::getSHA1ForPath(
-    AbsolutePathPiece mountPoint,
-    StringPiece path,
+    const EdenMount& edenMount,
+    RelativePath path,
     ObjectFetchContext& fetchContext) {
   if (path.empty()) {
     return ImmediateFuture<Hash20>(newEdenError(
@@ -617,17 +686,17 @@ ImmediateFuture<Hash20> EdenServiceHandler::getSHA1ForPath(
         "path cannot be the empty string"));
   }
 
-  auto edenMount = server_->getMount(mountPoint);
-  auto objectStore = edenMount->getObjectStore();
-  auto relativePath = RelativePathPiece{path};
-  return edenMount->getInodeOrTreeOrEntry(relativePath, fetchContext)
-      .thenValue([relativePath, objectStore, &fetchContext](
-                     const InodeOrTreeOrEntry& inodeOrTree) {
-        return inodeOrTree.getSHA1(relativePath, objectStore, fetchContext);
+  auto* objectStore = edenMount.getObjectStore();
+  auto inodeFut = edenMount.getVirtualInode(path, fetchContext);
+  return std::move(inodeFut).thenValue(
+      [path = std::move(path), objectStore, &fetchContext](
+          const VirtualInode& virtualInode) {
+        return virtualInode.getSHA1(path, objectStore, fetchContext);
       });
 }
 
 ImmediateFuture<EntryAttributes> EdenServiceHandler::getEntryAttributesForPath(
+    EntryAttributeFlags reqBitmask,
     AbsolutePathPiece mountPoint,
     StringPiece path,
     ObjectFetchContext& fetchContext) {
@@ -643,11 +712,11 @@ ImmediateFuture<EntryAttributes> EdenServiceHandler::getEntryAttributesForPath(
     auto objectStore = edenMount->getObjectStore();
     auto relativePath = RelativePathPiece{path};
 
-    return edenMount->getInodeOrTreeOrEntry(relativePath, fetchContext)
-        .thenValue([relativePath, objectStore, &fetchContext](
-                       const InodeOrTreeOrEntry& inodeOrTree) {
-          return inodeOrTree.getEntryAttributes(
-              relativePath, objectStore, fetchContext);
+    return edenMount->getVirtualInode(relativePath, fetchContext)
+        .thenValue([reqBitmask, relativePath, objectStore, &fetchContext](
+                       const VirtualInode& virtualInode) {
+          return virtualInode.getEntryAttributes(
+              reqBitmask, relativePath, objectStore, fetchContext);
         });
   } catch (const std::exception& e) {
     return ImmediateFuture<EntryAttributes>(
@@ -934,6 +1003,53 @@ PrjfsCall populatePrjfsCall(const PrjfsTraceEvent& event) {
 }
 #endif
 
+ThriftRequestMetadata populateThriftRequestMetadata(
+    const ThriftRequestTraceEvent& request) {
+  ThriftRequestMetadata thriftRequestMetadata;
+  thriftRequestMetadata.requestId() = request.requestId;
+  thriftRequestMetadata.method() = request.method;
+  if (request.clientPid.has_value()) {
+    thriftRequestMetadata.clientPid() = request.clientPid.value();
+  }
+  return thriftRequestMetadata;
+}
+
+apache::thrift::ServerStream<ThriftRequestEvent>
+EdenServiceHandler::traceThriftRequestEvents() {
+  auto helper = INSTRUMENT_THRIFT_CALL(DBG3);
+
+  struct SubscriptionHandleOwner {
+    TraceBus<ThriftRequestTraceEvent>::SubscriptionHandle handle;
+  };
+
+  auto h = std::make_shared<SubscriptionHandleOwner>();
+
+  auto [serverStream, publisher] =
+      apache::thrift::ServerStream<ThriftRequestEvent>::createPublisher([h] {
+        // on disconnect, release subscription handle
+      });
+
+  h->handle = thriftRequestTraceBus_->subscribeFunction(
+      "Live Thrift request tracing",
+      [publisher = ThriftStreamPublisherOwner{std::move(publisher)}](
+          const ThriftRequestTraceEvent& traceEvent) mutable {
+        ThriftRequestEvent event;
+        event.times_ref() = thriftTraceEventTimes(traceEvent);
+        switch (traceEvent.type) {
+          case ThriftRequestTraceEvent::START:
+            event.eventType() = ThriftRequestEventType::START;
+            break;
+          case ThriftRequestTraceEvent::FINISH:
+            event.eventType() = ThriftRequestEventType::FINISH;
+            break;
+        }
+        event.requestMetadata_ref() = populateThriftRequestMetadata(traceEvent);
+        publisher.next(event);
+      });
+
+  return std::move(serverStream);
+}
+
 apache::thrift::ServerStream<FsEvent> EdenServiceHandler::traceFsEvents(
     std::unique_ptr<std::string> mountPoint,
     int64_t eventCategoryMask) {
@@ -995,9 +1111,8 @@ apache::thrift::ServerStream<FsEvent> EdenServiceHandler::traceFsEvents(
   if (prjfsChannel) {
     context->subHandle = prjfsChannel->getTraceBusPtr()->subscribeFunction(
         folly::to<std::string>("strace-", edenMount->getPath().basename()),
-        [publisher = ThriftStreamPublisherOwner{std::move(publisher)},
-         serverState =
-             server_->getServerState()](const PrjfsTraceEvent& event) {
+        [publisher = ThriftStreamPublisherOwner{std::move(publisher)}](
+            const PrjfsTraceEvent& event) {
           FsEvent te;
           auto times = thriftTraceEventTimes(event);
           te.times_ref() = times;
@@ -1071,7 +1186,6 @@ apache::thrift::ServerStream<FsEvent> EdenServiceHandler::traceFsEvents(
     context->subHandle = nfsdChannel->getTraceBus().subscribeFunction(
         folly::to<std::string>("strace-", edenMount->getPath().basename()),
         [publisher = ThriftStreamPublisherOwner{std::move(publisher)},
-         serverState = server_->getServerState(),
          eventCategoryMask](const NfsTraceEvent& event) {
           if (isEventMasked(eventCategoryMask, event)) {
             return;
@@ -1153,9 +1267,8 @@ apache::thrift::ServerStream<HgEvent> EdenServiceHandler::traceHgEvents(
 
   context->subHandle = hgBackingStore->getTraceBus().subscribeFunction(
       folly::to<std::string>("hgtrace-", edenMount->getPath().basename()),
-      [publisher = ThriftStreamPublisherOwner{std::move(publisher)},
-       serverState =
-           server_->getServerState()](const HgImportTraceEvent& event) {
+      [publisher = ThriftStreamPublisherOwner{std::move(publisher)}](
+          const HgImportTraceEvent& event) {
         HgEvent te;
         te.times_ref() = thriftTraceEventTimes(event);
         switch (event.eventType) {
@@ -1215,6 +1328,64 @@ apache::thrift::ServerStream<HgEvent> EdenServiceHandler::traceHgEvents(
         // te.requestInfo_ref() = thriftRequestInfo(pid);
 
         publisher.next(te);
+      });
+
+  return std::move(serverStream);
+}
+
+/**
+ * Helper function to convert an InodeTraceEvent to a thrift InodeEvent type.
+ * Used in EdenServiceHandler::traceInodeEvents and
+ * EdenServiceHandler::getRetroactiveInodeEvents. Note paths are not set here
+ * and are set by the calling functions. For traceInodeEvents full paths may
+ * need to be computed whereas for getRetroactiveInodeEvents full paths would
+ * have already been computed when the event gets added to the ActivityBuffer.
+ */
+void ConvertInodeTraceEventToThriftInodeEvent(
+    InodeTraceEvent traceEvent,
+    InodeEvent& thriftEvent) {
+  thriftEvent.times() = thriftTraceEventTimes(traceEvent);
+  thriftEvent.ino() = traceEvent.ino.getRawValue();
+  thriftEvent.inodeType() = traceEvent.inodeType;
+  thriftEvent.eventType() = traceEvent.eventType;
+  thriftEvent.progress() = traceEvent.progress;
+  thriftEvent.duration() = traceEvent.duration.count();
+  // TODO: trace requesting pid
+  // thriftEvent.requestInfo() = thriftRequestInfo(pid);
+}
+
+apache::thrift::ServerStream<InodeEvent> EdenServiceHandler::traceInodeEvents(
+    std::unique_ptr<std::string> mountPoint) {
+  auto helper = INSTRUMENT_THRIFT_CALL(DBG3, *mountPoint);
+  auto mountPath = AbsolutePathPiece{*mountPoint};
+  auto edenMount = server_->getMount(mountPath);
+  auto inodeMap = server_->getMount(mountPath)->getInodeMap();
+
+  struct Context {
+    TraceSubscriptionHandle<InodeTraceEvent> subHandle;
+  };
+
+  auto context = std::make_shared<Context>();
+
+  auto [serverStream, publisher] =
+      apache::thrift::ServerStream<InodeEvent>::createPublisher([context] {
+        // on disconnect, release context and the TraceSubscriptionHandle
+      });
+
+  context->subHandle = edenMount->getInodeTraceBus().subscribeFunction(
+      folly::to<std::string>("inodetrace-", edenMount->getPath().basename()),
+      [publisher = ThriftStreamPublisherOwner{std::move(publisher)},
+       inodeMap](const InodeTraceEvent& event) {
+        InodeEvent thriftEvent;
+        ConvertInodeTraceEventToThriftInodeEvent(event, thriftEvent);
+        try {
+          auto relativePath = inodeMap->getPathForInode(event.ino);
+          thriftEvent.path() = relativePath ? relativePath->stringPiece().str()
+                                            : event.getPath();
+        } catch (const std::system_error& /* e */) {
+          thriftEvent.path() = event.getPath();
+        }
+        publisher.next(thriftEvent);
       });
 
   return std::move(serverStream);
@@ -1289,7 +1460,8 @@ class StreamingDiffCallback : public DiffCallback {
 apache::thrift::ResponseAndServerStream<ChangesSinceResult, ChangedFileResult>
 EdenServiceHandler::streamChangesSince(
     std::unique_ptr<StreamChangesSinceParams> params) {
-  auto helper = INSTRUMENT_THRIFT_CALL(DBG3, *params->mountPoint_ref());
+  auto helper = INSTRUMENT_THRIFT_CALL_WITH_STAT(
+      DBG3, &ThriftThreadStats::streamChangesSince, *params->mountPoint_ref());
   auto mountPath = AbsolutePathPiece{*params->mountPoint_ref()};
   auto edenMount = server_->getMount(mountPath);
   const auto& fromPosition = *params->fromPosition_ref();
@@ -1385,8 +1557,17 @@ EdenServiceHandler::streamChangesSince(
       const auto& from = *rootIt;
       const auto& to = *(rootIt + 1);
 
-      futures.push_back(edenMount->diffBetweenRoots(
-          from, to, cancellationSource->getToken(), callback.get()));
+      // Make sure that the diffBetweenRoots is not run immediately.
+      auto semi = folly::makeSemiFuture().deferValue(
+          [from,
+           to,
+           edenMount = edenMount.get(),
+           token = cancellationSource->getToken(),
+           callback = callback.get()](auto&&) {
+            return edenMount->diffBetweenRoots(from, to, token, callback)
+                .semi();
+          });
+      futures.push_back(ImmediateFuture{std::move(semi)});
     }
 
     folly::futures::detachOn(
@@ -1484,7 +1665,7 @@ void EdenServiceHandler::getFilesChangedSince(
 void EdenServiceHandler::setJournalMemoryLimit(
     std::unique_ptr<PathString> mountPoint,
     int64_t limit) {
-  auto helper = INSTRUMENT_THRIFT_CALL(DBG3, *mountPoint);
+  auto helper = INSTRUMENT_THRIFT_CALL(DBG2, *mountPoint);
   auto mountPath = AbsolutePathPiece{*mountPoint};
   auto edenMount = server_->getMount(mountPath);
   if (limit < 0) {
@@ -1498,14 +1679,14 @@ void EdenServiceHandler::setJournalMemoryLimit(
 
 int64_t EdenServiceHandler::getJournalMemoryLimit(
     std::unique_ptr<PathString> mountPoint) {
-  auto helper = INSTRUMENT_THRIFT_CALL(DBG3, *mountPoint);
+  auto helper = INSTRUMENT_THRIFT_CALL(DBG2, *mountPoint);
   auto mountPath = AbsolutePathPiece{*mountPoint};
   auto edenMount = server_->getMount(mountPath);
   return static_cast<int64_t>(edenMount->getJournal().getMemoryLimit());
 }
 
 void EdenServiceHandler::flushJournal(std::unique_ptr<PathString> mountPoint) {
-  auto helper = INSTRUMENT_THRIFT_CALL(DBG3, *mountPoint);
+  auto helper = INSTRUMENT_THRIFT_CALL(DBG2, *mountPoint);
   auto mountPath = AbsolutePathPiece{*mountPoint};
   auto edenMount = server_->getMount(mountPath);
   edenMount->getJournal().flush();
@@ -1514,7 +1695,7 @@ void EdenServiceHandler::flushJournal(std::unique_ptr<PathString> mountPoint) {
 void EdenServiceHandler::debugGetRawJournal(
     DebugGetRawJournalResponse& out,
     std::unique_ptr<DebugGetRawJournalParams> params) {
-  auto helper = INSTRUMENT_THRIFT_CALL(DBG3, *params->mountPoint_ref());
+  auto helper = INSTRUMENT_THRIFT_CALL(DBG2, *params->mountPoint_ref());
   auto mountPath = AbsolutePathPiece{*params->mountPoint_ref()};
   auto edenMount = server_->getMount(mountPath);
   auto mountGeneration = static_cast<ssize_t>(edenMount->getMountGeneration());
@@ -1536,9 +1717,8 @@ EdenServiceHandler::semifuture_getEntryInformation(
     std::unique_ptr<std::string> mountPoint,
     std::unique_ptr<std::vector<std::string>> paths,
     std::unique_ptr<SyncBehavior> sync) {
-  auto syncTimeout = getSyncTimeout(*sync);
   auto helper = INSTRUMENT_THRIFT_CALL(
-      DBG3, *mountPoint, syncTimeout.count(), toLogArg(*paths));
+      DBG3, *mountPoint, getSyncTimeout(*sync), toLogArg(*paths));
   auto mountPath = AbsolutePathPiece{*mountPoint};
   auto edenMount = server_->getMount(mountPath);
   auto rootInode = edenMount->getRootInode();
@@ -1547,15 +1727,15 @@ EdenServiceHandler::semifuture_getEntryInformation(
 
   return wrapImmediateFuture(
              std::move(helper),
-             waitForPendingNotifications(*edenMount, syncTimeout)
+             waitForPendingNotifications(*edenMount, *sync)
                  .thenValue([rootInode = std::move(rootInode),
                              paths = std::move(paths),
                              objectStore,
                              &fetchContext](auto&&) {
-                   return collectAll(applyToInodeOrTreeOrEntry(
+                   return collectAll(applyToVirtualInode(
                                          rootInode,
                                          *paths,
-                                         [](const InodeOrTreeOrEntry& inode) {
+                                         [](const VirtualInode& inode) {
                                            return inode.getDtype();
                                          },
                                          objectStore,
@@ -1588,9 +1768,8 @@ EdenServiceHandler::semifuture_getFileInformation(
     std::unique_ptr<std::string> mountPoint,
     std::unique_ptr<std::vector<std::string>> paths,
     std::unique_ptr<SyncBehavior> sync) {
-  auto syncTimeout = getSyncTimeout(*sync);
   auto helper = INSTRUMENT_THRIFT_CALL(
-      DBG3, *mountPoint, syncTimeout.count(), toLogArg(*paths));
+      DBG3, *mountPoint, getSyncTimeout(*sync), toLogArg(*paths));
   auto mountPath = AbsolutePathPiece{*mountPoint};
   auto edenMount = server_->getMount(mountPath);
   auto rootInode = edenMount->getRootInode();
@@ -1600,20 +1779,19 @@ EdenServiceHandler::semifuture_getFileInformation(
 
   return wrapImmediateFuture(
              std::move(helper),
-             waitForPendingNotifications(*edenMount, syncTimeout)
+             waitForPendingNotifications(*edenMount, *sync)
                  .thenValue([rootInode = std::move(rootInode),
                              paths = std::move(paths),
                              lastCheckoutTime,
                              objectStore,
                              &fetchContext](auto&&) {
                    return collectAll(
-                              applyToInodeOrTreeOrEntry(
+                              applyToVirtualInode(
                                   rootInode,
                                   *paths,
                                   [lastCheckoutTime,
                                    objectStore,
-                                   &fetchContext](
-                                      const InodeOrTreeOrEntry& inode) {
+                                   &fetchContext](const VirtualInode& inode) {
                                     return inode
                                         .stat(
                                             lastCheckoutTime,
@@ -1659,9 +1837,6 @@ EdenServiceHandler::semifuture_getFileInformation(
       .semi();
 }
 
-#define ATTR_BITMASK(req, attr) \
-  ((req) & static_cast<uint64_t>((FileAttributes::attr)))
-
 namespace {
 SourceControlType entryTypeToThriftType(TreeEntryType type) {
   switch (type) {
@@ -1677,7 +1852,178 @@ SourceControlType entryTypeToThriftType(TreeEntryType type) {
       throw std::system_error(EINVAL, std::generic_category());
   }
 }
+
+ImmediateFuture<
+    std::vector<std::pair<PathComponent, folly::Try<EntryAttributes>>>>
+getAllEntryAttributes(
+    EntryAttributeFlags requestedAttributes,
+    const EdenMount& edenMount,
+    std::string path,
+    ObjectFetchContext& fetchContext) {
+  auto virtualInode =
+      edenMount.getVirtualInode(RelativePathPiece{path}, fetchContext);
+  return std::move(virtualInode)
+      .thenValue([path = std::move(path),
+                  requestedAttributes,
+                  objectStore = edenMount.getObjectStore(),
+                  &fetchContext](VirtualInode tree) mutable {
+        if (!tree.isDirectory()) {
+          return ImmediateFuture<std::vector<
+              std::pair<PathComponent, folly::Try<EntryAttributes>>>>(
+              newEdenError(
+                  EINVAL,
+                  EdenErrorType::ARGUMENT_ERROR,
+                  fmt::format("{}: path must be a directory", path)));
+        }
+        return tree.getChildrenAttributes(
+            requestedAttributes, RelativePath{path}, objectStore, fetchContext);
+      });
+}
+
+template <typename SerializedT, typename T>
+bool fillErrorRef(
+    SerializedT& result,
+    std::optional<folly::Try<T>> rawResult,
+    PathComponentPiece path,
+    folly::StringPiece attributeName) {
+  if (!rawResult.has_value()) {
+    result.error_ref() = newEdenError(
+        EdenErrorType::GENERIC_ERROR,
+        fmt::format(
+            "{}: {} requested, but no {} available",
+            path,
+            attributeName,
+            attributeName));
+    return true;
+  }
+  if (rawResult.value().hasException()) {
+    result.error_ref() = newEdenError(rawResult.value().exception());
+    return true;
+  }
+  return false;
+}
+
+DirListAttributeDataOrError serializeEntryAttributes(
+    const folly::Try<std::vector<
+        std::pair<PathComponent, folly::Try<EntryAttributes>>>>& entries,
+    EntryAttributeFlags requestedAttributes) {
+  DirListAttributeDataOrError result;
+  if (entries.hasException()) {
+    result.error_ref() = newEdenError(*entries.exception().get_exception());
+    return result;
+  }
+  std::map<std::string, FileAttributeDataOrErrorV2> thriftEntryResult;
+  for (auto& entry : entries.value()) {
+    FileAttributeDataOrErrorV2 fileResult;
+
+    if (entry.second.hasException()) {
+      fileResult.error_ref() = newEdenError(entry.second.exception());
+    } else {
+      FileAttributeDataV2 fileData;
+      if (requestedAttributes.contains(ENTRY_ATTRIBUTE_SHA1)) {
+        Sha1OrError sha1;
+        if (!fillErrorRef<Sha1OrError, Hash20>(
+                sha1, entry.second->sha1, entry.first.piece(), "sha1")) {
+          sha1.sha1_ref() = thriftHash20(entry.second->sha1.value().value());
+        }
+        fileData.sha1() = std::move(sha1);
+      }
+
+      if (requestedAttributes.contains(ENTRY_ATTRIBUTE_SIZE)) {
+        SizeOrError size;
+        if (!fillErrorRef<SizeOrError, uint64_t>(
+                size, entry.second->size, entry.first.piece(), "size")) {
+          size.size_ref() = entry.second->size.value().value();
+        }
+        fileData.size() = std::move(size);
+      }
+
+      if (requestedAttributes.contains(ENTRY_ATTRIBUTE_TYPE)) {
+        SourceControlTypeOrError type;
+        if (!fillErrorRef<SourceControlTypeOrError, TreeEntryType>(
+                type, entry.second->type, entry.first, "type")) {
+          type.sourceControlType_ref() =
+              entryTypeToThriftType(entry.second->type.value().value());
+        }
+        fileData.sourceControlType() = std::move(type);
+      }
+      fileResult.fileAttributeData_ref() = fileData;
+    }
+
+    thriftEntryResult.emplace(
+        entry.first.stringPiece().str(), std::move(fileResult));
+  }
+
+  result.dirListAttributeData_ref() = std::move(thriftEntryResult);
+  return result;
+}
+
 } // namespace
+
+folly::SemiFuture<std::unique_ptr<ReaddirResult>>
+EdenServiceHandler::semifuture_readdir(std::unique_ptr<ReaddirParams> params) {
+  auto mountPoint = params->get_mountPoint();
+  auto mountPath = AbsolutePathPiece{mountPoint};
+  auto paths = params->get_directoryPaths();
+  // Get requested attributes for each path
+  auto helper = INSTRUMENT_THRIFT_CALL(
+      DBG3, mountPoint, getSyncTimeout(*params->sync()), toLogArg(paths));
+  auto& fetchContext = helper->getFetchContext();
+  auto requestedAttributes =
+      EntryAttributeFlags::raw(params->get_requestedAttributes());
+  return wrapImmediateFuture(
+             std::move(helper),
+             waitForPendingNotifications(
+                 *server_->getMount(mountPath), *params->sync())
+                 .thenValue(
+                     [this,
+                      requestedAttributes,
+                      paths = std::move(paths),
+                      &fetchContext,
+                      mountPath = mountPath.copy()](auto&&) mutable
+                     -> ImmediateFuture<
+                         std::vector<DirListAttributeDataOrError>> {
+                       std::vector<ImmediateFuture<DirListAttributeDataOrError>>
+                           futures;
+                       futures.reserve(paths.size());
+                       auto edenMount = server_->getMount(mountPath);
+                       for (auto& path : paths) {
+                         futures.emplace_back(
+                             getAllEntryAttributes(
+                                 requestedAttributes,
+                                 *edenMount,
+                                 std::move(path),
+                                 fetchContext)
+                                 .thenTry([requestedAttributes](
+                                              folly::Try<std::vector<std::pair<
+                                                  PathComponent,
+                                                  folly::Try<EntryAttributes>>>>
+                                                  entries) {
+                                   return serializeEntryAttributes(
+                                       entries, requestedAttributes);
+                                 })
+
+                         );
+                       }
+
+                       // Collect all futures into a single tuple
+                       return facebook::eden::collectAllSafe(
+                           std::move(futures));
+                     })
+                 .thenValue(
+                     [](std::vector<DirListAttributeDataOrError>&& allRes)
+                         -> std::unique_ptr<ReaddirResult> {
+                       auto res = std::make_unique<ReaddirResult>();
+                       res->dirLists() = std::move(allRes);
+                       return res;
+                     }))
+      .semi();
+}
+
+// TODO(kmancini): we shouldn't need this for the long term, but needs to be
+// updated if attributes are added.
+constexpr EntryAttributeFlags kAllEntryAttributes =
+    ENTRY_ATTRIBUTE_SIZE | ENTRY_ATTRIBUTE_SHA1 | ENTRY_ATTRIBUTE_TYPE;
 
 folly::SemiFuture<std::unique_ptr<GetAttributesFromFilesResult>>
 EdenServiceHandler::semifuture_getAttributesFromFiles(
@@ -1685,17 +2031,16 @@ EdenServiceHandler::semifuture_getAttributesFromFiles(
   auto mountPoint = params->get_mountPoint();
   auto mountPath = AbsolutePathPiece{mountPoint};
   auto paths = params->get_paths();
-  auto reqBitmask = params->get_requestedAttributes();
-  auto syncTimeout = getSyncTimeout(*params->sync_ref());
+  auto reqBitmask = EntryAttributeFlags::raw(params->get_requestedAttributes());
   // Get requested attributes for each path
   auto helper = INSTRUMENT_THRIFT_CALL(
-      DBG3, mountPoint, syncTimeout.count(), toLogArg(paths));
+      DBG3, mountPoint, getSyncTimeout(*params->sync()), toLogArg(paths));
   auto& fetchContext = helper->getFetchContext();
 
   return wrapImmediateFuture(
              std::move(helper),
              waitForPendingNotifications(
-                 *server_->getMount(mountPath), syncTimeout)
+                 *server_->getMount(mountPath), *params->sync())
                  .thenValue([this,
                              paths = std::move(paths),
                              &fetchContext,
@@ -1703,8 +2048,14 @@ EdenServiceHandler::semifuture_getAttributesFromFiles(
                              reqBitmask](auto&&) mutable {
                    vector<ImmediateFuture<EntryAttributes>> futures;
                    for (const auto& p : paths) {
-                     futures.emplace_back(
-                         getEntryAttributesForPath(mountPath, p, fetchContext));
+                     // Buck2 relies on getAttributesFromFiles returning certain
+                     // specific errors. So we need to preserve behavior of all
+                     // ways fetching sll attributes.
+                     // TODO(kmancini): When Buck2 migrates to our
+                     // explicit type information, we can get shape up
+                     // this API better.
+                     futures.emplace_back(getEntryAttributesForPath(
+                         kAllEntryAttributes, mountPath, p, fetchContext));
                    }
 
                    // Collect all futures into a single tuple
@@ -1714,12 +2065,6 @@ EdenServiceHandler::semifuture_getAttributesFromFiles(
                                           allRes) {
                          auto res =
                              std::make_unique<GetAttributesFromFilesResult>();
-                         auto sizeRequested =
-                             ATTR_BITMASK(reqBitmask, FILE_SIZE);
-                         auto sha1Requested =
-                             ATTR_BITMASK(reqBitmask, SHA1_HASH);
-                         auto typeRequested =
-                             ATTR_BITMASK(reqBitmask, SOURCE_CONTROL_TYPE);
 
                          size_t index = 0;
                          for (const auto& tryAttributes : allRes) {
@@ -1738,28 +2083,49 @@ EdenServiceHandler::semifuture_getAttributesFromFiles(
                              // TODO(kmancini): When Buck2 migrates to our
                              // explicit type information, we can get shape up
                              // this API better.
-                             if (attributes.sha1.hasException()) {
-                               file_res.error_ref() =
-                                   newEdenError(attributes.sha1.exception());
-                             } else if (attributes.size.hasException()) {
-                               file_res.error_ref() =
-                                   newEdenError(attributes.size.exception());
-                             } else if (attributes.type.hasException()) {
-                               file_res.error_ref() =
-                                   newEdenError(attributes.type.exception());
+                             if (!attributes.sha1.has_value()) {
+                               file_res.error_ref() = newEdenError(
+                                   EdenErrorType::GENERIC_ERROR,
+                                   fmt::format(
+                                       "{}: sha1 requested, but no type available",
+                                       paths.at(index)));
+                             } else if (attributes.sha1.value()
+                                            .hasException()) {
+                               file_res.error_ref() = newEdenError(
+                                   attributes.sha1.value().exception());
+                             } else if (!attributes.size.has_value()) {
+                               file_res.error_ref() = newEdenError(
+                                   EdenErrorType::GENERIC_ERROR,
+                                   fmt::format(
+                                       "{}: size requested, but no type available",
+                                       paths.at(index)));
+                             } else if (attributes.size.value()
+                                            .hasException()) {
+                               file_res.error_ref() = newEdenError(
+                                   attributes.size.value().exception());
+                             } else if (!attributes.type.has_value()) {
+                               file_res.error_ref() = newEdenError(
+                                   EdenErrorType::GENERIC_ERROR,
+                                   fmt::format(
+                                       "{}: type requested, but no type available",
+                                       paths.at(index)));
+                             } else if (attributes.type.value()
+                                            .hasException()) {
+                               file_res.error_ref() = newEdenError(
+                                   attributes.type.value().exception());
                              } else {
                                // Only fill in requested fields
-                               if (sha1Requested) {
-                                 file_data.sha1_ref() =
-                                     thriftHash20(attributes.sha1.value());
+                               if (reqBitmask.contains(ENTRY_ATTRIBUTE_SHA1)) {
+                                 file_data.sha1_ref() = thriftHash20(
+                                     attributes.sha1.value().value());
                                }
-                               if (sizeRequested) {
+                               if (reqBitmask.contains(ENTRY_ATTRIBUTE_SIZE)) {
                                  file_data.fileSize_ref() =
-                                     attributes.size.value();
+                                     attributes.size.value().value();
                                }
-                               if (typeRequested) {
+                               if (reqBitmask.contains(ENTRY_ATTRIBUTE_TYPE)) {
                                  file_data.type_ref() = entryTypeToThriftType(
-                                     attributes.type.value());
+                                     attributes.type.value().value());
                                }
                                file_res.data_ref() = file_data;
                              }
@@ -1815,7 +2181,6 @@ folly::SemiFuture<folly::Unit> EdenServiceHandler::semifuture_removeRecursively(
     std::unique_ptr<RemoveRecursivelyParams> params) {
   auto mountPoint = params->get_mountPoint();
   auto repoPath = params->get_path();
-  auto syncTimeout = getSyncTimeout(*params->sync_ref());
 
   auto helper = INSTRUMENT_THRIFT_CALL(DBG2, mountPoint, repoPath);
   auto mountPath = AbsolutePathPiece{mountPoint};
@@ -1829,7 +2194,7 @@ folly::SemiFuture<folly::Unit> EdenServiceHandler::semifuture_removeRecursively(
                            ->getParentRacy();
   return wrapImmediateFuture(
              std::move(helper),
-             waitForPendingNotifications(*edenMount, syncTimeout)
+             waitForPendingNotifications(*edenMount, *params->sync())
                  .thenValue([inode = std::move(inode),
                              relativePath = std::move(relativePath),
                              &fetchContext](auto&&) {
@@ -1842,8 +2207,8 @@ folly::SemiFuture<folly::Unit> EdenServiceHandler::semifuture_removeRecursively(
 }
 
 namespace {
-folly::Future<std::unique_ptr<Glob>> detachIfBackgrounded(
-    folly::Future<std::unique_ptr<Glob>> globFuture,
+ImmediateFuture<std::unique_ptr<Glob>> detachIfBackgrounded(
+    ImmediateFuture<std::unique_ptr<Glob>> globFuture,
     const std::shared_ptr<ServerState>& serverState,
     bool background) {
   if (!background) {
@@ -1851,22 +2216,91 @@ folly::Future<std::unique_ptr<Glob>> detachIfBackgrounded(
   } else {
     folly::futures::detachOn(
         serverState->getThreadPool().get(), std::move(globFuture).semi());
-    return folly::makeFuture<std::unique_ptr<Glob>>(std::make_unique<Glob>());
+    return ImmediateFuture<std::unique_ptr<Glob>>(std::make_unique<Glob>());
   }
 }
 } // namespace
 
-folly::Future<std::unique_ptr<Glob>>
-EdenServiceHandler::future_predictiveGlobFiles(
+#ifndef _WIN32
+namespace {
+ImmediateFuture<folly::Unit> ensureMaterializedImpl(
+    const EdenMount& edenMount,
+    const std::vector<std::string>& repoPaths,
+    std::unique_ptr<ThriftLogHelper> helper,
+    bool followSymlink) {
+  std::vector<ImmediateFuture<folly::Unit>> futures;
+  futures.reserve(repoPaths.size());
+
+  auto& fetchContext = helper->getFetchContext();
+
+  for (auto& path : repoPaths) {
+    futures.emplace_back(
+        edenMount.getInodeSlow(RelativePath{path}, fetchContext)
+            .thenValue([&fetchContext, followSymlink](InodePtr inode) {
+              return inode->ensureMaterialized(fetchContext, followSymlink)
+                  .ensure([inode]() {});
+            }));
+  }
+
+  return wrapImmediateFuture(
+      std::move(helper), collectAll(std::move(futures)).unit());
+}
+} // namespace
+#endif
+
+folly::SemiFuture<folly::Unit>
+EdenServiceHandler::semifuture_ensureMaterialized(
+    std::unique_ptr<EnsureMaterializedParams> params) {
+#ifndef _WIN32
+  auto mountPoint = params->get_mountPoint();
+  auto helper = INSTRUMENT_THRIFT_CALL(
+      DBG4, mountPoint, folly::join(",", params->get_paths()));
+
+  auto edenMount = server_->getMount(AbsolutePathPiece{mountPoint});
+  // The background mode is not fully running on background, instead, it will
+  // start to load inodes in a blocking way, and then collect unready
+  // materialization process then throws to the background. This is most
+  // effecient way for the local execution of virtualized buck-out as avoid
+  // cache exchange by materializing smaller random reads, and not prevent
+  // execution starting by read large files on the background.
+  bool background = params->get_background();
+
+  auto waitForPendingNotificationsFuture =
+      waitForPendingNotifications(*edenMount, *params->sync());
+  auto ensureMaterializedFuture =
+      std::move(waitForPendingNotificationsFuture)
+          .thenValue([params = std::move(params),
+                      edenMount = std::move(edenMount),
+                      helper = std::move(helper)](auto&&) mutable {
+            return ensureMaterializedImpl(
+                *edenMount,
+                params->get_paths(),
+                std::move(helper),
+                params->get_followSymlink());
+          })
+          .semi();
+
+  if (background) {
+    folly::futures::detachOn(
+        server_->getServerState()->getThreadPool().get(),
+        std::move(ensureMaterializedFuture));
+    return folly::unit;
+  } else {
+    return ensureMaterializedFuture;
+  }
+#else
+  (void)params;
+  NOT_IMPLEMENTED();
+#endif
+}
+
+folly::SemiFuture<std::unique_ptr<Glob>>
+EdenServiceHandler::semifuture_predictiveGlobFiles(
     std::unique_ptr<GlobParams> params) {
 #ifdef EDEN_HAVE_USAGE_SERVICE
   ThriftGlobImpl globber{*params};
-  auto helper = INSTRUMENT_THRIFT_CALL_WITH_FUNCTION_NAME_AND_PID(
-      DBG3,
-      __func__,
-      getAndRegisterClientPid(),
-      *params->mountPoint_ref(),
-      globber.logString());
+  auto helper = INSTRUMENT_THRIFT_CALL(
+      DBG3, *params->mountPoint_ref(), globber.logString());
 
   auto& mountPoint = *params->mountPoint_ref();
   /* set predictive glob fetch parameters */
@@ -1924,36 +2358,44 @@ EdenServiceHandler::future_predictiveGlobFiles(
   bool background = *params->background();
 
   auto future =
-      spServiceEndpoint_
-          ->getTopUsedDirs(
-              user, repo, numResults, os, startTime, endTime, sandcastleAlias)
+      ImmediateFuture{spServiceEndpoint_
+                          ->getTopUsedDirs(
+                              user,
+                              repo,
+                              numResults,
+                              os,
+                              startTime,
+                              endTime,
+                              sandcastleAlias)
+                          .semi()}
           .thenValue([globber = std::move(globber),
                       edenMount = std::move(edenMount),
                       serverState,
                       &fetchContext](std::vector<std::string>&& globs) mutable {
             return globber.glob(edenMount, serverState, globs, fetchContext);
           })
-          .thenError([](folly::exception_wrapper&& ew) {
-            XLOG(ERR) << "Error fetching predictive file globs: "
-                      << folly::exceptionStr(ew);
-            return makeFuture<std::unique_ptr<Glob>>(std::move(ew));
-          })
-          .ensure(
-              [params = std::move(params), helper = std::move(helper)]() {});
-  return detachIfBackgrounded(std::move(future), serverState, background);
+          .thenTry([params = std::move(params), helper = std::move(helper)](
+                       folly::Try<std::unique_ptr<Glob>> tryGlob) {
+            if (tryGlob.hasException()) {
+              auto& ew = tryGlob.exception();
+              XLOG(ERR) << "Error fetching predictive file globs: "
+                        << folly::exceptionStr(ew);
+            }
+            return tryGlob;
+          });
+  return detachIfBackgrounded(std::move(future), serverState, background)
+      .semi();
 #else // !EDEN_HAVE_USAGE_SERVICE
   (void)params;
   NOT_IMPLEMENTED();
 #endif // !EDEN_HAVE_USAGE_SERVICE
 }
 
-folly::Future<std::unique_ptr<Glob>> EdenServiceHandler::future_globFiles(
-    std::unique_ptr<GlobParams> params) {
+folly::SemiFuture<std::unique_ptr<Glob>>
+EdenServiceHandler::semifuture_globFiles(std::unique_ptr<GlobParams> params) {
   ThriftGlobImpl globber{*params};
-  auto helper = INSTRUMENT_THRIFT_CALL_WITH_FUNCTION_NAME_AND_PID(
+  auto helper = INSTRUMENT_THRIFT_CALL(
       DBG3,
-      __func__,
-      getAndRegisterClientPid(),
       *params->mountPoint_ref(),
       toLogArg(*params->globs_ref()),
       globber.logString());
@@ -1967,7 +2409,10 @@ folly::Future<std::unique_ptr<Glob>> EdenServiceHandler::future_globFiles(
               context)
           .ensure([helper = std::move(helper)] {});
   return detachIfBackgrounded(
-      std::move(globFut), server_->getServerState(), *params->background());
+             std::move(globFut),
+             server_->getServerState(),
+             *params->background())
+      .semi();
 }
 
 folly::Future<Unit> EdenServiceHandler::future_chown(
@@ -1983,8 +2428,8 @@ folly::Future<Unit> EdenServiceHandler::future_chown(
 #endif // !_WIN32
 }
 
-folly::Future<std::unique_ptr<GetScmStatusResult>>
-EdenServiceHandler::future_getScmStatusV2(
+folly::SemiFuture<std::unique_ptr<GetScmStatusResult>>
+EdenServiceHandler::semifuture_getScmStatusV2(
     unique_ptr<GetScmStatusParams> params) {
   auto* context = getRequestContext();
 
@@ -2001,24 +2446,25 @@ EdenServiceHandler::future_getScmStatusV2(
                                    ->getReloadableConfig()
                                    ->getEdenConfig()
                                    ->enforceParents.getValue();
-  return wrapFuture(
-      std::move(helper),
-      mount
-          ->diff(
-              rootId,
-              context->getConnectionContext()->getCancellationToken(),
-              *params->listIgnored_ref(),
-              enforceParents)
-          .thenValue([this, mount](std::unique_ptr<ScmStatus>&& status) {
-            auto result = std::make_unique<GetScmStatusResult>();
-            result->status_ref() = std::move(*status);
-            result->version_ref() = server_->getVersion();
-            return result;
-          }));
+  return wrapImmediateFuture(
+             std::move(helper),
+             mount
+                 ->diff(
+                     rootId,
+                     context->getConnectionContext()->getCancellationToken(),
+                     *params->listIgnored_ref(),
+                     enforceParents)
+                 .thenValue([this, mount](std::unique_ptr<ScmStatus>&& status) {
+                   auto result = std::make_unique<GetScmStatusResult>();
+                   result->status_ref() = std::move(*status);
+                   result->version_ref() = server_->getVersion();
+                   return result;
+                 }))
+      .semi();
 }
 
-folly::Future<std::unique_ptr<ScmStatus>>
-EdenServiceHandler::future_getScmStatus(
+folly::SemiFuture<std::unique_ptr<ScmStatus>>
+EdenServiceHandler::semifuture_getScmStatus(
     unique_ptr<string> mountPoint,
     bool listIgnored,
     unique_ptr<string> commitHash) {
@@ -2036,13 +2482,14 @@ EdenServiceHandler::future_getScmStatus(
   auto mountPath = AbsolutePathPiece{*mountPoint};
   auto mount = server_->getMount(mountPath);
   auto hash = mount->getObjectStore()->parseRootId(*commitHash);
-  return wrapFuture(
-      std::move(helper),
-      mount->diff(
-          hash,
-          context->getConnectionContext()->getCancellationToken(),
-          listIgnored,
-          /*enforceCurrentParent=*/false));
+  return wrapImmediateFuture(
+             std::move(helper),
+             mount->diff(
+                 hash,
+                 context->getConnectionContext()->getCancellationToken(),
+                 listIgnored,
+                 /*enforceCurrentParent=*/false))
+      .semi();
 }
 
 folly::SemiFuture<unique_ptr<ScmStatus>>
@@ -2324,13 +2771,12 @@ void EdenServiceHandler::debugInodeStatus(
         eden_constants::DIS_COMPUTE_BLOB_SIZES_;
   }
 
-  auto syncTimeout = getSyncTimeout(*sync);
   auto helper = INSTRUMENT_THRIFT_CALL(
-      DBG2, *mountPoint, *path, flags, syncTimeout.count());
+      DBG2, *mountPoint, *path, flags, getSyncTimeout(*sync));
   auto mountPath = AbsolutePathPiece{*mountPoint};
   auto edenMount = server_->getMount(mountPath);
 
-  waitForPendingNotifications(*edenMount, syncTimeout)
+  waitForPendingNotifications(*edenMount, *sync)
       .thenValue([&](auto&&) {
         auto inode =
             inodeFromUserPath(*edenMount, *path, helper->getFetchContext())
@@ -2405,6 +2851,17 @@ void EdenServiceHandler::debugOutstandingPrjfsCalls(
 #else
   NOT_IMPLEMENTED();
 #endif // _WIN32
+}
+
+void EdenServiceHandler::debugOutstandingThriftRequests(
+    FOLLY_MAYBE_UNUSED std::vector<ThriftRequestMetadata>&
+        outstandingRequests) {
+  auto helper = INSTRUMENT_THRIFT_CALL(DBG2);
+
+  const auto requestsLockedPtr = outstandingThriftRequests_.rlock();
+  for (const auto& item : *requestsLockedPtr) {
+    outstandingRequests.push_back(populateThriftRequestMetadata(item.second));
+  }
 }
 
 void EdenServiceHandler::debugStartRecordingActivity(
@@ -2568,7 +3025,8 @@ void EdenServiceHandler::getAccessCounts(
       ma.accessCountsByPid_ref()[pid] = accessCounts;
     }
 
-    for (auto& [pid, fetchCount] : *pidFetches.rlock()) {
+    auto pidFetchesLockedPtr = pidFetches.rlock();
+    for (auto& [pid, fetchCount] : *pidFetchesLockedPtr) {
       ma.fetchCountsByPid_ref()[pid] = fetchCount;
     }
   }
@@ -2855,6 +3313,33 @@ void EdenServiceHandler::getTracePoints(std::vector<TracePoint>& result) {
   }
 }
 
+void EdenServiceHandler::getRetroactiveInodeEvents(
+    GetRetroactiveInodeEventsResult& result,
+    std::unique_ptr<GetRetroactiveInodeEventsParams> params) {
+  auto mountPoint = params->get_mountPoint();
+  auto mountPath = AbsolutePathPiece{mountPoint};
+  auto edenMount = server_->getMount(mountPath);
+
+  if (!edenMount->getActivityBuffer().has_value()) {
+    throw newEdenError(
+        ENOTSUP,
+        EdenErrorType::POSIX_ERROR,
+        "ActivityBuffer not initialized in EdenFS mount.");
+  }
+
+  std::vector<InodeEvent> thriftEvents;
+  auto bufferEvents = edenMount->getActivityBuffer()->getAllEvents();
+  thriftEvents.reserve(bufferEvents.size());
+  for (auto const& event : bufferEvents) {
+    InodeEvent thriftEvent{};
+    ConvertInodeTraceEventToThriftInodeEvent(event, thriftEvent);
+    thriftEvent.path() = event.getPath();
+    thriftEvents.push_back(std::move(thriftEvent));
+  }
+
+  result.events() = std::move(thriftEvents);
+}
+
 namespace {
 std::optional<folly::exception_wrapper> getFaultError(
     apache::thrift::optional_field_ref<std::string&> errorType,
@@ -2890,6 +3375,11 @@ void EdenServiceHandler::injectFault(unique_ptr<FaultDefinition> fault) {
         *fault->keyClass_ref(),
         *fault->keyValueRegex_ref(),
         *fault->count_ref());
+    return;
+  }
+  if (*fault->kill()) {
+    injector.injectKill(
+        *fault->keyClass(), *fault->keyValueRegex(), *fault->count());
     return;
   }
 
@@ -2976,7 +3466,8 @@ void EdenServiceHandler::getDaemonInfo(DaemonInfo& result) {
       case EdenServer::RunState::SHUTTING_DOWN:
         return facebook::fb303::cpp2::fb303_status::STOPPING;
     }
-    EDEN_BUG() << "unexpected EdenServer status " << enumValue(status);
+    EDEN_BUG() << "unexpected EdenServer status "
+               << enumValue(server_->getStatus());
   }();
 
   result.pid_ref() = getpid();

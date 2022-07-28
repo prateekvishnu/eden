@@ -44,7 +44,7 @@ from . import (
     worker,
 )
 from .i18n import _
-from .node import addednodeid, bin, hex, modifiednodeid, nullhex, nullid, nullrev
+from .node import addednodeid, bin, hex, nullhex, nullid, nullrev
 from .pycompat import decodeutf8, encodeutf8
 
 _pack = struct.pack
@@ -1406,6 +1406,7 @@ def _resolvetrivial(repo, wctx, mctx, ancestor, actions):
 
 
 @perftrace.tracefunc("Calculate Updates")
+@util.timefunction("calculateupdates", 0, "ui")
 def calculateupdates(
     repo,
     wctx,
@@ -1726,10 +1727,6 @@ def applyupdates(repo, actions, wctx, mctx, overwrite, labels=None, ancestors=No
             ms.addpath(f, f1, fo)
             z += 1
             prog.value = (z, f)
-
-        # When merging in-memory, we can't support worker processes, so set the
-        # per-item cost at 0 in that case.
-        cost = 0 if wctx.isinmemory() else 0.001
 
         # Flush any pending data to disk before forking workers, so the workers
         # don't all flush duplicate data.
@@ -2713,6 +2710,7 @@ def getsparsematchers(repo, fp1, fp2, matcher=None):
         return matcher, None
 
 
+@util.timefunction("makenativecheckoutplan", 0, "ui")
 def makenativecheckoutplan(repo, p1, p2, matcher=None, updateprogresspath=None):
     (matcher, sparsematchers) = getsparsematchers(repo, p1.node(), p2.node(), matcher)
 
@@ -2720,7 +2718,7 @@ def makenativecheckoutplan(repo, p1, p2, matcher=None, updateprogresspath=None):
         matcher = None
 
     return nativecheckout.checkoutplan(
-        repo.ui._rcfg._rcfg,
+        repo.ui._rcfg,
         repo.wvfs.base,
         p1.manifest(),
         p2.manifest(),
@@ -2730,6 +2728,7 @@ def makenativecheckoutplan(repo, p1, p2, matcher=None, updateprogresspath=None):
     )
 
 
+@util.timefunction("donativecheckout", 0, "ui")
 def donativecheckout(repo, p1, p2, xp1, xp2, matcher, force, partial, wc, prerecrawls):
     repo.ui.debug("Using native checkout\n")
     repo.ui.log(
@@ -2837,6 +2836,7 @@ def donativecheckout(repo, p1, p2, xp1, xp2, matcher, force, partial, wc, prerec
     return stats
 
 
+@util.timefunction("calculateupdatesnative", 0, "ui")
 def calculateupdatesnative(repo, p1, p2, pa):
     if not repo.ui.configbool("experimental", "nativerebase"):
         return None

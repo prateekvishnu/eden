@@ -5,27 +5,34 @@
  * GNU General Public License version 2.
  */
 
-use blobrepo::{AsBlobRepo, BlobRepo};
+use blobrepo::AsBlobRepo;
+use blobrepo::BlobRepo;
 use bonsai_git_mapping::BonsaiGitMapping;
 use bonsai_globalrev_mapping::BonsaiGlobalrevMapping;
 use bonsai_hg_mapping::BonsaiHgMapping;
-use bookmarks::{BookmarkUpdateLog, Bookmarks};
+use bookmarks::BookmarkUpdateLog;
+use bookmarks::Bookmarks;
 use changeset_fetcher::ChangesetFetcher;
 use changesets::Changesets;
+use filestore::FilestoreConfig;
 use mononoke_types::RepositoryId;
 use mutable_counters::MutableCounters;
 use phases::Phases;
 use pushrebase_mutation_mapping::PushrebaseMutationMapping;
 use repo_blobstore::RepoBlobstore;
+use repo_bookmark_attrs::RepoBookmarkAttrs;
 use repo_cross_repo::RepoCrossRepo;
 use repo_derived_data::RepoDerivedData;
-use repo_identity::{RepoIdentity, RepoIdentityRef};
+use repo_identity::RepoIdentity;
+use repo_identity::RepoIdentityRef;
 
 #[facet::container]
 #[derive(Clone)]
 pub struct Repo {
     #[delegate(
+        FilestoreConfig,
         RepoBlobstore,
+        RepoBookmarkAttrs,
         RepoDerivedData,
         RepoIdentity,
         dyn BonsaiGitMapping,

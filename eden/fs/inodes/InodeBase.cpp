@@ -12,14 +12,11 @@
 
 #include "eden/fs/inodes/EdenMount.h"
 #include "eden/fs/inodes/InodeMap.h"
+#include "eden/fs/inodes/InodeTable.h"
 #include "eden/fs/inodes/ParentInodeInfo.h"
 #include "eden/fs/inodes/TreeInode.h"
 #include "eden/fs/utils/Clock.h"
 #include "eden/fs/utils/NotImplemented.h"
-
-#ifndef _WIN32
-#include "eden/fs/inodes/InodeTable.h"
-#endif
 
 namespace facebook::eden {
 
@@ -366,6 +363,10 @@ EdenTimestamp InodeBase::getNow() const {
 
 const Clock& InodeBase::getClock() const {
   return getMount()->getClock();
+}
+
+ObjectStore& InodeBase::getObjectStore() const {
+  return *getMount()->getObjectStore();
 }
 
 // Helper function to update Journal used by FileInode and TreeInode.

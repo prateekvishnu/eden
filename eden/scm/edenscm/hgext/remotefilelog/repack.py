@@ -9,12 +9,10 @@ import errno
 import os
 import time
 import traceback
-from contextlib import contextmanager
 
 from bindings import revisionstore
-from edenscm.mercurial import encoding, error, progress, util, vfs
+from edenscm.mercurial import error, progress, util, vfs
 from edenscm.mercurial.i18n import _
-from edenscm.mercurial.node import nullid, short
 
 from ..extutil import flock
 from . import constants, datapack, historypack, shallowutil
@@ -47,7 +45,7 @@ def _runrustrepack(ui, packpath, stores, incremental, shared):
         return
 
     try:
-        revisionstore.repack(packpath, stores, not incremental, shared, ui._rcfg._rcfg)
+        revisionstore.repack(packpath, stores, not incremental, shared, ui._rcfg)
     except Exception as e:
         ui.log("repack_failure", msg=str(e), traceback=traceback.format_exc())
         if "Repack successful but with errors" not in str(e):

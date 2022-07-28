@@ -5,79 +5,56 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::io::Write;
 
-use anyhow::{Error, Result};
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
-use futures::stream::{self, Stream, StreamExt, TryStreamExt};
-use serde_derive::Serialize;
+use anyhow::Result;
+use futures::stream;
+use futures::stream::Stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use serde::Serialize;
 use source_control::types as thrift;
 
-use crate::args::commit_id::{
-    add_optional_commit_id_args, add_scheme_args, get_commit_ids, get_request_schemes, get_schemes,
-    map_commit_ids, resolve_commit_id,
-};
-use crate::args::repo::{add_repo_args, get_repo_specifier};
+use crate::args::commit_id::map_commit_ids;
+use crate::args::commit_id::resolve_commit_id;
+use crate::args::commit_id::CommitIdsArgs;
+use crate::args::commit_id::SchemeArgs;
+use crate::args::repo::RepoArgs;
 use crate::connection::Connection;
 use crate::lib::commit_id::render_commit_id;
-use crate::render::{Render, RenderStream};
+use crate::render::Render;
+use crate::ScscApp;
 
-pub(super) const NAME: &str = "list-bookmarks";
-
-const ARG_LIMIT: &str = "LIMIT";
-const ARG_AFTER: &str = "AFTER";
-const ARG_PREFIX: &str = "PREFIX";
-const ARG_NAME_ONLY: &str = "NAME_ONLY";
-const ARG_INCLUDE_SCRATCH: &str = "INCLUDE_SCRATCH";
-
-const ARG_LIMIT_DEFAULT: &str = "100";
-
-pub(super) fn make_subcommand<'a, 'b>() -> App<'a, 'b> {
-    let cmd = SubCommand::with_name(NAME)
-        .about("List bookmarks and their current commits")
-        .long_about(concat!(
-            "List bookmarks and their current commits\n\n",
-            "If a commit id is provided, the results are limited to descendants ",
-            "of that commit."
-        ))
-        .setting(AppSettings::ColoredHelp);
-    let cmd = add_repo_args(cmd);
-    let cmd = add_scheme_args(cmd);
-    let cmd = add_optional_commit_id_args(cmd);
-    let cmd = cmd
-        .arg(
-            Arg::with_name(ARG_PREFIX)
-                .long("prefix")
-                .takes_value(true)
-                .help("Limit bookmarks to those starting with a certain prefix"),
-        )
-        .arg(
-            Arg::with_name(ARG_LIMIT)
-                .short("l")
-                .long("limit")
-                .takes_value(true)
-                .default_value(ARG_LIMIT_DEFAULT)
-                .help("Limit the number of bookmarks"),
-        )
-        .arg(
-            Arg::with_name(ARG_AFTER)
-                .long("after")
-                .takes_value(true)
-                .help("Only show bookmarks after the provided name"),
-        )
-        .arg(
-            Arg::with_name(ARG_NAME_ONLY)
-                .short("n")
-                .long("name-only")
-                .help("Only show the bookmark names"),
-        )
-        .arg(
-            Arg::with_name(ARG_INCLUDE_SCRATCH)
-                .long("include-scratch")
-                .help("Include scratch bookmarks in results"),
-        );
-    cmd
+#[derive(clap::Parser)]
+/// List bookmarks and their current commits
+///
+/// If a commit id is provided, the results are limited to descendants
+/// of that commit.
+pub(super) struct CommandArgs {
+    #[clap(flatten)]
+    repo_args: RepoArgs,
+    #[clap(flatten)]
+    scheme_args: SchemeArgs,
+    #[clap(flatten)]
+    commit_ids_args: CommitIdsArgs,
+    #[clap(long)]
+    /// Limit bookmarks to those starting with a certain prefix
+    prefix: Option<String>,
+    #[clap(long, short, default_value_t = 100)]
+    /// Limit the number of bookmarks
+    limit: usize,
+    #[clap(long)]
+    /// Only show bookmarks after the provided name
+    after: Option<String>,
+    #[clap(long, short)]
+    /// Only show the bookmark names
+    name_only: bool,
+    #[clap(long)]
+    /// Include scratch bookmarks in results
+    include_scratch: bool,
 }
 
 #[derive(Serialize)]
@@ -87,12 +64,14 @@ struct BookmarkOutput {
 }
 
 impl Render for BookmarkOutput {
-    fn render(&self, matches: &ArgMatches, w: &mut dyn Write) -> Result<()> {
-        let name_only = matches.is_present(ARG_NAME_ONLY);
+    type Args = CommandArgs;
+
+    fn render(&self, args: &Self::Args, w: &mut dyn Write) -> Result<()> {
+        let name_only = args.name_only;
         if name_only {
             write!(w, "{}\n", self.name)?;
         } else {
-            let schemes = get_schemes(matches);
+            let schemes: HashSet<String> = args.scheme_args.scheme_string_set();
             if schemes.len() == 1 {
                 write!(w, "{:<40} ", self.name)?;
                 render_commit_id(None, "\n", &self.name, &self.ids, &schemes, w)?;
@@ -105,13 +84,13 @@ impl Render for BookmarkOutput {
         Ok(())
     }
 
-    fn render_json(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<()> {
+    fn render_json(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         Ok(serde_json::to_writer(w, self)?)
     }
 }
 
 fn repo_list_bookmarks(
-    connection: &Connection,
+    connection: Connection,
     repo: thrift::RepoSpecifier,
     limit: Option<i64>,
     after: Option<String>,
@@ -119,7 +98,6 @@ fn repo_list_bookmarks(
     include_scratch: bool,
     identity_schemes: BTreeSet<thrift::CommitIdentityScheme>,
 ) -> impl Stream<Item = Result<(String, BTreeMap<String, String>)>> {
-    let connection = connection.clone();
     stream::try_unfold(Some((after, limit)), move |state| {
         let connection = connection.clone();
         let repo = repo.clone();
@@ -127,12 +105,10 @@ fn repo_list_bookmarks(
         let prefix = prefix.clone();
         async move {
             if let Some((after, limit)) = state {
-                let (limit, remaining) = limit
-                    .map(|limit| {
-                        let size = limit.min(source_control::consts::REPO_LIST_BOOKMARKS_MAX_LIMIT);
-                        (size, Some(limit.saturating_sub(size)))
-                    })
-                    .unwrap_or((0, None));
+                let (limit, remaining) = limit.map_or((0, None), |limit| {
+                    let size = limit.min(source_control::consts::REPO_LIST_BOOKMARKS_MAX_LIMIT);
+                    (size, Some(limit.saturating_sub(size)))
+                });
 
                 let params = thrift::RepoListBookmarksParams {
                     include_scratch,
@@ -150,11 +126,11 @@ fn repo_list_bookmarks(
                 let next_state = response
                     .continue_after
                     .map(|after| (Some(after), remaining))
-                    .filter(|_| remaining.map(|r| r > 0).unwrap_or(true));
+                    .filter(|_| remaining.map_or(true, |r| r > 0));
 
-                Ok(Some((stream::iter(bookmarks), next_state)))
+                anyhow::Ok(Some((stream::iter(bookmarks), next_state)))
             } else {
-                Ok::<_, Error>(None)
+                anyhow::Ok(None)
             }
         }
     })
@@ -162,7 +138,7 @@ fn repo_list_bookmarks(
 }
 
 fn commit_list_descendant_bookmarks(
-    connection: &Connection,
+    connection: Connection,
     commit: thrift::CommitSpecifier,
     limit: Option<i64>,
     after: Option<String>,
@@ -170,7 +146,6 @@ fn commit_list_descendant_bookmarks(
     include_scratch: bool,
     identity_schemes: BTreeSet<thrift::CommitIdentityScheme>,
 ) -> impl Stream<Item = Result<(String, BTreeMap<String, String>)>> {
-    let connection = connection.clone();
     stream::try_unfold(Some((after, limit)), move |state| {
         let connection = connection.clone();
         let commit = commit.clone();
@@ -204,59 +179,59 @@ fn commit_list_descendant_bookmarks(
                 let next_state = response
                     .continue_after
                     .map(|after| (Some(after), limit.map(|limit| limit.saturating_sub(count))));
-                Ok(Some((stream::iter(bookmarks), next_state)))
+                anyhow::Ok(Some((stream::iter(bookmarks), next_state)))
             } else {
-                Ok::<_, Error>(None)
+                anyhow::Ok(None)
             }
         }
     })
     .try_flatten()
 }
 
-pub(super) async fn run(matches: &ArgMatches<'_>, connection: Connection) -> Result<RenderStream> {
-    let repo = get_repo_specifier(matches).expect("repository is required");
+pub(super) async fn run(app: ScscApp, args: CommandArgs) -> Result<()> {
+    let repo = args.repo_args.clone().into_repo_specifier();
 
-    let limit = matches
-        .value_of(ARG_LIMIT)
-        .map(str::parse::<i64>)
-        .transpose()?;
+    let limit: i64 = args.limit.try_into()?;
 
-    let after = matches.value_of(ARG_AFTER);
-    let prefix = matches.value_of(ARG_PREFIX);
-    let include_scratch = matches.is_present(ARG_INCLUDE_SCRATCH);
+    let after = args.after.clone();
+    let prefix = args.prefix.clone();
+    let include_scratch = args.include_scratch;
 
-    let bookmarks = match get_commit_ids(matches)?.first() {
-        Some(commit_id) => {
-            let id = resolve_commit_id(&connection, &repo, &commit_id).await?;
+    let bookmarks = match args.commit_ids_args.clone().into_commit_ids().as_slice() {
+        [ref commit_id] => {
+            let id = resolve_commit_id(&app.connection, &repo, commit_id).await?;
             let commit = thrift::CommitSpecifier {
                 repo,
                 id,
                 ..Default::default()
             };
             commit_list_descendant_bookmarks(
-                &connection,
+                app.connection.clone(),
                 commit,
-                limit,
+                Some(limit),
                 after.map(String::from),
                 prefix.map(String::from),
                 include_scratch,
-                get_request_schemes(matches),
+                args.scheme_args.clone().into_request_schemes(),
             )
             .left_stream()
         }
-        None => repo_list_bookmarks(
-            &connection,
+        [] => repo_list_bookmarks(
+            app.connection.clone(),
             repo,
-            limit,
+            Some(limit),
             after.map(String::from),
             prefix.map(String::from),
             include_scratch,
-            get_request_schemes(matches),
+            args.scheme_args.clone().into_request_schemes(),
         )
         .right_stream(),
+        _ => anyhow::bail!("At most one commit must be specified"),
     };
-
-    Ok(bookmarks
-        .map_ok(|(name, ids)| Box::new(BookmarkOutput { name, ids }) as Box<dyn Render>)
-        .boxed())
+    app.target
+        .render(
+            &args,
+            bookmarks.map_ok(|(name, ids)| BookmarkOutput { name, ids }),
+        )
+        .await
 }

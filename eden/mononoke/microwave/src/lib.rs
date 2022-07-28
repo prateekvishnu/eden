@@ -7,24 +7,28 @@
 
 use anyhow::Error;
 use blobrepo::BlobRepo;
-use blobrepo_hg::BlobRepoHg;
 use blobstore::Blobstore;
 use changesets::ChangesetEntry;
 use context::CoreContext;
 use fbthrift::compact_protocol;
-use filenodes::{FilenodeInfo, PreparedFilenode};
-use futures::{
-    future,
-    stream::{Stream, StreamExt},
-};
-use mercurial_types::{HgChangesetId, HgFileNodeId, HgNodeHash};
-use mononoke_types::{BlobstoreBytes, ChangesetId, RepoPath, RepositoryId};
+use filenodes::FilenodeInfo;
+use filenodes::PreparedFilenode;
+use futures::future;
+use futures::stream::Stream;
+use futures::stream::StreamExt;
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::HgNodeHash;
+use mononoke_types::BlobstoreBytes;
+use mononoke_types::ChangesetId;
+use mononoke_types::RepoPath;
+use mononoke_types::RepositoryId;
 use slog::info;
-use std::path::{Path, PathBuf};
-use tokio::{
-    fs::File,
-    io::{AsyncReadExt, AsyncWriteExt},
-};
+use std::path::Path;
+use std::path::PathBuf;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 
 mod thrift {
     pub use microwave_if::*;
@@ -110,7 +114,7 @@ impl Snapshot {
         let serialized = compact_protocol::serialize(&self.snapshot);
 
         match location {
-            SnapshotLocation::SharedLocalPath(ref path) => {
+            SnapshotLocation::SharedLocalPath(path) => {
                 let mut file = File::create(snapshot_path(path, repo.get_repoid())).await?;
                 file.write_all(&serialized).await?;
             }
@@ -140,7 +144,7 @@ async fn load_snapshot(
     location: SnapshotLocation<'_>,
 ) -> Result<thrift::RepoSnapshot, Error> {
     match location {
-        SnapshotLocation::SharedLocalPath(ref path) => {
+        SnapshotLocation::SharedLocalPath(path) => {
             let mut contents = vec![];
             let mut snapshot = File::open(snapshot_path(path, repo.get_repoid())).await?;
             snapshot.read_to_end(&mut contents).await?;
@@ -151,7 +155,7 @@ async fn load_snapshot(
                 .blobstore()
                 .get(ctx, &snapshot_name())
                 .await?
-                .ok_or(Error::msg("Snapshot is missing"))?
+                .ok_or_else(|| Error::msg("Snapshot is missing"))?
                 .into_raw_bytes();
             Ok(compact_protocol::deserialize(&bytes)?)
         }
@@ -165,10 +169,12 @@ pub async fn prime_cache(
 ) -> Result<(), Error> {
     let snapshot = load_snapshot(ctx, repo, location).await?;
 
-    let filenodes = snapshot.filenodes.ok_or(Error::msg("filenodes missing"))?;
+    let filenodes = snapshot
+        .filenodes
+        .ok_or_else(|| Error::msg("filenodes missing"))?;
     let filenodes = reheat_filenodes(filenodes)?;
 
-    repo.get_filenodes().prime_cache(ctx, filenodes.as_ref());
+    repo.filenodes().prime_cache(ctx, filenodes.as_ref());
     info!(
         ctx.logger(),
         "primed filenodes cache with {} entries",
@@ -177,7 +183,7 @@ pub async fn prime_cache(
 
     let changesets = snapshot
         .changesets
-        .ok_or(Error::msg("changesets missing"))?;
+        .ok_or_else(|| Error::msg("changesets missing"))?;
     let changesets = reheat_changesets(repo.get_repoid(), changesets)?;
 
     repo.get_changesets_object()
@@ -206,15 +212,16 @@ fn reheat_filenodes(
                 linknode,
             } = t;
 
-            let path = path.ok_or(Error::msg("path missing"))?;
-            let filenode = filenode.ok_or(Error::msg("filenode missing"))?;
-            let linknode = linknode.ok_or(Error::msg("linknode missing"))?;
+            let path = path.ok_or_else(|| Error::msg("path missing"))?;
+            let filenode = filenode.ok_or_else(|| Error::msg("filenode missing"))?;
+            let linknode = linknode.ok_or_else(|| Error::msg("linknode missing"))?;
 
             let copyfrom = copyfrom
                 .map(|t| {
                     let thrift::CopyInfoSnapshot { path, filenode } = t;
-                    let path = path.ok_or(Error::msg("copy info path missing"))?;
-                    let filenode = filenode.ok_or(Error::msg("copy info filenode missing"))?;
+                    let path = path.ok_or_else(|| Error::msg("copy info path missing"))?;
+                    let filenode =
+                        filenode.ok_or_else(|| Error::msg("copy info filenode missing"))?;
                     Result::<_, Error>::Ok((
                         RepoPath::from_thrift(path)?,
                         HgFileNodeId::new(HgNodeHash::from_thrift(filenode)?),
@@ -251,9 +258,9 @@ fn reheat_changesets(
                 gen,
             } = c;
 
-            let cs_id = cs_id.ok_or(Error::msg("cs_id missing"))?;
-            let parents = parents.ok_or(Error::msg("parents missing"))?;
-            let gen = gen.ok_or(Error::msg("gen missing"))?;
+            let cs_id = cs_id.ok_or_else(|| Error::msg("cs_id missing"))?;
+            let parents = parents.ok_or_else(|| Error::msg("parents missing"))?;
+            let gen = gen.ok_or_else(|| Error::msg("gen missing"))?;
 
             let parents = parents
                 .into_iter()

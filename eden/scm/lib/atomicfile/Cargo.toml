@@ -4,7 +4,8 @@
 name = "atomicfile"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 tempfile = "3.3"
-tracing = "0.1.32"
+tracing = "0.1.35"

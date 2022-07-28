@@ -5,29 +5,49 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, bail, Error};
-use blobrepo::{save_bonsai_changesets, BlobRepo};
+use anyhow::anyhow;
+use anyhow::bail;
+use anyhow::Error;
+use blobrepo::save_bonsai_changesets;
+use blobrepo::BlobRepo;
+use blobrepo_utils::convert_diff_result_into_file_change_for_diamond_merge;
 use blobstore::Loadable;
 use blobsync::copy_content;
 use borrowed::borrowed;
 use cloned::cloned;
 use context::CoreContext;
-use futures::{future::try_join_all, stream, StreamExt, TryStreamExt};
+use futures::future::try_join_all;
+use futures::stream;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use manifest::get_implicit_deletes;
 use megarepo_configs::types::SourceMappingRules;
 use mercurial_derived_data::DeriveHgChangeset;
 use mercurial_types::HgManifestId;
-use mononoke_types::{
-    mpath_element_iter, BonsaiChangeset, BonsaiChangesetMut, ChangesetId, ContentId, FileChange,
-    MPath, TrackedFileChange,
-};
+use mononoke_types::mpath_element_iter;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::BonsaiChangesetMut;
+use mononoke_types::ChangesetId;
+use mononoke_types::ContentId;
+use mononoke_types::FileChange;
+use mononoke_types::MPath;
+use mononoke_types::TrackedFileChange;
+use pushrebase::find_bonsai_diff;
 use sorted_vector_map::SortedVectorMap;
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::sync::Arc;
 use thiserror::Error;
 
 pub type MultiMover = Arc<dyn Fn(&MPath) -> Result<Vec<MPath>, Error> + Send + Sync + 'static>;
 pub type DirectoryMultiMover =
     Arc<dyn Fn(&Option<MPath>) -> Result<Vec<Option<MPath>>, Error> + Send + Sync + 'static>;
+
+const SQUASH_DELIMITER_MESSAGE: &str = r#"
+
+============================
+
+This commit created by squashing the following git commits:
+"#;
 
 #[derive(Debug, Error)]
 pub enum ErrorKind {
@@ -249,6 +269,55 @@ pub async fn rewrite_commit<'a>(
     )
 }
 
+pub async fn rewrite_as_squashed_commit<'a>(
+    ctx: &'a CoreContext,
+    source_repo: &'a BlobRepo,
+    source_cs_id: ChangesetId,
+    (source_parent_cs_id, target_parent_cs_id): (ChangesetId, ChangesetId),
+    mut cs: BonsaiChangesetMut,
+    mover: MultiMover,
+    side_commits_info: Vec<String>,
+) -> Result<Option<BonsaiChangesetMut>, Error> {
+    let diff_stream = find_bonsai_diff(ctx, source_repo, source_parent_cs_id, source_cs_id).await?;
+    let diff_changes: Vec<_> = diff_stream
+        .map_ok(|diff_result| async move {
+            convert_diff_result_into_file_change_for_diamond_merge(ctx, source_repo, diff_result)
+                .await
+        })
+        .try_buffered(100)
+        .try_collect()
+        .await?;
+
+    let rewritten_changes = diff_changes
+        .into_iter()
+        .map(|(path, change)| {
+            let new_paths = mover(&path)?;
+            Ok(new_paths
+                .into_iter()
+                .map(|new_path| (new_path, change.clone()))
+                .collect())
+        })
+        .collect::<Result<Vec<Vec<_>>, Error>>()?;
+
+    let rewritten_changes: SortedVectorMap<_, _> = rewritten_changes
+        .into_iter()
+        .flat_map(|changes| changes.into_iter())
+        .collect();
+
+    cs.file_changes = rewritten_changes;
+    // `validate_can_sync_changeset` already ensures
+    // that target_parent_cs_id is one of the existing parents
+    cs.parents = vec![target_parent_cs_id];
+    let old_message = cs.message;
+    cs.message = format!(
+        "{}{}{}",
+        old_message,
+        SQUASH_DELIMITER_MESSAGE,
+        side_commits_info.join("\n")
+    );
+    Ok(Some(cs))
+}
+
 pub async fn rewrite_stack_no_merges<'a>(
     ctx: &'a CoreContext,
     css: Vec<BonsaiChangeset>,
@@ -279,7 +348,7 @@ pub async fn rewrite_stack_no_merges<'a>(
                         cs.clone().into_mut(),
                         parents,
                         mover.clone(),
-                        &source_repo,
+                        source_repo,
                     )
                     .await?
                 } else {
@@ -347,7 +416,7 @@ pub fn internal_rewrite_commit_with_implicit_deletes<'a>(
                     mover: MultiMover,
                 ) -> Result<Option<(MPath, ChangesetId)>, Error> {
                     let (path, copy_from_commit) = copy_from;
-                    let new_paths = mover(&path)?;
+                    let new_paths = mover(path)?;
                     let copy_from_commit =
                         remapped_parents.get(copy_from_commit).ok_or_else(|| {
                             Error::from(ErrorKind::MissingRemappedCommit(*copy_from_commit))
@@ -404,14 +473,13 @@ pub fn internal_rewrite_commit_with_implicit_deletes<'a>(
                         .map(|new_path| (new_path, change.clone()))
                         .collect())
                 }
-                do_rewrite(path, change, &remapped_parents, mover.clone())
+                do_rewrite(path, change, remapped_parents, mover.clone())
             })
             .collect();
 
         let mut path_rewritten_changes: SortedVectorMap<_, _> = path_rewritten_changes?
             .into_iter()
-            .map(|changes| changes.into_iter())
-            .flatten()
+            .flat_map(|changes| changes.into_iter())
             .collect();
 
         path_rewritten_changes.extend(implicit_delete_file_changes.into_iter());
@@ -494,7 +562,7 @@ pub async fn copy_file_contents<'a>(
     stream::iter(content_ids.into_iter().map({
         |content_id| {
             copy_content(
-                &ctx,
+                ctx,
                 &source_blobstore,
                 &target_blobstore,
                 target_filestore_config.clone(),
@@ -517,11 +585,14 @@ mod test {
     use anyhow::bail;
     use blobrepo::save_bonsai_changesets;
     use fbinit::FacebookInit;
-    use maplit::{btreemap, hashmap};
-    use mononoke_types::{ContentId, FileType};
+    use maplit::btreemap;
+    use maplit::hashmap;
+    use mononoke_types::ContentId;
+    use mononoke_types::FileType;
     use std::collections::BTreeMap;
     use test_repo_factory::TestRepoFactory;
-    use tests_utils::{list_working_copy_utf8, CreateCommitContext};
+    use tests_utils::list_working_copy_utf8;
+    use tests_utils::CreateCommitContext;
 
     #[test]
     fn test_multi_mover_simple() -> Result<(), Error> {
@@ -797,11 +868,11 @@ mod test {
         multi_mover: MultiMover,
         force_first_parent: Option<ChangesetId>,
     ) -> Result<ChangesetId, Error> {
-        let bcs = bcs_id.load(&ctx, &repo.get_blobstore()).await?;
+        let bcs = bcs_id.load(ctx, &repo.get_blobstore()).await?;
         let bcs = bcs.into_mut();
 
         let maybe_rewritten = rewrite_commit(
-            &ctx,
+            ctx,
             bcs,
             &parents,
             multi_mover,

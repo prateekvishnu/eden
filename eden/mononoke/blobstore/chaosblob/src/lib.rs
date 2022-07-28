@@ -7,12 +7,16 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use blobstore::{
-    Blobstore, BlobstoreGetData, BlobstoreIsPresent, BlobstorePutOps, OverwriteStatus, PutBehaviour,
-};
+use blobstore::Blobstore;
+use blobstore::BlobstoreGetData;
+use blobstore::BlobstoreIsPresent;
+use blobstore::BlobstorePutOps;
+use blobstore::OverwriteStatus;
+use blobstore::PutBehaviour;
 use context::CoreContext;
 use mononoke_types::BlobstoreBytes;
-use rand::{thread_rng, Rng};
+use rand::thread_rng;
+use rand::Rng;
 use std::num::NonZeroU32;
 
 mod errors;
@@ -62,16 +66,14 @@ impl<T: std::fmt::Display> std::fmt::Display for ChaosBlobstore<T> {
 }
 
 fn derive_threshold(sample_rate: Option<NonZeroU32>) -> f32 {
-    sample_rate
-        .map(|rate| {
-            match rate.get() {
-                // Avoid chance of rng returning 0.0 and threshold being 0.0
-                1 => ALWAYS_CHAOS_THRESHOLD,
-                // If rate 100, then rng must generate over 0.99 to trigger error
-                n => 1.0 - (1.0 / (n as f32)),
-            }
-        })
-        .unwrap_or(NEVER_CHAOS_THRESHOLD)
+    sample_rate.map_or(NEVER_CHAOS_THRESHOLD, |rate| {
+        match rate.get() {
+            // Avoid chance of rng returning 0.0 and threshold being 0.0
+            1 => ALWAYS_CHAOS_THRESHOLD,
+            // If rate 100, then rng must generate over 0.99 to trigger error
+            n => 1.0 - (1.0 / (n as f32)),
+        }
+    })
 }
 
 impl<T> ChaosBlobstore<T> {
@@ -204,7 +206,7 @@ mod test {
                 BlobstoreBytes::from_bytes("test foobar"),
             )
             .await;
-        assert!(!r.is_ok());
+        assert!(r.is_err());
         let base_present = base
             .is_present(ctx, key)
             .await
@@ -229,7 +231,7 @@ mod test {
                 BlobstoreBytes::from_bytes("test foobar"),
             )
             .await;
-        assert!(!r.is_ok());
+        assert!(r.is_err());
         let base_present = base
             .is_present(ctx, key)
             .await
@@ -262,6 +264,6 @@ mod test {
             .assume_not_found_if_unsure();
         assert!(base_present);
         let r = wrapper.get(ctx, key).await;
-        assert!(!r.is_ok());
+        assert!(r.is_err());
     }
 }

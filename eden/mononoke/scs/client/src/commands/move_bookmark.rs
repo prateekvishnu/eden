@@ -5,69 +5,57 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{bail, Result};
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
-use futures::stream::{self, StreamExt};
+use anyhow::bail;
+use anyhow::Result;
 use source_control::types as thrift;
 
-use crate::args::commit_id::{add_multiple_commit_id_args, get_commit_ids, resolve_commit_ids};
-use crate::args::pushvars::{add_pushvar_args, get_pushvars};
-use crate::args::repo::{add_repo_args, get_repo_specifier};
-use crate::args::service_id::{add_service_id_args, get_service_id};
-use crate::connection::Connection;
-use crate::render::RenderStream;
+use crate::args::commit_id::resolve_commit_ids;
+use crate::args::commit_id::CommitIdsArgs;
+use crate::args::pushvars::PushvarArgs;
+use crate::args::repo::RepoArgs;
+use crate::args::service_id::ServiceIdArgs;
+use crate::ScscApp;
 
-pub(super) const NAME: &str = "move-bookmark";
-
-const ARG_NAME: &str = "BOOKMARK_NAME";
-const ARG_NON_FAST_FORWARD: &str = "NON_FAST_FORWARD";
-
-pub(super) fn make_subcommand<'a, 'b>() -> App<'a, 'b> {
-    let cmd = SubCommand::with_name(NAME)
-        .about("Move a bookmark")
-        .long_about(concat!(
-            "Move a bookmark\n\n",
-            "If two commits are provided, then move the bookmark from the first commit ",
-            "to the second commit, failing if the bookmark didn't previously point at ",
-            "the first commit.",
-        ))
-        .setting(AppSettings::ColoredHelp);
-    let cmd = add_repo_args(cmd);
-    let cmd = add_multiple_commit_id_args(cmd);
-    let cmd = add_service_id_args(cmd);
-    let cmd = add_pushvar_args(cmd);
-    cmd.arg(
-        Arg::with_name(ARG_NAME)
-            .short("n")
-            .long("name")
-            .takes_value(true)
-            .help("Name of the bookmark to move")
-            .required(true),
-    )
-    .arg(
-        Arg::with_name(ARG_NON_FAST_FORWARD)
-            .long("allow-non-fast-forward-move")
-            .help("Allow non-fast-forward moves (if permitted for this bookmark)"),
-    )
+#[derive(clap::Parser)]
+/// Move a bookmark
+///
+/// If two commits are provided, then move the bookmark from the first commit
+/// to the second commit, failing if the bookmark didn't previously point at
+/// the first commit.
+pub(super) struct CommandArgs {
+    #[clap(flatten)]
+    repo_args: RepoArgs,
+    #[clap(flatten)]
+    commit_ids_args: CommitIdsArgs,
+    #[clap(flatten)]
+    service_id_args: ServiceIdArgs,
+    #[clap(flatten)]
+    pushvar_args: PushvarArgs,
+    #[clap(long, short)]
+    /// Name of the bookmark to move
+    name: String,
+    #[clap(long)]
+    /// Allow non-fast-forward moves (if permitted for this bookmark)
+    allow_non_fast_forward_move: bool,
 }
 
-pub(super) async fn run(matches: &ArgMatches<'_>, connection: Connection) -> Result<RenderStream> {
-    let repo = get_repo_specifier(matches).expect("repository is required");
-    let commit_ids = get_commit_ids(matches)?;
+pub(super) async fn run(app: ScscApp, args: CommandArgs) -> Result<()> {
+    let repo = args.repo_args.into_repo_specifier();
+    let commit_ids = args.commit_ids_args.into_commit_ids();
     if commit_ids.len() != 1 && commit_ids.len() != 2 {
         bail!("expected 1 or 2 commit_ids (got {})", commit_ids.len())
     }
-    let ids = resolve_commit_ids(&connection, &repo, &commit_ids).await?;
-    let bookmark = matches.value_of(ARG_NAME).expect("name is required").into();
-    let service_identity = get_service_id(matches).map(String::from);
+    let ids = resolve_commit_ids(&app.connection, &repo, &commit_ids).await?;
+    let bookmark = args.name;
+    let service_identity = args.service_id_args.service_id;
 
     let (old_target, target) = match ids.as_slice() {
         [id] => (None, id.clone()),
         [old_id, new_id] => (Some(old_id.clone()), new_id.clone()),
         _ => bail!("expected 1 or 2 commit_ids (got {})", ids.len()),
     };
-    let allow_non_fast_forward_move = matches.is_present(ARG_NON_FAST_FORWARD);
-    let pushvars = get_pushvars(&matches)?;
+    let allow_non_fast_forward_move = args.allow_non_fast_forward_move;
+    let pushvars = args.pushvar_args.into_pushvars();
 
     let params = thrift::RepoMoveBookmarkParams {
         bookmark,
@@ -78,6 +66,6 @@ pub(super) async fn run(matches: &ArgMatches<'_>, connection: Connection) -> Res
         pushvars,
         ..Default::default()
     };
-    connection.repo_move_bookmark(&repo, &params).await?;
-    Ok(stream::empty().boxed())
+    app.connection.repo_move_bookmark(&repo, &params).await?;
+    Ok(())
 }

@@ -5,22 +5,29 @@
  * GNU General Public License version 2.
  */
 
-use crate::{
-    thrift,
-    typed_hash::{BlobstoreKey, FileUnodeId, MononokeId},
-    ChangesetId, MPath,
-};
-use anyhow::{bail, format_err, Error, Result};
+use crate::thrift;
+use crate::typed_hash::BlobstoreKey;
+use crate::typed_hash::FileUnodeId;
+use crate::typed_hash::MononokeId;
+use crate::ChangesetId;
+use crate::MPath;
+use anyhow::bail;
+use anyhow::format_err;
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
-use blobstore::{Blobstore, BlobstoreBytes, Loadable, LoadableError};
+use blobstore::Blobstore;
+use blobstore::BlobstoreBytes;
+use blobstore::Loadable;
+use blobstore::LoadableError;
 use context::CoreContext;
 use fbthrift::compact_protocol;
-use std::{
-    collections::{HashMap, VecDeque},
-    str::FromStr,
-};
+use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::str::FromStr;
 use thiserror::Error;
-use xdiff::{diff_hunks, Hunk};
+use xdiff::diff_hunks;
+use xdiff::Hunk;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct BlameId(FileUnodeId);
@@ -250,7 +257,7 @@ impl Blame {
         } = blame_t;
         let paths = paths_t
             .into_iter()
-            .map(|path_t| MPath::from_thrift(path_t))
+            .map(MPath::from_thrift)
             .collect::<Result<Vec<_>, _>>()?;
         let (_length, ranges) =
             ranges_t
@@ -471,9 +478,9 @@ impl Blame {
                     .ok_or_else(|| Error::msg("not enough ranges in a blame"))?;
             }
             result.push_str(&range.csid.to_string()[..12]);
-            result.push_str(&": ");
+            result.push_str(": ");
             result.push_str(line);
-            result.push_str("\n");
+            result.push('\n');
         }
 
         Ok(result)
@@ -500,7 +507,7 @@ fn blame_ranges_split_at(
         }
     }
 
-    return (left, ranges);
+    (left, ranges)
 }
 
 /// Merge multiple blames into a single.
@@ -571,7 +578,7 @@ impl<'a> Iterator for BlameLines<'a> {
         loop {
             match self.ranges.get(self.ranges_index) {
                 None => return None,
-                Some(ref range) if self.index < range.length => {
+                Some(range) if self.index < range.length => {
                     self.index += 1;
                     return Some((
                         range.csid,
@@ -661,10 +668,10 @@ mod test {
             .collect();
         let reference = vec![
             (ONES_CSID, p0.clone(), 3),
-            (ONES_CSID, p0.clone(), 4),
+            (ONES_CSID, p0, 4),
             (TWOS_CSID, p1.clone(), 2),
             (TWOS_CSID, p1.clone(), 3),
-            (TWOS_CSID, p1.clone(), 4),
+            (TWOS_CSID, p1, 4),
         ];
         assert_eq!(lines, reference);
 
@@ -773,14 +780,14 @@ mod test {
                 offset: 3,
                 length: 2,
                 csid: THREES_CSID,
-                path: p1.clone(),
+                path: p1,
                 origin_offset: 3,
             },
             BlameRange {
                 offset: 5,
                 length: 1,
                 csid: FOURS_CSID,
-                path: p0.clone(),
+                path: p0,
                 origin_offset: 5,
             },
         ])?;
@@ -822,14 +829,14 @@ mod test {
                     offset: 3,
                     length: 2,
                     csid: THREES_CSID,
-                    path: p1.clone(),
+                    path: p1,
                     origin_offset: 15,
                 },
                 BlameRange {
                     offset: 5,
                     length: 1,
                     csid: FOURS_CSID,
-                    path: p0.clone(),
+                    path: p0,
                     origin_offset: 3,
                 },
             ],
@@ -910,7 +917,7 @@ mod test {
                 offset: 4,
                 length: 1,
                 csid: ONES_CSID,
-                path: path.clone(),
+                path,
                 origin_offset: 3,
             },
         ])?;

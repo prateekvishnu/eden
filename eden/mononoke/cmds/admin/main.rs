@@ -12,11 +12,12 @@ use blobstore::PutBehaviour;
 use fbinit::FacebookInit;
 use std::process::ExitCode;
 
-use cmdlib::args::{self, ArgType, MononokeClapApp};
+use cmdlib::args;
+use cmdlib::args::ArgType;
+use cmdlib::args::MononokeClapApp;
 use context::CoreContext;
 use slog::error;
 
-use crate::async_requests::subcommand_async_requests;
 use crate::blobstore_fetch::subcommand_blobstore_fetch;
 use crate::blobstore_unlink::subcommand_blobstore_unlink;
 use crate::blobstore_upload::subcommand_blobstore_upload;
@@ -31,7 +32,6 @@ use crate::mutable_counters::subcommand_mutable_counters;
 use crate::redaction::subcommand_redaction;
 use crate::skiplist_subcommand::subcommand_skiplist;
 
-mod async_requests;
 mod blobstore_fetch;
 mod blobstore_unlink;
 mod blobstore_upload;
@@ -45,10 +45,7 @@ mod error;
 mod filenodes;
 mod hash_convert;
 mod hg_changeset;
-mod list_ancestors;
 mod mutable_counters;
-mod pushrebase;
-mod rebase;
 mod redaction;
 mod rsync;
 mod skiplist_subcommand;
@@ -68,7 +65,6 @@ fn setup_app<'a, 'b>() -> MononokeClapApp<'a, 'b> {
         .with_special_put_behaviour(PutBehaviour::Overwrite)
         .build()
         .about("Poke at mononoke internals for debugging and investigating data structures.")
-        .subcommand(async_requests::build_subcommand())
         .subcommand(blobstore_fetch::build_subcommand())
         .subcommand(blobstore_unlink::build_subcommand())
         .subcommand(blobstore_upload::build_subcommand())
@@ -78,7 +74,6 @@ fn setup_app<'a, 'b>() -> MononokeClapApp<'a, 'b> {
         .subcommand(hg_changeset::build_subcommand())
         .subcommand(skiplist_subcommand::build_subcommand())
         .subcommand(hash_convert::build_subcommand())
-        .subcommand(list_ancestors::build_subcommand())
         .subcommand(mutable_counters::build_subcommand())
         .subcommand(redaction::build_subcommand())
         .subcommand(filenodes::build_subcommand())
@@ -90,8 +85,6 @@ fn setup_app<'a, 'b>() -> MononokeClapApp<'a, 'b> {
         .subcommand(subcommand_deleted_manifest::build_subcommand())
         .subcommand(derived_data::build_subcommand())
         .subcommand(rsync::build_subcommand())
-        .subcommand(rebase::build_subcommand())
-        .subcommand(pushrebase::build_subcommand())
         .subcommand(subcommand_skeleton_manifests::build_subcommand())
         .subcommand(truncate_segmented_changelog::build_subcommand())
 }
@@ -110,9 +103,6 @@ fn main(fb: FacebookInit) -> ExitCode {
     let runtime = matches.runtime();
     let res = runtime.block_on(async {
         match matches.subcommand() {
-            (async_requests::ASYNC_REQUESTS, Some(sub_m)) => {
-                subcommand_async_requests(fb, logger, &matches, sub_m).await
-            }
             (blobstore_fetch::BLOBSTORE_FETCH, Some(sub_m)) => {
                 subcommand_blobstore_fetch(fb, logger, &matches, sub_m).await
             }
@@ -141,9 +131,6 @@ fn main(fb: FacebookInit) -> ExitCode {
             }
             (hash_convert::HASH_CONVERT, Some(sub_m)) => {
                 subcommand_hash_convert(fb, logger, &matches, sub_m).await
-            }
-            (list_ancestors::LIST_ANCESTORS, Some(sub_m)) => {
-                list_ancestors::list_ancestors(fb, logger, &matches, sub_m).await
             }
             (mutable_counters::MUTABLE_COUNTERS, Some(sub_m)) => {
                 subcommand_mutable_counters(fb, sub_m, &matches, logger.clone()).await
@@ -180,12 +167,6 @@ fn main(fb: FacebookInit) -> ExitCode {
             }
             (rsync::RSYNC, Some(sub_m)) => {
                 rsync::subcommand_rsync(fb, logger, &matches, sub_m).await
-            }
-            (rebase::REBASE, Some(sub_m)) => {
-                rebase::subcommand_rebase(fb, logger, &matches, sub_m).await
-            }
-            (pushrebase::PUSHREBASE, Some(sub_m)) => {
-                pushrebase::subcommand_pushrebase(fb, logger, &matches, sub_m).await
             }
             (subcommand_skeleton_manifests::SKELETON_MANIFESTS, Some(sub_m)) => {
                 subcommand_skeleton_manifests::subcommand_skeleton_manifests(

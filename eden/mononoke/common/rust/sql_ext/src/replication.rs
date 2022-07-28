@@ -7,8 +7,10 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use slog::{info, Logger};
-use std::{fmt, time::Duration};
+use slog::info;
+use slog::Logger;
+use std::fmt;
+use std::time::Duration;
 use tokio::time;
 
 const MAX_ALLOWED_REPLICATION_LAG_SECS: u64 = 5;

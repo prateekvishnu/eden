@@ -5,21 +5,30 @@
  * GNU General Public License version 2.
  */
 
-use crate::detail::{
-    pack::CTIME,
-    validate::{CHECK_FAIL, CHECK_TYPE, ERROR_MSG, NODE_KEY, REPO},
-};
+use crate::detail::pack::CTIME;
+use crate::detail::validate::CHECK_FAIL;
+use crate::detail::validate::CHECK_TYPE;
+use crate::detail::validate::ERROR_MSG;
+use crate::detail::validate::NODE_KEY;
+use crate::detail::validate::REPO;
 
-use anyhow::{anyhow, Error};
+use anyhow::anyhow;
+use anyhow::Error;
 use blobstore::BlobstoreMetadata;
 use context::CoreContext;
-use metaconfig_types::{BlobConfig, BlobstoreId};
-use mononoke_types::{repo::REPO_PREFIX_REGEX, RepositoryId};
-use multiplexedblob::{LoggingScrubHandler, ScrubHandler};
-use scuba::value::{NullScubaValue, ScubaValue};
+use metaconfig_types::BlobConfig;
+use metaconfig_types::BlobstoreId;
+use mononoke_types::repo::REPO_PREFIX_REGEX;
+use mononoke_types::RepositoryId;
+use multiplexedblob::LoggingScrubHandler;
+use multiplexedblob::ScrubHandler;
+use scuba::value::NullScubaValue;
+use scuba::value::ScubaValue;
 use scuba_ext::MononokeScubaSampleBuilder;
 use stats::prelude::*;
-use std::{collections::HashMap, convert::From, fmt, str::FromStr};
+use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
 
 define_stats! {
     prefix = "mononoke.walker";
@@ -63,7 +72,7 @@ impl fmt::Debug for StatsScrubHandler {
 
 pub fn get_repo_id_from_key(key: &str) -> Result<Option<RepositoryId>, Error> {
     REPO_PREFIX_REGEX
-        .captures(&key)
+        .captures(key)
         .and_then(|m| m.get(1).map(|m| RepositoryId::from_str(m.as_str())))
         .transpose()
 }

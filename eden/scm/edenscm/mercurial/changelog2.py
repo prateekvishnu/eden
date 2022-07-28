@@ -29,7 +29,6 @@ from . import (
 from .changelog import changelogrevision, gitcommittext, hgcommittext, readfiles
 from .i18n import _
 from .node import hex, nullid, nullrev, wdirid, wdirrev
-from .pycompat import encodeutf8
 
 
 SEGMENTS_DIR = "segments/v1"
@@ -414,7 +413,6 @@ class changelog(object):
         textmap = {}  # {node: btext}
         commits = []
         buffersize = self._groupbuffersize
-        nodemap = self.nodemap
         tip = None
         for node, p1, p2, linknode, deltabase, delta, flags in deltas:
             assert flags == 0, "changelog flags cannot be non-zero"
@@ -695,6 +693,10 @@ class nodemap(object):
 
 
 def migrateto(repo, name):
+    """Migrate from the current format to the destination format `name`."""
+    if backendname(repo) == name:
+        # Already in desired format.
+        return
     if "hgsql" in repo.requirements:
         raise error.Abort(_("cannot migrate hgsql repo"))
     if "lazytextchangelog" in repo.storerequirements and name not in {
@@ -777,13 +779,9 @@ def migratetolazytext(repo):
 
     The migration can only be done from hybrid or doublewrite.
     """
-    if not any(
-        s in repo.storerequirements
-        for s in ("lazytextchangelog", "hybridchangelog", "doublewritechangelog")
-    ) and not _isempty(repo):
-        raise error.Abort(
-            _("lazytext backend can only be migrated from hybrid or doublewrite")
-        )
+    # Migrate revlog to segments on demand.
+    if repo.changelog.algorithmbackend == "revlog":
+        migratetodoublewrite(repo)
 
     # Migration from doublewrite or hybrid backends is a no-op.
     with repo.lock():
@@ -930,7 +928,6 @@ def migratetosegments(repo):
 
 def migratetorevlog(repo):
     """Migrate to revlog backend."""
-    svfs = repo.svfs
     with repo.lock():
         # Migrate from segmentedchangelog
         needmigrate = False
@@ -1019,7 +1016,6 @@ def removebackupfiles(repo):
     Only works for the lazy changelog backend. Has no effects for other
     changelog backends.
     """
-    ui = repo.ui
     # Only works for lazy changelog.
     if "lazychangelog" not in repo.storerequirements:
         return

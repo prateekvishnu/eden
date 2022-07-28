@@ -7,27 +7,37 @@
 
 use anyhow::Context;
 use bytes::Bytes;
-use gotham::state::{FromState, State};
+use gotham::state::FromState;
+use gotham::state::State;
 use http::HeaderMap;
 use hyper::Body;
 
-use gotham_ext::{body_ext::BodyExt, error::HttpError};
-use mononoke_api_hg::{HgRepoContext, RepoContextHgExt};
+use gotham_ext::body_ext::BodyExt;
+use gotham_ext::error::HttpError;
+use mononoke_api_hg::HgRepoContext;
+use mononoke_api_hg::RepoContextHgExt;
 use rate_limiting::Metric;
 
 use crate::context::ServerContext;
-use crate::errors::{ErrorKind, MononokeErrorExt};
+use crate::errors::ErrorKind;
+use crate::errors::MononokeErrorExt;
 use crate::middleware::request_dumper::RequestDumper;
 use crate::middleware::RequestContext;
 
 pub mod cbor;
 pub mod convert;
 
-pub use cbor::{
-    cbor_mime, cbor_stream_filtered_errors, custom_cbor_stream, parse_cbor_request,
-    parse_wire_request, to_cbor_bytes,
-};
-pub use convert::{to_create_change, to_hg_path, to_mononoke_path, to_mpath, to_revlog_changeset};
+pub use cbor::cbor_mime;
+pub use cbor::cbor_stream_filtered_errors;
+pub use cbor::custom_cbor_stream;
+pub use cbor::parse_cbor_request;
+pub use cbor::parse_wire_request;
+pub use cbor::to_cbor_bytes;
+pub use convert::to_create_change;
+pub use convert::to_hg_path;
+pub use convert::to_mononoke_path;
+pub use convert::to_mpath;
+pub use convert::to_revlog_changeset;
 
 pub async fn get_repo(
     sctx: &ServerContext,
@@ -46,9 +56,12 @@ pub async fn get_repo(
         .repo(rctx.ctx.clone(), name)
         .await
         .map_err(|e| e.into_http_error(ErrorKind::RepoLoadFailed(name.to_string())))?
-        .map(|repo| repo.hg())
         .with_context(|| ErrorKind::RepoDoesNotExist(name.to_string()))
-        .map_err(HttpError::e404)
+        .map_err(HttpError::e404)?
+        .build()
+        .await
+        .map(|repo| repo.hg())
+        .map_err(|e| e.into_http_error(ErrorKind::RepoLoadFailed(name.to_string())))
 }
 
 pub async fn get_request_body(state: &mut State) -> Result<Bytes, HttpError> {

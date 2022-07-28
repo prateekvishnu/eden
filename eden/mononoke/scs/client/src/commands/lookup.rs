@@ -10,36 +10,33 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use anyhow::{bail, Error};
-use clap::{App, AppSettings, ArgMatches, SubCommand};
-use futures::stream;
-use futures_util::stream::StreamExt;
-use serde_derive::Serialize;
+use anyhow::bail;
+use anyhow::Result;
+use serde::Serialize;
 use source_control::types as thrift;
 
-use crate::args::commit_id::{
-    add_commit_id_args, add_scheme_args, get_commit_id, get_request_schemes, get_schemes,
-    map_commit_ids, resolve_commit_id,
-};
-use crate::args::repo::{add_repo_args, get_repo_specifier};
-use crate::connection::Connection;
+use crate::args::commit_id::map_commit_ids;
+use crate::args::commit_id::resolve_commit_id;
+use crate::args::commit_id::CommitIdArgs;
+use crate::args::commit_id::SchemeArgs;
+use crate::args::repo::RepoArgs;
 use crate::lib::commit_id::render_commit_id;
-use crate::render::{Render, RenderStream};
+use crate::render::Render;
+use crate::ScscApp;
 
-pub(super) const NAME: &str = "lookup";
-
-pub(super) fn make_subcommand<'a, 'b>() -> App<'a, 'b> {
-    let cmd = SubCommand::with_name(NAME)
-        .about("Look up a bookmark or commit id")
-        .setting(AppSettings::ColoredHelp);
-    let cmd = add_repo_args(cmd);
-    let cmd = add_scheme_args(cmd);
-    let cmd = add_commit_id_args(cmd);
-    cmd
+#[derive(clap::Parser)]
+/// Look up a bookmark or commit id
+pub(super) struct CommandArgs {
+    #[clap(flatten)]
+    repo_args: RepoArgs,
+    #[clap(flatten)]
+    scheme_args: SchemeArgs,
+    #[clap(flatten)]
+    commit_id_args: CommitIdArgs,
 }
 
 #[derive(Serialize)]
-pub struct LookupOutput {
+pub(crate) struct LookupOutput {
     #[serde(skip)]
     pub requested: String,
     pub exists: bool,
@@ -47,9 +44,11 @@ pub struct LookupOutput {
 }
 
 impl Render for LookupOutput {
-    fn render(&self, matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    type Args = SchemeArgs;
+
+    fn render(&self, args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         if self.exists {
-            let schemes = get_schemes(matches);
+            let schemes = args.scheme_string_set();
             render_commit_id(None, "\n", &self.requested, &self.ids, &schemes, w)?;
             write!(w, "\n")?;
         } else {
@@ -58,36 +57,33 @@ impl Render for LookupOutput {
         Ok(())
     }
 
-    fn render_json(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    fn render_json(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         Ok(serde_json::to_writer(w, self)?)
     }
 }
 
-pub(super) async fn run(
-    matches: &ArgMatches<'_>,
-    connection: Connection,
-) -> Result<RenderStream, Error> {
-    let repo = get_repo_specifier(matches).expect("repository is required");
-    let commit_id = get_commit_id(matches)?;
-    let id = resolve_commit_id(&connection, &repo, &commit_id).await?;
+pub(super) async fn run(app: ScscApp, args: CommandArgs) -> Result<()> {
+    let repo = args.repo_args.clone().into_repo_specifier();
+    let commit_id = args.commit_id_args.clone().into_commit_id();
+    let id = resolve_commit_id(&app.connection, &repo, &commit_id).await?;
     let commit = thrift::CommitSpecifier {
         repo,
         id,
         ..Default::default()
     };
     let params = thrift::CommitLookupParams {
-        identity_schemes: get_request_schemes(&matches),
+        identity_schemes: args.scheme_args.clone().into_request_schemes(),
         ..Default::default()
     };
-    let response = connection.commit_lookup(&commit, &params).await?;
+    let response = app.connection.commit_lookup(&commit, &params).await?;
     let ids = match &response.ids {
         Some(ids) => map_commit_ids(ids.values()),
         None => BTreeMap::new(),
     };
-    let output = Box::new(LookupOutput {
+    let output = LookupOutput {
         requested: commit_id.to_string(),
         exists: response.exists,
         ids,
-    });
-    Ok(stream::once(async move { Ok(output as Box<dyn Render>) }).boxed())
+    };
+    app.target.render_one(&args.scheme_args, output).await
 }

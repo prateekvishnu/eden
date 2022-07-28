@@ -7,42 +7,56 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fmt::{Arguments, Write};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::fmt::Arguments;
+use std::fmt::Write;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
 
-use anyhow::{Context, Error};
+use anyhow::Context;
+use anyhow::Error;
 use bytes::Bytes;
 use cached_config::ConfigHandle;
-use futures::{
-    future,
-    stream::{Stream, StreamExt, TryStreamExt},
-};
-use gotham::state::{FromState, State};
+use futures::future;
+use futures::stream::Stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use gotham::state::FromState;
+use gotham::state::State;
 use gotham_derive::StateData;
-use gotham_ext::{body_ext::BodyExt, middleware::ClientIdentity};
-use http::{
-    header::HeaderMap,
-    uri::{Authority, Parts, PathAndQuery, Scheme, Uri},
-};
-use hyper::{header, Body, Request};
-use permission_checker::{ArcPermissionChecker, MononokeIdentitySet};
+use gotham_ext::body_ext::BodyExt;
+use gotham_ext::middleware::ClientIdentity;
+use http::header::HeaderMap;
+use http::uri::Authority;
+use http::uri::Parts;
+use http::uri::PathAndQuery;
+use http::uri::Scheme;
+use http::uri::Uri;
+use hyper::header;
+use hyper::Body;
+use hyper::Request;
+use permission_checker::ArcPermissionChecker;
+use permission_checker::MononokeIdentitySet;
 use slog::Logger;
 use tokio::runtime::Handle;
 
-use blobrepo::BlobRepo;
 use context::CoreContext;
-use hyper::{client::HttpConnector, Client};
+use hyper::client::HttpConnector;
+use hyper::Client;
 use hyper_openssl::HttpsConnector;
-use lfs_protocol::{RequestBatch, RequestObject, ResponseBatch};
+use lfs_protocol::RequestBatch;
+use lfs_protocol::RequestObject;
+use lfs_protocol::ResponseBatch;
 use metaconfig_types::RepoConfig;
 use mononoke_types::ContentId;
 
 use crate::config::ServerConfig;
-use crate::errors::{ErrorKind, LfsServerContextErrorKind};
-use crate::middleware::{LfsMethod, RequestContext};
+use crate::errors::ErrorKind;
+use crate::errors::LfsServerContextErrorKind;
+use crate::middleware::LfsMethod;
+use crate::middleware::RequestContext;
+use crate::Repo;
 
 pub type HttpsHyperClient = Client<HttpsConnector<HttpConnector>>;
 
@@ -52,7 +66,7 @@ const ACL_CHECK_ACTION: &str = "read";
 const CLIENT_USER_AGENT: &str = "mononoke-lfs-server/0.1.0 git/2.15.1";
 
 struct LfsServerContextInner {
-    repositories: HashMap<String, (BlobRepo, ArcPermissionChecker, RepoConfig)>,
+    repositories: HashMap<String, (Repo, ArcPermissionChecker, RepoConfig)>,
     client: Arc<HttpsHyperClient>,
     server: Arc<ServerUris>,
     always_wait_for_upstream: bool,
@@ -68,7 +82,7 @@ pub struct LfsServerContext {
 
 impl LfsServerContext {
     pub fn new(
-        repositories: HashMap<String, (BlobRepo, ArcPermissionChecker, RepoConfig)>,
+        repositories: HashMap<String, (Repo, ArcPermissionChecker, RepoConfig)>,
         server: ServerUris,
         always_wait_for_upstream: bool,
         max_upload_size: Option<u64>,
@@ -197,9 +211,9 @@ async fn acl_check(
         .map_err(LfsServerContextErrorKind::PermissionCheckFailed)?;
 
     if !acl_check && enforce_authorization {
-        return Err(LfsServerContextErrorKind::Forbidden.into());
+        Err(LfsServerContextErrorKind::Forbidden)
     } else {
-        return Ok(());
+        Ok(())
     }
 }
 
@@ -213,7 +227,7 @@ enum HttpClient {
 #[derive(Clone)]
 pub struct RepositoryRequestContext {
     pub ctx: CoreContext,
-    pub repo: BlobRepo,
+    pub repo: Repo,
     pub uri_builder: UriBuilder,
     pub config: Arc<ServerConfig>,
     always_wait_for_upstream: bool,
@@ -298,7 +312,7 @@ impl RepositoryRequestContext {
         let headers = HeaderMap::try_borrow_from(state);
         let host = get_host_header(&headers)?;
 
-        let lfs_ctx = LfsServerContext::borrow_from(&state);
+        let lfs_ctx = LfsServerContext::borrow_from(state);
         lfs_ctx.request(ctx, repository, identities, host).await
     }
 
@@ -406,12 +420,11 @@ pub struct UriBuilder {
 
 impl UriBuilder {
     fn pick_uri(&self) -> Result<&BaseUri, ErrorKind> {
-        Ok(self
-            .server
+        self.server
             .self_uris
             .iter()
             .find(|&x| x.authority.host() == self.host)
-            .ok_or_else(|| ErrorKind::HostNotAllowlisted(self.host.clone()))?)
+            .ok_or_else(|| ErrorKind::HostNotAllowlisted(self.host.clone()))
     }
 
     pub fn upload_uri(&self, object: &RequestObject) -> Result<Uri, ErrorKind> {
@@ -506,8 +519,8 @@ impl BaseUri {
         let mut p = String::new();
         if let Some(ref path_and_query) = self.path_and_query {
             write!(&mut p, "{}", path_and_query)?;
-            if !path_and_query.path().ends_with("/") {
-                write!(&mut p, "{}", "/")?;
+            if !path_and_query.path().ends_with('/') {
+                write!(&mut p, "/")?;
             }
         }
         p.write_fmt(args)?;
@@ -527,7 +540,8 @@ mod test {
     use anyhow::anyhow;
     use fbinit::FacebookInit;
     use lfs_protocol::Sha256 as LfsSha256;
-    use mononoke_types::{hash::Sha256, ContentId};
+    use mononoke_types::hash::Sha256;
+    use mononoke_types::ContentId;
     use permission_checker::PermissionCheckerBuilder;
     use std::str::FromStr;
     use test_repo_factory::TestRepoFactory;
@@ -554,7 +568,7 @@ mod test {
 
     pub struct TestContextBuilder<'a> {
         fb: FacebookInit,
-        repo: BlobRepo,
+        repo: Repo,
         self_uris: Vec<&'a str>,
         upstream_uri: Option<String>,
         config: ServerConfig,
@@ -562,7 +576,7 @@ mod test {
     }
 
     impl TestContextBuilder<'_> {
-        pub fn repo(mut self, repo: BlobRepo) -> Self {
+        pub fn repo(mut self, repo: Repo) -> Self {
             self.repo = repo;
             self
         }
@@ -610,7 +624,7 @@ mod test {
 
         pub fn test_builder_with_repo(
             fb: FacebookInit,
-            repo: BlobRepo,
+            repo: Repo,
         ) -> Result<TestContextBuilder<'static>, Error> {
             Ok(TestContextBuilder {
                 fb,
@@ -631,7 +645,7 @@ mod test {
     }
 
     fn content_id() -> Result<ContentId, Error> {
-        Ok(ContentId::from_str(ONES_HASH)?)
+        ContentId::from_str(ONES_HASH)
     }
 
     fn oid() -> Result<Sha256, Error> {
@@ -777,7 +791,7 @@ mod test {
         )?;
         assert_eq!(
             b.upstream_batch_uri()?.map(|uri| uri.to_string()),
-            Some(format!("http://bar.com/objects/batch")),
+            Some("http://bar.com/objects/batch".to_string()),
         );
         Ok(())
     }
@@ -791,7 +805,7 @@ mod test {
         )?;
         assert_eq!(
             b.upstream_batch_uri()?.map(|uri| uri.to_string()),
-            Some(format!("http://bar.com/objects/batch")),
+            Some("http://bar.com/objects/batch".to_string()),
         );
         Ok(())
     }
@@ -805,7 +819,7 @@ mod test {
         )?;
         assert_eq!(
             b.upstream_batch_uri()?.map(|uri| uri.to_string()),
-            Some(format!("http://bar.com/foo/objects/batch")),
+            Some("http://bar.com/foo/objects/batch".to_string()),
         );
         Ok(())
     }
@@ -819,14 +833,14 @@ mod test {
         )?;
         assert_eq!(
             b.upstream_batch_uri()?.map(|uri| uri.to_string()),
-            Some(format!("http://bar.com/foo/objects/batch")),
+            Some("http://bar.com/foo/objects/batch".to_string()),
         );
         Ok(())
     }
 
     #[fbinit::test]
     async fn test_acl_check_no_certificates(_fb: FacebookInit) -> Result<(), Error> {
-        let aclchecker = PermissionCheckerBuilder::always_allow().into();
+        let aclchecker = PermissionCheckerBuilder::new().allow_all().build().into();
 
         let res = acl_check(aclchecker, None, false, true).await;
 

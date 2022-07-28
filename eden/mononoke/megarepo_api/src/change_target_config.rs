@@ -5,20 +5,28 @@
  * GNU General Public License version 2.
  */
 
-use crate::common::{find_target_bookmark_and_value, find_target_sync_config, MegarepoOp};
+use crate::common::find_target_bookmark_and_value;
+use crate::common::find_target_sync_config;
+use crate::common::MegarepoOp;
 use anyhow::anyhow;
 use context::CoreContext;
 use core::cmp::Ordering;
 use derived_data_utils::derived_data_utils;
 use futures::future;
-use futures::{stream::FuturesUnordered, TryStreamExt};
-use itertools::{EitherOrBoth, Itertools};
-use megarepo_config::{
-    MononokeMegarepoConfigs, Source, SyncConfigVersion, SyncTargetConfig, Target,
-};
+use futures::stream::FuturesUnordered;
+use futures::TryStreamExt;
+use itertools::EitherOrBoth;
+use itertools::Itertools;
+use megarepo_config::MononokeMegarepoConfigs;
+use megarepo_config::Source;
+use megarepo_config::SyncConfigVersion;
+use megarepo_config::SyncTargetConfig;
+use megarepo_config::Target;
 use megarepo_error::MegarepoError;
-use megarepo_mapping::{CommitRemappingState, SourceName};
-use mononoke_api::{Mononoke, RepoContext};
+use megarepo_mapping::CommitRemappingState;
+use megarepo_mapping::SourceName;
+use mononoke_api::Mononoke;
+use mononoke_api::RepoContext;
 use mononoke_types::ChangesetId;
 use mutable_renames::MutableRenames;
 use std::collections::BTreeMap;
@@ -139,7 +147,7 @@ pub struct ChangeTargetConfig<'a> {
 
 impl<'a> MegarepoOp for ChangeTargetConfig<'a> {
     fn mononoke(&self) -> &Arc<Mononoke> {
-        &self.mononoke
+        self.mononoke
     }
 }
 
@@ -165,13 +173,13 @@ impl<'a> ChangeTargetConfig<'a> {
         changesets_to_merge: BTreeMap<SourceName, ChangesetId>,
         message: Option<String>,
     ) -> Result<ChangesetId, MegarepoError> {
-        let target_repo = self.find_repo_by_id(&ctx, target.repo_id).await?;
+        let target_repo = self.find_repo_by_id(ctx, target.repo_id).await?;
 
         // Find the target config version and remapping state that was used to
         // create the latest target commit. This config version will be used to
         // as a base for comparing with new config.
         let (target_bookmark, actual_target_location) =
-            find_target_bookmark_and_value(&ctx, &target_repo, &target).await?;
+            find_target_bookmark_and_value(ctx, &target_repo, target).await?;
 
         // target doesn't point to the commit we expect - check
         // if this method has already succeded and just immediately return the
@@ -195,11 +203,11 @@ impl<'a> ChangeTargetConfig<'a> {
                 MegarepoError::internal(anyhow!("programming error - target changeset not found!"))
             })?;
         let (old_remapping_state, old_config) = find_target_sync_config(
-            &ctx,
+            ctx,
             target_repo.blob_repo(),
             target_location,
-            &target,
-            &self.megarepo_configs,
+            target,
+            self.megarepo_configs,
         )
         .await?;
 
@@ -230,7 +238,7 @@ impl<'a> ChangeTargetConfig<'a> {
                 &changesets_to_merge,
                 new_config.version.clone(),
                 message.clone(),
-                &self.mutable_renames,
+                self.mutable_renames,
             )
             .await?;
         let additions_merge = if let Some(additions_merge_cs_id) = additions_merge_cs_id {
@@ -256,7 +264,7 @@ impl<'a> ChangeTargetConfig<'a> {
                 &diff.removed,
                 message,
                 &additions_merge,
-                &old_target_cs,
+                old_target_cs,
                 &new_remapping_state,
                 Some(new_config.version),
             )
@@ -394,7 +402,9 @@ mod test {
     use maplit::btreemap;
     use megarepo_config::Target;
     use mononoke_types::RepositoryId;
-    use mononoke_types_mocks::changesetid::{ONES_CSID, THREES_CSID, TWOS_CSID};
+    use mononoke_types_mocks::changesetid::ONES_CSID;
+    use mononoke_types_mocks::changesetid::THREES_CSID;
+    use mononoke_types_mocks::changesetid::TWOS_CSID;
 
     fn source_names(sources: &[(Source, ChangesetId)]) -> Vec<String> {
         sources
@@ -417,7 +427,7 @@ mod test {
         let changed_source = SourceName::new("changed_source");
         let version_old = "version_old".to_string();
         let version_new = "version_old".to_string();
-        let config_old = SyncTargetConfigBuilder::new(repo_id, target.clone(), version_old.clone())
+        let config_old = SyncTargetConfigBuilder::new(repo_id, target.clone(), version_old)
             .source_builder(removed_source.clone())
             .set_prefix_bookmark_to_source_name()
             .build_source()?
@@ -430,12 +440,12 @@ mod test {
             .no_storage_build();
 
         let old_changesets = btreemap! {
-            removed_source.clone() => ONES_CSID,
+            removed_source => ONES_CSID,
             changed_source.clone() =>ONES_CSID,
             unchanged_source.clone() =>ONES_CSID,
         };
 
-        let config_new = SyncTargetConfigBuilder::new(repo_id, target.clone(), version_new.clone())
+        let config_new = SyncTargetConfigBuilder::new(repo_id, target, version_new)
             .source_builder(added_source.clone())
             .set_prefix_bookmark_to_source_name()
             .build_source()?
@@ -449,9 +459,9 @@ mod test {
             .no_storage_build();
 
         let new_changesets = btreemap! {
-            added_source.clone() => TWOS_CSID,
-            changed_source.clone() => THREES_CSID,
-            unchanged_source.clone() => ONES_CSID,
+            added_source => TWOS_CSID,
+            changed_source => THREES_CSID,
+            unchanged_source => ONES_CSID,
         };
 
         let diff = diff_configs(&config_old, &old_changesets, &config_new, &new_changesets)?;

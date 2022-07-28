@@ -5,20 +5,28 @@
  * GNU General Public License version 2.
  */
 
-use crate::{
-    HgBlob, HgBlobNode, HgChangesetEnvelope, HgChangesetId, HgManifestId, HgNodeHash, HgParents,
-    MPath, NULL_HASH,
-};
-use anyhow::{bail, Context, Error, Result};
+use crate::HgBlob;
+use crate::HgBlobNode;
+use crate::HgChangesetEnvelope;
+use crate::HgChangesetId;
+use crate::HgManifestId;
+use crate::HgNodeHash;
+use crate::HgParents;
+use crate::MPath;
+use crate::NULL_HASH;
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use blobstore::Blobstore;
 use bytes::Bytes;
 use context::CoreContext;
 use mononoke_types::DateTime;
-use std::{
-    collections::BTreeMap,
-    io::{self, Write},
-    str::{self, FromStr},
-};
+use std::collections::BTreeMap;
+use std::io;
+use std::io::Write;
+use std::str;
+use std::str::FromStr;
 
 // The `user` and `comments` fields are expected to be utf8 encoded, but
 // some older commits might be corrupted. We handle them as pure binary here
@@ -141,7 +149,6 @@ impl Extra {
 }
 
 fn try_get<T>(v: &[T], idx: usize) -> Option<&T> {
-    let v = v.as_ref();
     if idx < v.len() { Some(&v[idx]) } else { None }
 }
 
@@ -428,7 +435,7 @@ pub fn serialize_cs<W: Write>(cs: &RevlogChangeset, out: &mut W) -> Result<()> {
         write!(out, "{}\n", f)?;
     }
     write!(out, "\n")?;
-    out.write_all(&cs.message())?;
+    out.write_all(cs.message())?;
 
     Ok(())
 }

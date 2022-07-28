@@ -9,14 +9,21 @@ use crate::common::MegarepoOp;
 use bookmarks::BookmarkName;
 use context::CoreContext;
 use derived_data_utils::derived_data_utils;
-use futures::{future, stream::FuturesUnordered, TryFutureExt, TryStreamExt};
-use megarepo_config::{verify_config, MononokeMegarepoConfigs, SyncTargetConfig};
+use futures::future;
+use futures::stream::FuturesUnordered;
+use futures::TryFutureExt;
+use futures::TryStreamExt;
+use megarepo_config::verify_config;
+use megarepo_config::MononokeMegarepoConfigs;
+use megarepo_config::SyncTargetConfig;
 use megarepo_error::MegarepoError;
 use megarepo_mapping::SourceName;
-use mononoke_api::{Mononoke, RepoContext};
+use mononoke_api::Mononoke;
+use mononoke_api::RepoContext;
 use mononoke_types::ChangesetId;
 use mutable_renames::MutableRenames;
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 // Create a new sync target given a config.
 // After this command finishes it creates
@@ -44,7 +51,7 @@ pub struct AddSyncTarget<'a> {
 
 impl<'a> MegarepoOp for AddSyncTarget<'a> {
     fn mononoke(&self) -> &Arc<Mononoke> {
-        &self.mononoke
+        self.mononoke
     }
 }
 
@@ -97,7 +104,7 @@ impl<'a> AddSyncTarget<'a> {
                 repo.blob_repo(),
                 &sync_target_config.sources,
                 &changesets_to_merge,
-                &self.mutable_renames,
+                self.mutable_renames,
             )
             .await?;
         scuba.log_with_msg("Created move commits", None);
@@ -182,8 +189,7 @@ impl<'a> AddSyncTarget<'a> {
         repo: &RepoContext,
     ) -> Result<Option<ChangesetId>, MegarepoError> {
         let bookmark_name = &sync_target_config.target.bookmark;
-        let bookmark =
-            BookmarkName::new(bookmark_name.to_string()).map_err(MegarepoError::request)?;
+        let bookmark = BookmarkName::new(bookmark_name).map_err(MegarepoError::request)?;
 
         let maybe_cs_id = repo
             .blob_repo()
@@ -207,7 +213,7 @@ impl<'a> AddSyncTarget<'a> {
         // our config storage
         self.check_if_new_sync_target_config_is_equivalent_to_already_existing(
             ctx,
-            &self.megarepo_configs,
+            self.megarepo_configs,
             sync_target_config,
         )
         .await?;

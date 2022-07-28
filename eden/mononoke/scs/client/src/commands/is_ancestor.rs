@@ -9,58 +9,53 @@
 
 use std::io::Write;
 
-use anyhow::{bail, Error};
-use clap::{App, AppSettings, ArgMatches, SubCommand};
-use futures::stream;
-use futures_util::stream::StreamExt;
-use serde_derive::Serialize;
+use anyhow::bail;
+use anyhow::Result;
+use serde::Serialize;
 use source_control::types as thrift;
 
-use crate::args::commit_id::{
-    add_multiple_commit_id_args, add_scheme_args, get_commit_ids, resolve_commit_ids,
-};
-use crate::args::repo::{add_repo_args, get_repo_specifier};
-use crate::connection::Connection;
-use crate::render::{Render, RenderStream};
+use crate::args::commit_id::resolve_commit_ids;
+use crate::args::commit_id::CommitIdsArgs;
+use crate::args::commit_id::SchemeArgs;
+use crate::args::repo::RepoArgs;
+use crate::render::Render;
+use crate::ScscApp;
 
-pub(super) const NAME: &str = "is-ancestor";
-
-pub(super) fn make_subcommand<'a, 'b>() -> App<'a, 'b> {
-    let cmd = SubCommand::with_name(NAME)
-        .about("Finds whether the first provided commit is an ancestor of the second one.")
-        .setting(AppSettings::ColoredHelp);
-    let cmd = add_repo_args(cmd);
-    let cmd = add_scheme_args(cmd);
-    add_multiple_commit_id_args(cmd)
+#[derive(clap::Parser)]
+/// Finds whether the first provided commit is an ancestor of the second one.
+pub(super) struct CommandArgs {
+    #[clap(flatten)]
+    repo_args: RepoArgs,
+    #[clap(flatten)]
+    scheme_args: SchemeArgs,
+    #[clap(flatten)]
+    commit_ids_args: CommitIdsArgs,
 }
 
 #[derive(Serialize)]
-pub struct IsAncestorOutput {
-    #[serde(skip)]
-    pub requested: (String, String),
-    pub result: bool,
+struct IsAncestorOutput {
+    result: bool,
 }
 
 impl Render for IsAncestorOutput {
-    fn render(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    type Args = CommandArgs;
+
+    fn render(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         writeln!(w, "{:?}", self.result)?;
         Ok(())
     }
 
-    fn render_json(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    fn render_json(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         Ok(serde_json::to_writer(w, self)?)
     }
 }
 
-pub(super) async fn run(
-    matches: &ArgMatches<'_>,
-    connection: Connection,
-) -> Result<RenderStream, Error> {
-    let repo = get_repo_specifier(matches).expect("repository is required");
-    let commit_ids = get_commit_ids(matches)?;
-    let ids = resolve_commit_ids(&connection, &repo, &commit_ids).await?;
-    if ids.len() != 2 || ids.is_empty() {
-        bail!("expected 1 or 2 commit_ids (got {})", commit_ids.len())
+pub(super) async fn run(app: ScscApp, args: CommandArgs) -> Result<()> {
+    let repo = args.repo_args.clone().into_repo_specifier();
+    let commit_ids = args.commit_ids_args.clone().into_commit_ids();
+    let ids = resolve_commit_ids(&app.connection, &repo, &commit_ids).await?;
+    if ids.len() != 2 {
+        bail!("expected 2 commit_ids (got {})", commit_ids.len())
     }
     let commit = thrift::CommitSpecifier {
         repo,
@@ -71,10 +66,10 @@ pub(super) async fn run(
         descendant_commit_id: ids[1].clone(),
         ..Default::default()
     };
-    let response = connection.commit_is_ancestor_of(&commit, &params).await?;
-    let output = Box::new(IsAncestorOutput {
-        requested: (commit_ids[0].to_string(), commit_ids[1].to_string()),
-        result: response,
-    });
-    Ok(stream::once(async move { Ok(output as Box<dyn Render>) }).boxed())
+    let response = app
+        .connection
+        .commit_is_ancestor_of(&commit, &params)
+        .await?;
+    let output = IsAncestorOutput { result: response };
+    app.target.render_one(&args, output).await
 }

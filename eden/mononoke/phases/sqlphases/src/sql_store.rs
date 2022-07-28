@@ -5,21 +5,31 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{Context as _, Error};
+use anyhow::Context as _;
+use anyhow::Error;
 use async_trait::async_trait;
 use bytes::Bytes;
-use caching_ext::{
-    fill_cache, get_or_fill, CacheDisposition, CacheTtl, CachelibHandler, EntityStore,
-    KeyedEntityStore, MemcacheEntity, MemcacheHandler,
-};
-use context::{CoreContext, PerfCounterType};
+use caching_ext::fill_cache;
+use caching_ext::get_or_fill;
+use caching_ext::CacheDisposition;
+use caching_ext::CacheTtl;
+use caching_ext::CachelibHandler;
+use caching_ext::EntityStore;
+use caching_ext::KeyedEntityStore;
+use caching_ext::MemcacheEntity;
+use caching_ext::MemcacheHandler;
+use context::CoreContext;
+use context::PerfCounterType;
 use maplit::hashset;
 use memcache::KeyGen;
-use mononoke_types::{ChangesetId, RepositoryId};
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
 use phases::Phase;
-use sql::{queries, Connection};
+use sql::queries;
+use sql::Connection;
 use stats::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -214,7 +224,7 @@ impl KeyedEntityStore<ChangesetId, SqlPhase> for CacheRequest<'_> {
             .increment_counter(PerfCounterType::SqlReadsReplica);
 
         // NOTE: We only track public phases in the DB.
-        let public = SelectPhases::query(&mapping.read_connection, &repo_id, &cs_ids).await?;
+        let public = SelectPhases::query(&mapping.read_connection, repo_id, &cs_ids).await?;
 
         Result::<_, Error>::Ok(public.into_iter().collect())
     }

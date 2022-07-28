@@ -94,7 +94,7 @@ class IOverlay {
    */
   virtual void saveOverlayDir(
       InodeNumber inodeNumber,
-      const overlay::OverlayDir& odir) = 0;
+      overlay::OverlayDir&& odir) = 0;
 
   /**
    * Remove the overlay record associated with the passed InodeNumber.
@@ -141,16 +141,6 @@ class IOverlay {
   virtual struct statfs statFs() const = 0;
 #endif
 
-  /**
-   * TODO(zeyi): delete this.
-   *
-   * This is required in current SQLite implementation due to the lack of fsck.
-   * We can remove this once we can reliable get inode number.
-   */
-  virtual void updateUsedInodeNumber(uint64_t /* usedInodeNumber */) {
-    EDEN_BUG() << "UNIMPLEMENTED";
-  }
-
   virtual void addChild(
       InodeNumber /* parent */,
       PathComponentPiece /* name */,
@@ -159,6 +149,12 @@ class IOverlay {
   }
 
   virtual void removeChild(
+      InodeNumber /* parent */,
+      PathComponentPiece /* childName */) {
+    EDEN_BUG() << "UNIMPLEMENTED";
+  }
+
+  virtual bool hasChild(
       InodeNumber /* parent */,
       PathComponentPiece /* childName */) {
     EDEN_BUG() << "UNIMPLEMENTED";

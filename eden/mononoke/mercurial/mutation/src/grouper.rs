@@ -7,7 +7,8 @@
 
 //! Utility for grouping commits with their primordials.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::hash::Hash;
 
 /// A group of commits, and their assigned primordial commit (if known).
@@ -115,7 +116,7 @@ impl<T: Copy + Hash + Eq> Grouper<T> {
 
     /// Move all members of `src` to `dest`.
     fn move_group(&mut self, dest: usize, src: usize) {
-        let members = std::mem::replace(&mut self.groups[src].members, HashSet::new());
+        let members = std::mem::take(&mut self.groups[src].members);
         for member in members {
             self.member_groups.insert(member, dest);
             self.groups[dest].members.insert(member);

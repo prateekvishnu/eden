@@ -26,6 +26,7 @@ use std::time::SystemTime;
 use anyhow::Result;
 use blackbox::serde_json;
 use clidispatch::dispatch;
+use clidispatch::dispatch::Dispatcher;
 use clidispatch::errors;
 use clidispatch::global_flags::HgGlobalOpts;
 use clidispatch::io::CanColor;
@@ -38,8 +39,8 @@ use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use progress_model::Registry;
 use repo::repo::Repo;
+use tracing::dispatcher;
 use tracing::dispatcher::Dispatch;
-use tracing::dispatcher::{self};
 use tracing::Level;
 use tracing_collector::TracingData;
 use tracing_sampler::SamplingConfig;
@@ -123,99 +124,38 @@ pub fn run_command(args: Vec<String>, io: &IO) -> i32 {
         std::env::remove_var("EDENSCM_TRACE_OUTPUT");
     }
 
-    let cwd = match current_dir(io) {
-        Err(e) => {
-            let _ = io.write_err(format!("abort: cannot get current directory: {}\n", e));
-            return exitcode::IOERR;
-        }
-        Ok(dir) => dir,
-    };
+    let in_scope = Arc::new(()); // Used to tell progress rendering thread to stop.
 
-    let mut run_logger: Option<Arc<runlog::Logger>> = None;
+    metrics_render::init_from_env(Arc::downgrade(&in_scope));
 
-    let exit_code = {
-        let _guard = span.enter();
-        let in_scope = Arc::new(()); // Used to tell progress rendering thread to stop.
+    let exit_code = (|| {
+        let cwd = match current_dir(io) {
+            Err(e) => {
+                let _ = io.write_err(format!("abort: cannot get current directory: {}\n", e));
+                return exitcode::IOERR;
+            }
+            Ok(dir) => dir,
+        };
 
-        metrics_render::init_from_env(Arc::downgrade(&in_scope));
+        match dispatch::Dispatcher::from_args(args[1..].to_vec()) {
+            Ok(dispatcher) => {
+                let _guard = span.enter();
 
-        let table = commands::table();
-        let exit_code = match {
-            dispatch::Dispatcher::from_args(args[1..].to_vec()).and_then(|dispatcher| {
-                let config = dispatcher.config();
-                let global_opts = dispatcher.global_opts();
-
-                if let Some(sc) = SamplingConfig::new(config) {
+                if let Some(sc) = SamplingConfig::new(dispatcher.config()) {
                     sampling_config.set(sc).unwrap();
                 }
 
-                log_repo_path_and_exe_version(dispatcher.repo());
-
-                run_logger = match runlog::Logger::from_repo(dispatcher.repo(), args[1..].to_vec())
-                {
-                    Ok(logger) => Some(logger),
-                    Err(err) => {
-                        let _ = io.write_err(format!("Error creating runlogger: {}\n", err));
-                        None
-                    }
-                };
-
-                setup_http(global_opts);
-
-                let _ = spawn_progress_thread(
-                    config,
-                    global_opts,
-                    io,
-                    run_logger.clone(),
-                    Arc::downgrade(&in_scope),
-                );
-
-                dispatcher
-                    .run_command(&table, io)
-                    .map_err(|(config, err)| errors::triage_error(&config, err))
-            })
-        } {
-            Ok(ret) => ret as i32,
-            Err(err) => {
-                let should_fallback = err.is::<errors::FallbackToPython>() ||
-                    // XXX: Right now the Rust command table does not have all Python
-                    // commands. Therefore Rust "UnknownCommand" needs a fallback.
-                    //
-                    // Ideally the Rust command table has Python command information and
-                    // there is no fallback path (ex. all commands are in Rust, and the
-                    // Rust implementation might just call into Python cmdutil utilities).
-                    err.is::<errors::UnknownCommand>();
-                let failed_fallback = err.is::<errors::FailedFallbackToPython>();
-
-                if failed_fallback {
-                    197
-                } else if should_fallback {
-                    // Change the current dir back to the original so it is not surprising to the Python
-                    // code.
-                    let _ = env::set_current_dir(cwd);
-
-                    let mut interp = HgPython::new(&args);
-                    if let Some(opts) = global_opts {
-                        if opts.trace {
-                            // Error is not fatal.
-                            let _ = interp.setup_tracing("*".into());
-                        }
-                    }
-                    interp.run_hg(args, io)
-                } else {
-                    errors::print_error(&err, io, &args[1..]);
-                    255
-                }
+                dispatch_command(io, dispatcher, args, cwd, Arc::downgrade(&in_scope), now)
             }
-        };
-        span.record("exit_code", &exit_code);
-        drop(in_scope);
+            Err(err) => {
+                errors::print_error(&err, io, &args[1..]);
+                255
+            }
+        }
+    })();
 
-        // Clean up progress models.
-        Registry::main().remove_orphan_models();
-
-        exit_code
-    };
+    span.record("exit_code", &exit_code);
+    drop(in_scope);
 
     let _ = maybe_write_trace(io, &tracing_data, trace_output_path);
 
@@ -225,6 +165,104 @@ pub fn run_command(args: Vec<String>, io: &IO) -> i32 {
     // so we need to flush now.
     blackbox::sync();
 
+    if let Some(scenario) = scenario {
+        scenario.teardown();
+        FAIL_SETUP.store(false, SeqCst);
+    }
+
+    exit_code
+}
+
+fn dispatch_command(
+    io: &IO,
+    mut dispatcher: Dispatcher,
+    args: Vec<String>,
+    cwd: PathBuf,
+    in_scope: Weak<()>,
+    start_time: SystemTime,
+) -> i32 {
+    log_repo_path_and_exe_version(dispatcher.repo());
+
+    let run_logger = match runlog::Logger::from_repo(dispatcher.repo(), args[1..].to_vec()) {
+        Ok(logger) => Some(logger),
+        Err(err) => {
+            let _ = io.write_err(format!("Error creating runlogger: {}\n", err));
+            None
+        }
+    };
+
+    setup_http(dispatcher.global_opts());
+
+    let _ = spawn_progress_thread(
+        dispatcher.config(),
+        dispatcher.global_opts(),
+        io,
+        run_logger.clone(),
+        in_scope,
+    );
+
+    let table = commands::table();
+
+    let (command, dispatch_res) = dispatcher.run_command(&table, io);
+
+    let config = dispatcher.config();
+
+    let mut fell_back = false;
+    let exit_code = match dispatch_res.map_err(|err| errors::triage_error(config, err)) {
+        Ok(exit_code) => exit_code as i32,
+        Err(err) => {
+            let should_fallback = err.is::<errors::FallbackToPython>() ||
+                // XXX: Right now the Rust command table does not have all Python
+                // commands. Therefore Rust "UnknownCommand" needs a fallback.
+                //
+                // Ideally the Rust command table has Python command information and
+                // there is no fallback path (ex. all commands are in Rust, and the
+                // Rust implementation might just call into Python cmdutil utilities).
+                err.is::<errors::UnknownCommand>();
+            let failed_fallback = err.is::<errors::FailedFallbackToPython>();
+
+            if failed_fallback {
+                197
+            } else if should_fallback {
+                fell_back = true;
+                // Change the current dir back to the original so it is not surprising to the Python
+                // code.
+                let _ = env::set_current_dir(cwd);
+
+                let mut interp = HgPython::new(&args);
+                if dispatcher.global_opts().trace {
+                    // Error is not fatal.
+                    let _ = interp.setup_tracing("*".into());
+                }
+                interp.run_hg(args, io)
+            } else {
+                errors::print_error(&err, io, &args[1..]);
+                255
+            }
+        }
+    };
+
+    if !fell_back {
+        if let Some(command) = command {
+            let mut hooks = config.keys(&["hooks", &format!("pre-{}", command.name())]);
+            if exit_code > 0 {
+                hooks.append(&mut config.keys(&["hooks", &format!("fail-{}", command.name())]));
+            } else {
+                hooks.append(&mut config.keys(&["hooks", &format!("post-{}", command.name())]));
+            }
+
+            if !hooks.is_empty() {
+                let _ = io.write_err(format!(
+                    "WARNING: The following hooks were not run: {:?}\n",
+                    hooks
+                ));
+            }
+        }
+    }
+
+    // Clean up progress models.
+    Registry::main().remove_orphan_models();
+
     if let Some(rl) = &run_logger {
         if let Err(err) = rl.close(exit_code) {
             // Command has already finished - not worth bailing due to this error.
@@ -232,10 +270,7 @@ pub fn run_command(args: Vec<String>, io: &IO) -> i32 {
         }
     }
 
-    if let Some(scenario) = scenario {
-        scenario.teardown();
-        FAIL_SETUP.store(false, SeqCst);
-    }
+    let _ = log_perftrace(io, config, start_time);
 
     exit_code
 }
@@ -668,6 +703,10 @@ fn log_end(
         }
         blackbox::sync();
     });
+
+    // Truncate duration to top three significant decimal digits of
+    // precision to reduce cardinality for logging storage.
+    tracing::debug!(target: "measuredtimes", command_duration=util::math::truncate_int(duration_ms, 3));
 }
 
 fn epoch_ms(time: SystemTime) -> u64 {
@@ -699,6 +738,37 @@ fn log_repo_path_and_exe_version(repo: Option<&Repo>) {
         }
     }
     tracing::info!(target: "command_info", version = version::VERSION);
+}
+
+fn log_perftrace(io: &IO, config: &ConfigSet, start_time: SystemTime) -> Result<()> {
+    if let Some(threshold) = config.get_opt::<Duration>("tracing", "threshold")? {
+        if let Ok(elapsed) = start_time.elapsed() {
+            if elapsed >= threshold {
+                let key = format!(
+                    "flat/perftrace-{}-{}-{}",
+                    hostname::get()?.to_string_lossy(),
+                    std::process::id(),
+                    (epoch_ms(start_time) as f64) / 1e3,
+                );
+
+                let mut ascii_opts = tracing_collector::model::AsciiOptions::default();
+
+                // Minimum resolution = 1% of duration.
+                ascii_opts.min_duration_micros_to_hide = (elapsed.as_micros() / 100) as u64;
+
+                let output = pytracing::DATA.lock().ascii(&ascii_opts);
+
+                tracing::info!(target: "perftrace", key=key.as_str(), payload=output.as_str(), "Trace:\n{}\n", output);
+                tracing::info!(target: "perftracekey", perftracekey=key.as_str(), "Trace key:\n{}\n", key);
+
+                if config.get_or_default("tracing", "stderr")? {
+                    let _ = write!(io.error(), "{}\n", output);
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // TODO: Replace this with the 'exitcode' crate once it's available.

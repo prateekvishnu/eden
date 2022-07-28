@@ -534,3 +534,45 @@ TEST(ImmediateFuture, unit_method_error) {
   auto res = std::move(future).getTry();
   EXPECT_THROW_RE(res.value(), std::logic_error, "Test");
 }
+
+TEST(ImmediateFuture, thenError) {
+  int value = 42;
+  ImmediateFuture<int> fortyTwo{value};
+  auto exc = std::move(fortyTwo).thenValue(
+      [](int) -> int { throw std::logic_error("Test exception"); });
+  auto fortyThree = std::move(exc).thenError([](folly::exception_wrapper exc) {
+    EXPECT_THROW_RE(exc.throw_exception(), std::logic_error, "Test exception");
+    return 43;
+  });
+  EXPECT_EQ(std::move(fortyThree).get(), 43);
+}
+
+TEST(ImmediateFuture, thenErrorVoid) {
+  ImmediateFuture<folly::Unit> unitFut{folly::unit};
+  auto fut = std::move(unitFut).thenError(
+      [](folly::exception_wrapper exc) { exc.throw_exception(); });
+  EXPECT_EQ(std::move(fut).get(), folly::unit);
+}
+
+TEST(ImmediateFuture, thenErrorSemiValue) {
+  auto [promise, semiFut] = folly::makePromiseContract<folly::Unit>();
+  ImmediateFuture<folly::Unit> fut{std::move(semiFut)};
+  auto thenErrorFut = std::move(fut).thenError(
+      [](folly::exception_wrapper exc) { exc.throw_exception(); });
+  promise.setValue(folly::unit);
+  EXPECT_EQ(std::move(thenErrorFut).get(), folly::unit);
+}
+
+TEST(ImmediateFuture, thenErrorSemiError) {
+  auto [promise, semiFut] = folly::makePromiseContract<folly::Unit>();
+  ImmediateFuture<folly::Unit> fut{std::move(semiFut)};
+  auto thenErrorFut =
+      std::move(fut).thenError([](folly::exception_wrapper exc) {
+        // Re-throw with a different type so we can test that the original
+        // exception was caught.
+        throw std::runtime_error(folly::exceptionStr(exc).toStdString());
+      });
+  promise.setException(std::logic_error("Test exception"));
+  EXPECT_THROW_RE(
+      std::move(thenErrorFut).get(), std::runtime_error, "Test exception");
+}

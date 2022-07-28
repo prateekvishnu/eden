@@ -7,8 +7,10 @@
 
 // Support for lz4revlog
 
-use super::parser::{detach_result, Error};
-use nom::{self, IResult};
+use super::parser::detach_result;
+use super::parser::Error;
+use nom;
+use nom::IResult;
 
 pub fn lz4_decompress<'a, P, R: 'a>(i: &'a [u8], parse: P) -> IResult<&'a [u8], R, Error>
 where
@@ -23,11 +25,9 @@ where
     let remains: &[u8] = &[];
 
     match lz4_pyframe::decompress(i) {
-        Ok(decompressed) => detach_result(parse(&decompressed[..]), &remains),
-        Err(_err) => {
-            return IResult::Error(nom::Err::Code(nom::ErrorKind::Custom(
-                super::parser::Badness::BadLZ4,
-            )));
-        }
+        Ok(decompressed) => detach_result(parse(&decompressed[..]), remains),
+        Err(_err) => IResult::Error(nom::Err::Code(nom::ErrorKind::Custom(
+            super::parser::Badness::BadLZ4,
+        ))),
     }
 }

@@ -7,30 +7,42 @@
 
 use crate::CommitsInBundle;
 
-use anyhow::{bail, format_err, Context as _, Error, Result};
+use anyhow::bail;
+use anyhow::format_err;
+use anyhow::Context as _;
+use anyhow::Error;
+use anyhow::Result;
 use bookmarks::BookmarkName;
-use futures::future::{self, FutureExt, TryFuture, TryFutureExt};
-use futures_ext::future::{FbFutureExt, FbTryFutureExt};
+use futures::future;
+use futures::future::FutureExt;
+use futures::future::TryFuture;
+use futures::future::TryFutureExt;
+use futures_ext::future::FbFutureExt;
+use futures_ext::future::FbTryFutureExt;
 use futures_watchdog::WatchdogExt;
 use itertools::Itertools;
 use mercurial_types::HgChangesetId;
-use mononoke_hg_sync_job_helper_lib::{
-    lines_after, read_file_contents, wait_till_more_lines, write_to_named_temp_file,
-};
-use slog::{debug, info, Logger};
+use mononoke_hg_sync_job_helper_lib::lines_after;
+use mononoke_hg_sync_job_helper_lib::read_file_contents;
+use mononoke_hg_sync_job_helper_lib::wait_till_more_lines;
+use mononoke_hg_sync_job_helper_lib::write_to_named_temp_file;
+use slog::debug;
+use slog::info;
+use slog::Logger;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
+use std::fs::File;
 use std::process::Stdio;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::NamedTempFile;
-use tokio::{
-    io::AsyncWriteExt,
-    process::{Child, ChildStdin, Command},
-    sync::Mutex,
-};
+use tokio::io::AsyncWriteExt;
+use tokio::process::Child;
+use tokio::process::ChildStdin;
+use tokio::process::Command;
+use tokio::sync::Mutex;
 
 const BOOKMARK_LOCATION_LOOKUP_TIMEOUT_MS: u64 = 10_000;
 const LIST_SERVER_BOOKMARKS_EXTENSION: &str = include_str!("listserverbookmarks.py");
@@ -43,7 +55,7 @@ pub async fn list_hg_server_bookmarks(
     let file_path = extension_file
         .path()
         .to_str()
-        .ok_or(Error::msg("Temp file path contains non-unicode chars"))?;
+        .ok_or_else(|| Error::msg("Temp file path contains non-unicode chars"))?;
     fs::write(file_path, LIST_SERVER_BOOKMARKS_EXTENSION)?;
     let ext = format!("extensions.listserverbookmarks={}", file_path);
 
@@ -131,7 +143,7 @@ impl AsyncProcess {
         let stdin = child
             .stdin
             .take()
-            .ok_or(Error::msg("ChildStdin unexpectedly not captured"))?;
+            .ok_or_else(|| Error::msg("ChildStdin unexpectedly not captured"))?;
         Ok(Self { child, stdin })
     }
 
@@ -187,7 +199,7 @@ impl AsyncProcess {
         // all), but it still needs to be in the match clause.
         match future::try_select(fut, watchdog).await {
             Ok(future::Either::Left((res, _))) | Ok(future::Either::Right((res, _))) => Ok(res),
-            Err(future::Either::Left((e, _))) | Err(future::Either::Right((e, _))) => Err(e.into()),
+            Err(future::Either::Left((e, _))) | Err(future::Either::Right((e, _))) => Err(e),
         }
     }
 }
@@ -201,7 +213,7 @@ struct HgPeer {
     invalidated: bool,
     // The extension_file needs to be kept around while we have running instances of the process.
     #[allow(unused)]
-    extension_file: Arc<NamedTempFile>,
+    extension_file: Arc<File>,
 }
 
 impl HgPeer {
@@ -214,18 +226,17 @@ impl HgPeer {
         let file_path = reports_file
             .path()
             .to_str()
-            .ok_or(Error::msg("Temp file path contains non-unicode chars"))?;
+            .ok_or_else(|| Error::msg("Temp file path contains non-unicode chars"))?;
 
-        let extension_file = NamedTempFile::new()?;
-        let extension_path = extension_file
-            .path()
-            .to_str()
-            .ok_or(Error::msg("Temp file path contains non-unicode chars"))?;
-        fs::write(extension_path, SEND_UNBUNDLE_REPLAY_EXTENSION)?;
-
+        let extension_file = NamedTempFile::new().context("Error in creating extension file")?;
+        // Persisting the file so it does not get deleted before its contents are read.
+        let (extension_file, extension_path) = extension_file.keep()?;
+        let path_string = extension_path.clone();
+        fs::write(extension_path, SEND_UNBUNDLE_REPLAY_EXTENSION)
+            .with_context(|| format!("Error in writing data to file {}", &path_string.display()))?;
         let args = &[
             "--config",
-            &format!("extensions.sendunbundlereplay={}", extension_path),
+            &format!("extensions.sendunbundlereplay={}", &path_string.display()),
             "sendunbundlereplaybatch",
             "--debug",
             "--path",

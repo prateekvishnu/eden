@@ -9,7 +9,9 @@ use darling::FromMeta;
 use proc_macro2::TokenStream as TokenStream2;
 use proc_macro_error::abort;
 use quote::quote;
-use syn::{Ident, Meta, Path};
+use syn::Ident;
+use syn::Meta;
+use syn::Path;
 
 #[derive(Debug, FromMeta)]
 struct MetaArgsFlag {
@@ -70,7 +72,7 @@ impl ConfigField {
         // We have two struct here because I can't find a way to let darling accept an optional
         // argument. i.e. `stack(default)` and `stack(default = "func")`.
         if let Ok(args) = MetaArgsFlag::from_meta(&meta) {
-            let nested = args.nested.is_some();
+            let nested = args.nested.is_present();
 
             if args.default.is_some() && nested {
                 abort!(meta, "can't use nested and default at the same time");
@@ -89,7 +91,7 @@ impl ConfigField {
                 merge,
             }
         } else if let Ok(args) = MetaArgsFunc::from_meta(&meta) {
-            let nested = args.nested.is_some();
+            let nested = args.nested.is_present();
 
             if nested {
                 abort!(meta, "can't use nested and default at the same time");

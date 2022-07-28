@@ -11,8 +11,10 @@ use anyhow::Error;
 use thiserror::Error;
 
 use gotham_ext::error::HttpError;
-use mononoke_api::{ChangesetId, MononokeError};
-use types::{HgId, Key};
+use mononoke_api::ChangesetId;
+use mononoke_api::MononokeError;
+use types::HgId;
+use types::Key;
 
 /// Enum to add context to server errors.
 ///
@@ -92,11 +94,11 @@ impl MononokeErrorExt for MononokeError {
         use MononokeError::*;
         (match self {
             InvalidRequest(_) => HttpError::e400,
-            PermissionDenied { .. } => HttpError::e403,
             ServicePermissionDenied { .. } => HttpError::e403,
-            ServiceRestricted { .. } => HttpError::e403,
             NotAvailable { .. } => HttpError::e503,
             HookFailure(_) => HttpError::e400,
+            PushrebaseConflicts(_) => HttpError::e400,
+            AuthorizationError(_) => HttpError::e403,
             InternalError(_) => HttpError::e500,
             MergeConflicts { .. } => HttpError::e400,
         })(Error::from(self).context(context))

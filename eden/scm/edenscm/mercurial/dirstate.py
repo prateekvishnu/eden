@@ -14,11 +14,9 @@
 
 from __future__ import absolute_import
 
-import collections
 import contextlib
 import errno
 import os
-import stat
 import tempfile
 import weakref
 from typing import (
@@ -49,7 +47,6 @@ from . import (
     encoding,
     error,
     filesystem,
-    hintutil,
     match as matchmod,
     pathutil,
     perftrace,
@@ -939,6 +936,56 @@ class dirstate(object):
                 files.append(fullpath)
         return files
 
+    class FallbackToPythonStatus(Exception):
+        pass
+
+    def _ruststatus(
+        self, match: "Callable[[str], bool]", ignored: bool, clean: bool, unknown: bool
+    ) -> "scmutil.status":
+        if util.safehasattr(self._fs, "_fsmonitorstate"):
+            filesystem = "watchman"
+        elif "eden" in self._repo.requirements:
+            filesystem = "eden"
+        else:
+            filesystem = "normal"
+
+        # TODO: Fix deadlock in normal filesystem crawler
+        if ignored or clean or filesystem == "normal":
+            raise self.FallbackToPythonStatus
+
+        if filesystem == "eden":
+            # EdenFS repos still use an old dirstate to track working copy
+            # changes. We need a TreeState for Rust status, so if the map
+            # doesn't have a tree, we create a temporary read-only one.
+            # Note: this TreeState won't track clean files, only added/removed/etc.
+            # TODO: get rid of this when EdenFS migrates to TreeState.
+            tempdir = tempfile.TemporaryDirectory()
+            tempvfs = vfs.vfs(tempdir.name)
+            tempvfs.makedir("treestate")
+            tempmap = treestate.treestatemap(
+                self._ui, tempvfs, tempdir.name, importdirstate=self
+            )
+            tree = tempmap._tree
+        else:
+            # pyre-fixme[16]: Item `dirstatemap` of `Union[dirstatemap,
+            #  treedirstatemap, treestatemap]` has no attribute `_tree`.
+            tree = self._map._tree
+
+        # TODO: Handle the case that a file is ignored but is still tracked
+        # in p1.
+        match = matchmod.differencematcher(match, self._ignore)
+
+        return bindings.workingcopy.status.status(
+            self._root,
+            self._repo[self.p1()].manifest(),
+            self._repo.fileslog.filescmstore,
+            tree,
+            self._lastnormaltime,
+            match,
+            unknown,
+            filesystem,
+        )
+
     @perftrace.tracefunc("Status")
     def status(
         self, match: "Callable[[str], bool]", ignored: bool, clean: bool, unknown: bool
@@ -947,37 +994,10 @@ class dirstate(object):
         dirstate and return a scmutil.status.
         """
         if self._ui.configbool("workingcopy", "ruststatus"):
-            if ignored or clean:
-                raise error.Abort(_("Rust status does not support ignored or clean"))
-            pendingchanges = self._fs.pendingchanges(match, listignored=False)
-
-            if "eden" in self._repo.requirements:
-                # EdenFS repos still use an old dirstate to track working copy
-                # changes. We need a TreeState for Rust status, so if the map
-                # doesn't have a tree, we create a temporary read-only one.
-                # Note: this TreeState won't track clean files, only added/removed/etc.
-                # TODO: get rid of this when EdenFS migrates to TreeState.
-                tempdir = tempfile.TemporaryDirectory()
-                tempvfs = vfs.vfs(tempdir.name)
-                tempvfs.makedir("treestate")
-                tempmap = treestate.treestatemap(
-                    self._ui, tempvfs, tempdir.name, importdirstate=self
-                )
-                tree = tempmap._tree
-            else:
-                # pyre-fixme[16]: Item `dirstatemap` of `Union[dirstatemap,
-                #  treedirstatemap, treestatemap]` has no attribute `_tree`.
-                tree = self._map._tree
-
-            status = bindings.workingcopy.status.compute(
-                self._repo[self.p1()].manifest(),
-                tree,
-                pendingchanges,
-                match,
-            )
-            if not unknown:
-                status.unknown = []
-            return status
+            try:
+                return self._ruststatus(match, ignored, clean, unknown)
+            except self.FallbackToPythonStatus:
+                pass
 
         wctx = self._repo[None]
         # Prime the wctx._parents cache so the parent doesn't change out from

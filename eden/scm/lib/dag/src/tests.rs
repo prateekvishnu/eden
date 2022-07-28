@@ -1,8 +1,8 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This software may be used and distributed according to the terms of the
- * GNU General Public License version 2.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 use nonblocking::non_blocking_result as r;
@@ -1306,6 +1306,38 @@ o  B(N0)-Z(N1)
 ~
 "#
     );
+}
+
+#[cfg_attr(test, tokio::test)]
+async fn test_subdag() {
+    let t = TestDag::draw("A..E");
+    let s = t.dag.subdag(nameset("B D E")).await.unwrap();
+    assert_eq!(
+        render(&s),
+        r#"
+            E
+            │
+            D
+            │
+            B"#
+    );
+
+    // Test ordering: preserve the heads order (D before C).
+    let t = TestDag::draw("A-X B-X X-C X-D");
+    let s1 = t.dag.subdag(nameset("D C B A")).await.unwrap();
+    let s2 = t.dag.subdag(nameset("A B C D")).await.unwrap();
+    assert_eq!(
+        render(&s1),
+        r#"
+            D
+            ├─╮
+            │ │ C
+            ╭─┬─╯
+            │ A
+            │
+            B"#
+    );
+    assert_eq!(render(&s1), render(&s2));
 }
 
 // Test utilities

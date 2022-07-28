@@ -8,48 +8,63 @@
 #![recursion_limit = "256"]
 #![feature(never_type)]
 
-use anyhow::{anyhow, bail, Context, Error};
+use anyhow::anyhow;
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Error;
 use cached_config::ConfigHandle;
-use clap::{Arg, Values};
+use clap::Arg;
+use clap::Values;
 use cloned::cloned;
 use fbinit::FacebookInit;
-use futures::{
-    channel::oneshot,
-    future::{lazy, select, try_join_all},
-    FutureExt, TryFutureExt,
-};
-use gotham_ext::{
-    handler::MononokeHttpHandler,
-    middleware::{
-        ClientIdentityMiddleware, LoadMiddleware, LogMiddleware, PostResponseMiddleware,
-        ScubaMiddleware, ServerIdentityMiddleware, TimerMiddleware, TlsSessionDataMiddleware,
-    },
-    serve,
-};
+use futures::channel::oneshot;
+use futures::future::lazy;
+use futures::future::select;
+use futures::future::try_join_all;
+use futures::FutureExt;
+use futures::TryFutureExt;
+use gotham_ext::handler::MononokeHttpHandler;
+use gotham_ext::middleware::ClientIdentityMiddleware;
+use gotham_ext::middleware::LoadMiddleware;
+use gotham_ext::middleware::LogMiddleware;
+use gotham_ext::middleware::PostResponseMiddleware;
+use gotham_ext::middleware::ScubaMiddleware;
+use gotham_ext::middleware::ServerIdentityMiddleware;
+use gotham_ext::middleware::TimerMiddleware;
+use gotham_ext::middleware::TlsSessionDataMiddleware;
+use gotham_ext::serve;
 use hyper::header::HeaderValue;
-use permission_checker::{ArcPermissionChecker, MononokeIdentitySet, PermissionCheckerBuilder};
+use permission_checker::ArcPermissionChecker;
+use permission_checker::MononokeIdentitySet;
+use permission_checker::PermissionCheckerBuilder;
 use slog::info;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::net::ToSocketAddrs;
 use std::str::FromStr;
-use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 
-use blobrepo::BlobRepo;
-use cmdlib::{
-    args::{self, CachelibSettings},
-    helpers::serve_forever,
-    monitoring::{start_fb303_server, AliveService},
-};
+use cmdlib::args;
+use cmdlib::args::CachelibSettings;
+use cmdlib::helpers::serve_forever;
+use cmdlib::monitoring::start_fb303_server;
+use cmdlib::monitoring::AliveService;
+use filestore::FilestoreConfig;
 use metaconfig_parser::RepoConfigs;
 use metaconfig_types::RepoConfig;
 use mononoke_app::args::parse_config_spec_to_path;
+use repo_blobstore::RepoBlobstore;
 use repo_factory::RepoFactory;
+use repo_identity::RepoIdentity;
 
-use crate::lfs_server_context::{LfsServerContext, ServerUris};
-use crate::middleware::{OdsMiddleware, RequestContextMiddleware};
+use crate::lfs_server_context::LfsServerContext;
+use crate::lfs_server_context::ServerUris;
+use crate::middleware::OdsMiddleware;
+use crate::middleware::RequestContextMiddleware;
 use crate::scuba::LfsScubaHandler;
 use crate::service::build_router;
 
@@ -93,6 +108,22 @@ const SERVICE_NAME: &str = "mononoke_lfs_server";
 // More info: https://fburl.com/wiki/i78i3uzk
 const CACHE_OBJECT_SIZE: usize = 256 * 1024;
 
+#[facet::container]
+#[derive(Clone)]
+pub struct Repo {
+    #[facet]
+    repo_identity: RepoIdentity,
+
+    #[init(repo_identity.name().to_string())]
+    name: String,
+
+    #[facet]
+    filestore_config: FilestoreConfig,
+
+    #[facet]
+    repo_blobstore: RepoBlobstore,
+}
+
 #[fbinit::main]
 fn main(fb: FacebookInit) -> Result<(), Error> {
     let cachelib_settings = CachelibSettings {
@@ -101,7 +132,7 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
     };
 
     let app = args::MononokeAppBuilder::new("Mononoke LFS Server")
-        .with_cachelib_settings(cachelib_settings.clone())
+        .with_cachelib_settings(cachelib_settings)
         .with_advanced_args_hidden()
         .with_all_repos()
         .with_shutdown_timeout_args()
@@ -289,7 +320,9 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
 
     let test_acl_checker = if !test_idents.is_empty() {
         Some(ArcPermissionChecker::from(
-            PermissionCheckerBuilder::allowlist_checker(test_idents),
+            PermissionCheckerBuilder::new()
+                .allow_allowlist(test_idents)
+                .build(),
         ))
     } else {
         None
@@ -320,6 +353,7 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
     };
 
     let RepoConfigs { repos, common } = args::load_repo_configs(config_store, &matches)?;
+    let internal_identity = common.internal_identity.clone();
 
     let repo_factory = Arc::new(RepoFactory::new(matches.environment().clone(), &common));
 
@@ -335,20 +369,24 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
                         test_checker
                     } else {
                         ArcPermissionChecker::from(match (disable_acl_checker, hipster_acl) {
-                            (true, _) | (false, None) => PermissionCheckerBuilder::always_allow(),
+                            (true, _) | (false, None) => {
+                                PermissionCheckerBuilder::new().allow_all().build()
+                            }
                             (_, Some(acl)) => {
                                 info!(
                                     logger,
                                     "{}: Actions will be checked against {} ACL", name, acl
                                 );
-                                PermissionCheckerBuilder::acl_for_repo(fb, &acl).await?
+                                PermissionCheckerBuilder::new()
+                                    .allow(repo_factory.acl_provider().repo_acl(&acl).await?)
+                                    .build()
                             }
                         })
                     };
 
                     let repo = repo_factory.build(name.clone(), config.clone()).await?;
 
-                    Result::<(String, (BlobRepo, ArcPermissionChecker, RepoConfig)), Error>::Ok((
+                    Result::<(String, (Repo, ArcPermissionChecker, RepoConfig)), Error>::Ok((
                         name,
                         (repo, aclchecker, config),
                     ))
@@ -365,7 +403,7 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
                 .to_socket_addrs()
                 .context(Error::msg("Invalid Listener Address"))?
                 .next()
-                .ok_or(Error::msg("Invalid Socket Address"))?;
+                .ok_or_else(|| Error::msg("Invalid Socket Address"))?;
 
             let listener = TcpListener::bind(&addr)
                 .await
@@ -412,7 +450,11 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
 
             let handler = MononokeHttpHandler::builder()
                 .add(TlsSessionDataMiddleware::new(tls_session_data_log)?)
-                .add(ClientIdentityMiddleware::new(fb, logger.clone()))
+                .add(ClientIdentityMiddleware::new(
+                    fb,
+                    logger.clone(),
+                    internal_identity,
+                ))
                 .add(PostResponseMiddleware::with_config(config_handle))
                 .add(RequestContextMiddleware::new(fb, logger.clone()))
                 .add(LoadMiddleware::new())

@@ -5,7 +5,9 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::fs::File;
 use std::io;
@@ -13,13 +15,22 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::errors::ErrorKind;
-use anyhow::{bail, format_err, Context, Result};
+use anyhow::bail;
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Result;
 use bytes::Bytes;
 use memmap::Mmap;
 use nom::IResult;
 
-pub use mercurial_types::bdiff::{self, Delta};
-pub use mercurial_types::{delta, HgBlob, HgBlobNode, HgEntryId, HgNodeHash, HgParents};
+pub use mercurial_types::bdiff;
+pub use mercurial_types::bdiff::Delta;
+pub use mercurial_types::delta;
+pub use mercurial_types::HgBlob;
+pub use mercurial_types::HgBlobNode;
+pub use mercurial_types::HgEntryId;
+pub use mercurial_types::HgNodeHash;
+pub use mercurial_types::HgParents;
 
 // Submodules
 mod lz4;
@@ -30,7 +41,9 @@ mod revidx;
 mod test;
 
 pub use self::parser::Entry;
-use self::parser::{Header, IdxFlags, Version};
+use self::parser::Header;
+use self::parser::IdxFlags;
+use self::parser::Version;
 pub use self::revidx::RevIdx;
 
 #[derive(Debug)]
@@ -46,9 +59,9 @@ impl Datafile {
     }
 
     fn as_slice(&self) -> &[u8] {
-        match self {
-            &Datafile::Loaded(ref data) => data.as_ref(),
-            &Datafile::Mmap(ref mmap) => mmap.as_ref(),
+        match *self {
+            Datafile::Loaded(ref data) => data.as_ref(),
+            Datafile::Mmap(ref mmap) => mmap.as_ref(),
         }
     }
 }
@@ -418,7 +431,7 @@ impl RevlogInner {
         let entry = self.get_entry(tgtidx)?;
 
         // if there's no baserev, then use the target as a baserev (it should be literal)
-        let baserev = entry.baserev.map(Into::into).unwrap_or(tgtidx);
+        let baserev = entry.baserev.map_or(tgtidx, Into::into);
 
         // XXX: Fix this to use delta::Delta instead of bdiff::Delta.
 
@@ -473,7 +486,7 @@ impl RevlogInner {
                             break v;
                         }
                         _ => {
-                            Err(ErrorKind::Revlog(format!("expected a literal")))?;
+                            Err(ErrorKind::Revlog("expected a literal".to_string()))?;
                         }
                     }
                 }
@@ -492,9 +505,9 @@ impl RevlogInner {
                         break vec![];
                     }
                     _ => {
-                        Err(ErrorKind::Revlog(format!(
-                            "expected a delta against empty string"
-                        )))?;
+                        Err(ErrorKind::Revlog(
+                            "expected a delta against empty string".to_string(),
+                        ))?;
                     }
                 },
             }
@@ -631,7 +644,7 @@ impl IntoIterator for Revlog {
     type IntoIter = RevlogIter;
 
     fn into_iter(self) -> Self::IntoIter {
-        RevlogIter(self.inner.clone(), RevIdx::zero())
+        RevlogIter(self.inner, RevIdx::zero())
     }
 }
 

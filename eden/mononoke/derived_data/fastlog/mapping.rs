@@ -5,20 +5,31 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Error, Result};
+use anyhow::anyhow;
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
-use blobstore::{Blobstore, BlobstoreBytes, Loadable};
+use blobstore::Blobstore;
+use blobstore::BlobstoreBytes;
+use blobstore::Loadable;
 use cloned::cloned;
 use context::CoreContext;
 use derived_data::impl_bonsai_derived_via_manager;
-use derived_data_manager::{dependencies, BonsaiDerivable, DerivationContext};
+use derived_data_manager::dependencies;
+use derived_data_manager::BonsaiDerivable;
+use derived_data_manager::DerivationContext;
 use futures::stream::TryStreamExt;
-use manifest::{find_intersection_of_diffs, Entry};
-use mononoke_types::{BonsaiChangeset, ChangesetId, FileUnodeId, ManifestUnodeId};
+use manifest::find_intersection_of_diffs;
+use manifest::Entry;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::ChangesetId;
+use mononoke_types::FileUnodeId;
+use mononoke_types::ManifestUnodeId;
 use thiserror::Error;
 use unodes::RootUnodeManifestId;
 
-use crate::fastlog_impl::{create_new_batch, save_fastlog_batch_by_unode_id};
+use crate::fastlog_impl::create_new_batch;
+use crate::fastlog_impl::save_fastlog_batch_by_unode_id;
 
 use derived_data_service_if::types as thrift;
 
@@ -184,34 +195,45 @@ impl_bonsai_derived_via_manager!(RootFastlog);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fastlog_impl::{fetch_fastlog_batch_by_unode_id, fetch_flattened};
-    use blobrepo::{save_bonsai_changesets, BlobRepo};
+    use crate::fastlog_impl::fetch_fastlog_batch_by_unode_id;
+    use crate::fastlog_impl::fetch_flattened;
+    use blobrepo::save_bonsai_changesets;
+    use blobrepo::BlobRepo;
     use bookmarks::BookmarkName;
     use context::CoreContext;
     use fbinit::FacebookInit;
+    use fixtures::create_bonsai_changeset;
+    use fixtures::create_bonsai_changeset_with_author;
+    use fixtures::create_bonsai_changeset_with_files;
+    use fixtures::store_files;
+    use fixtures::Linear;
+    use fixtures::MergeEven;
+    use fixtures::MergeUneven;
     use fixtures::TestRepoFixture;
-    use fixtures::{
-        create_bonsai_changeset, create_bonsai_changeset_with_author,
-        create_bonsai_changeset_with_files, store_files, Linear, MergeEven, MergeUneven,
-        UnsharedMergeEven, UnsharedMergeUneven,
-    };
+    use fixtures::UnsharedMergeEven;
+    use fixtures::UnsharedMergeUneven;
     use futures::compat::Stream01CompatExt;
-    use futures::{Stream, TryFutureExt};
+    use futures::Stream;
+    use futures::TryFutureExt;
     use manifest::ManifestOps;
     use maplit::btreemap;
     use mercurial_derived_data::DeriveHgChangeset;
     use mercurial_types::HgChangesetId;
-    use mononoke_types::fastlog_batch::{
-        max_entries_in_fastlog_batch, MAX_BATCHES, MAX_LATEST_LEN,
-    };
-    use mononoke_types::{MPath, ManifestUnodeId};
+    use mononoke_types::fastlog_batch::max_entries_in_fastlog_batch;
+    use mononoke_types::fastlog_batch::MAX_BATCHES;
+    use mononoke_types::fastlog_batch::MAX_LATEST_LEN;
+    use mononoke_types::MPath;
+    use mononoke_types::ManifestUnodeId;
     use pretty_assertions::assert_eq;
     use rand::SeedableRng;
     use rand_xorshift::XorShiftRng;
     use repo_derived_data::RepoDerivedDataRef;
     use revset::AncestorsNodeStream;
-    use simulated_repo::{GenManifest, GenSettings};
-    use std::collections::{BTreeMap, HashSet, VecDeque};
+    use simulated_repo::GenManifest;
+    use simulated_repo::GenSettings;
+    use std::collections::BTreeMap;
+    use std::collections::HashSet;
+    use std::collections::VecDeque;
     use std::str::FromStr;
     use std::sync::Arc;
 
@@ -693,7 +715,7 @@ mod tests {
             .await?
             .unwrap();
         let root_unode = manager
-            .derive::<RootUnodeManifestId>(&ctx, bcs_id, None)
+            .derive::<RootUnodeManifestId>(ctx, bcs_id, None)
             .await?;
         Ok(root_unode.manifest_unode_id().clone())
     }
@@ -705,12 +727,12 @@ mod tests {
     ) -> ManifestUnodeId {
         let manager = repo.repo_derived_data().manager();
         manager
-            .derive::<RootFastlog>(&ctx, bcs_id, None)
+            .derive::<RootFastlog>(ctx, bcs_id, None)
             .await
             .unwrap();
 
         let root_unode = manager
-            .derive::<RootUnodeManifestId>(&ctx, bcs_id, None)
+            .derive::<RootUnodeManifestId>(ctx, bcs_id, None)
             .await
             .unwrap();
         root_unode.manifest_unode_id().clone()
@@ -734,7 +756,7 @@ mod tests {
         entry: Entry<ManifestUnodeId, FileUnodeId>,
     ) -> Vec<(ChangesetId, Vec<FastlogParent>)> {
         let blobstore = repo.blobstore();
-        let batch = fetch_fastlog_batch_by_unode_id(&ctx, blobstore, &entry)
+        let batch = fetch_fastlog_batch_by_unode_id(ctx, blobstore, &entry)
             .await
             .unwrap()
             .expect("batch hasn't been generated yet");
@@ -770,12 +792,12 @@ mod tests {
                     break;
                 }
             };
-            let linknode = unode_entry.get_linknode(&ctx, &repo).await.unwrap();
+            let linknode = unode_entry.get_linknode(&ctx, repo).await.unwrap();
             history.push(linknode);
             if history.len() >= max_entries_in_fastlog_batch() {
                 break;
             }
-            let parents = unode_entry.get_parents(&ctx, &repo).await.unwrap();
+            let parents = unode_entry.get_parents(&ctx, repo).await.unwrap();
             q.extend(parents.into_iter().filter(|x| visited.insert(x.clone())));
         }
 

@@ -10,11 +10,17 @@ use std::time::Duration;
 use anyhow::Error;
 use clap::ArgEnum;
 use futures_stats::FutureStats;
-use scuba_ext::{MononokeScubaSampleBuilder, ScubaValue};
-use strum_macros::{AsRefStr, Display, EnumString, EnumVariantNames};
+use scuba_ext::MononokeScubaSampleBuilder;
+use scuba_ext::ScubaValue;
+use strum_macros::AsRefStr;
+use strum_macros::Display;
+use strum_macros::EnumString;
+use strum_macros::EnumVariantNames;
 use time_ext::DurationExt;
 
-use blobstore::{BlobstoreGetData, BlobstoreIsPresent, OverwriteStatus};
+use blobstore::BlobstoreGetData;
+use blobstore::BlobstoreIsPresent;
+use blobstore::OverwriteStatus;
 use context::PerfCounters;
 use metaconfig_types::BlobstoreId;
 use tunables::tunables;
@@ -153,7 +159,6 @@ pub fn record_is_present_stats(
     result: Result<&BlobstoreIsPresent, &Error>,
     key: &str,
     session: &str,
-    operation: OperationType,
     blobstore_id: Option<BlobstoreId>,
     blobstore_type: impl ToString,
 ) {
@@ -163,7 +168,7 @@ pub fn record_is_present_stats(
         key,
         session,
         stats,
-        operation,
+        OperationType::IsPresent,
         blobstore_id,
         blobstore_type,
     );
@@ -197,7 +202,6 @@ pub fn record_put_stats(
     result: Result<&OverwriteStatus, &Error>,
     key: &str,
     session: &str,
-    operation: OperationType,
     size: usize,
     blobstore_id: Option<BlobstoreId>,
     blobstore_type: impl ToString,
@@ -209,7 +213,7 @@ pub fn record_put_stats(
         key,
         session,
         stats,
-        operation,
+        OperationType::Put,
         blobstore_id,
         blobstore_type,
     );

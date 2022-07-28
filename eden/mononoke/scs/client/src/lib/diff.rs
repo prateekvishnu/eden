@@ -9,15 +9,16 @@
 
 use std::io::Write;
 
-use anyhow::Error;
-use clap::ArgMatches;
+use anyhow::Result;
 use cloned::cloned;
-use futures_util::stream::{self, StreamExt};
-use serde_derive::Serialize;
+use futures::stream;
+use futures::stream::StreamExt;
+use futures::Stream;
+use serde::Serialize;
 use source_control as thrift;
 
 use crate::connection::Connection;
-use crate::render::{Render, RenderStream};
+use crate::render::Render;
 
 #[derive(Serialize)]
 struct DiffOutput {
@@ -25,14 +26,16 @@ struct DiffOutput {
 }
 
 impl Render for DiffOutput {
-    fn render(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    type Args = ();
+
+    fn render(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         for diff in &self.diffs {
             write!(w, "{}", String::from_utf8_lossy(diff))?;
         }
         Ok(())
     }
 
-    fn render_json(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    fn render_json(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         Ok(serde_json::to_writer(w, self)?)
     }
 }
@@ -42,7 +45,7 @@ async fn make_file_diff_request(
     commit: &thrift::CommitSpecifier,
     other_commit_id: Option<thrift::CommitId>,
     paths: Vec<thrift::CommitFileDiffsParamsPathPair>,
-) -> Result<Box<DiffOutput>, Error> {
+) -> Result<DiffOutput> {
     let params = thrift::CommitFileDiffsParams {
         other_commit_id,
         paths,
@@ -51,33 +54,30 @@ async fn make_file_diff_request(
         ..Default::default()
     };
 
-    let response = connection.commit_file_diffs(&commit, &params).await?;
+    let response = connection.commit_file_diffs(commit, &params).await?;
     let diffs: Vec<_> = response
         .path_diffs
         .into_iter()
         .filter_map(|path_diff| {
             if let thrift::Diff::raw_diff(diff) = path_diff.diff {
-                Some(diff.raw_diff.unwrap_or(Vec::new()))
+                Some(diff.raw_diff.unwrap_or_else(Vec::new))
             } else {
                 None
             }
         })
         .collect();
 
-    Ok(Box::new(DiffOutput { diffs }))
+    Ok(DiffOutput { diffs })
 }
 
 /// Given the paths and sizes of files to diff returns the stream of renderable
 /// structs. The sizes are used to avoid hitting size limit when doing batch requests.
-pub(crate) fn diff_files<I>(
+pub(crate) fn diff_files(
     connection: &Connection,
     commit: thrift::CommitSpecifier,
     other_commit_id: Option<thrift::CommitId>,
-    paths_sizes: I,
-) -> Result<RenderStream, Error>
-where
-    I: IntoIterator<Item = (thrift::CommitFileDiffsParamsPathPair, i64)>,
-{
+    paths_sizes: impl IntoIterator<Item = (thrift::CommitFileDiffsParamsPathPair, i64)>,
+) -> impl Stream<Item = Result<impl Render<Args = ()>>> {
     let mut size_sum: i64 = 0;
     let mut path_count: i64 = 0;
     let mut paths = Vec::new();
@@ -97,16 +97,10 @@ where
         size_sum += size;
     }
     requests.push(paths);
-    Ok(stream::iter(requests)
-        .then(move |paths| {
-            let connection = connection.clone();
-            let commit = commit.clone();
-            let other_commit_id = other_commit_id.clone();
-            async move {
-                make_file_diff_request(&connection, &commit, other_commit_id, paths)
-                    .await
-                    .map(|d| d as Box<dyn Render>)
-            }
-        })
-        .boxed())
+    stream::iter(requests).then(move |paths| {
+        let connection = connection.clone();
+        let commit = commit.clone();
+        let other_commit_id = other_commit_id.clone();
+        async move { make_file_diff_request(&connection, &commit, other_commit_id, paths).await }
+    })
 }

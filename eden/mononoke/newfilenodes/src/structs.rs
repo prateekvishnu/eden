@@ -8,21 +8,23 @@
 use abomonation_derive::Abomonation;
 use anyhow::Error;
 use filenodes::FilenodeInfo;
-use mercurial_types::{HgChangesetId, HgFileNodeId};
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgFileNodeId;
 use mononoke_types::RepoPath;
 use path_hash::PathBytes;
 
-use crate::local_cache::{CachePool, Cacheable};
+use crate::local_cache::CachePool;
+use crate::local_cache::Cacheable;
 
 impl Cacheable for PathBytes {
     const POOL: CachePool = CachePool::Filenodes;
 }
 
 fn convert_from_repo_path(path: &RepoPath) -> (Vec<u8>, bool) {
-    match path {
-        &RepoPath::RootPath => (vec![], true),
-        &RepoPath::DirectoryPath(ref dir) => (dir.to_vec(), true),
-        &RepoPath::FilePath(ref file) => (file.to_vec(), false),
+    match *path {
+        RepoPath::RootPath => (vec![], true),
+        RepoPath::DirectoryPath(ref dir) => (dir.to_vec(), true),
+        RepoPath::FilePath(ref file) => (file.to_vec(), false),
     }
 }
 

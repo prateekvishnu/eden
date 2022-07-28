@@ -7,29 +7,30 @@
 
 use std::collections::HashMap;
 
-use bookmarks::{BookmarkUpdateReason, BundleReplay};
-use bookmarks_types::{BookmarkKind, BookmarkName};
+use bookmarks::BookmarkUpdateReason;
+use bookmarks_types::BookmarkKind;
+use bookmarks_types::BookmarkName;
 use bytes::Bytes;
 use context::CoreContext;
-use metaconfig_types::{BookmarkAttrs, InfinitepushParams, SourceControlServiceParams};
+use metaconfig_types::InfinitepushParams;
 use mononoke_types::ChangesetId;
-use repo_read_write_status::RepoReadWriteFetcher;
+use repo_authorization::AuthorizationContext;
+use repo_authorization::RepoWriteOperation;
 
 use crate::repo_lock::check_repo_lock;
-use crate::restrictions::{
-    check_bookmark_sync_config, BookmarkKindRestrictions, BookmarkMoveAuthorization,
-};
-use crate::{BookmarkMovementError, Repo};
+use crate::restrictions::check_bookmark_sync_config;
+use crate::restrictions::BookmarkKindRestrictions;
+use crate::BookmarkMovementError;
+use crate::Repo;
 
 #[must_use = "DeleteBookmarkOp must be run to have an effect"]
 pub struct DeleteBookmarkOp<'op> {
     bookmark: &'op BookmarkName,
     old_target: ChangesetId,
     reason: BookmarkUpdateReason,
-    auth: BookmarkMoveAuthorization<'op>,
     kind_restrictions: BookmarkKindRestrictions,
     pushvars: Option<&'op HashMap<String, Bytes>>,
-    bundle_replay: Option<&'op dyn BundleReplay>,
+    only_log_acl_checks: bool,
 }
 
 impl<'op> DeleteBookmarkOp<'op> {
@@ -42,22 +43,10 @@ impl<'op> DeleteBookmarkOp<'op> {
             bookmark,
             old_target,
             reason,
-            auth: BookmarkMoveAuthorization::User,
             kind_restrictions: BookmarkKindRestrictions::AnyKind,
             pushvars: None,
-            bundle_replay: None,
+            only_log_acl_checks: false,
         }
-    }
-
-    /// This bookmark change is for an authenticated named service.  The change
-    /// will be checked against the service's write restrictions.
-    pub fn for_service(
-        mut self,
-        service_name: impl Into<String>,
-        params: &'op SourceControlServiceParams,
-    ) -> Self {
-        self.auth = BookmarkMoveAuthorization::Service(service_name.into(), params);
-        self
     }
 
     pub fn only_if_scratch(mut self) -> Self {
@@ -75,44 +64,54 @@ impl<'op> DeleteBookmarkOp<'op> {
         self
     }
 
-    pub fn with_bundle_replay_data(mut self, bundle_replay: Option<&'op dyn BundleReplay>) -> Self {
-        self.bundle_replay = bundle_replay;
+    pub fn only_log_acl_checks(mut self, only_log: bool) -> Self {
+        self.only_log_acl_checks = only_log;
         self
     }
 
     pub async fn run(
         self,
         ctx: &'op CoreContext,
+        authz: &'op AuthorizationContext,
         repo: &'op impl Repo,
         infinitepush_params: &'op InfinitepushParams,
-        bookmark_attrs: &'op BookmarkAttrs,
-        repo_read_write_fetcher: &'op RepoReadWriteFetcher,
     ) -> Result<(), BookmarkMovementError> {
         let kind = self
             .kind_restrictions
             .check_kind(infinitepush_params, self.bookmark)?;
 
-        self.auth
-            .check_authorized(ctx, bookmark_attrs, self.bookmark)
+        if self.only_log_acl_checks {
+            if authz
+                .check_repo_write(ctx, repo, RepoWriteOperation::DeleteBookmark(kind))
+                .await?
+                .is_denied()
+            {
+                ctx.scuba()
+                    .clone()
+                    .log_with_msg("Repo write ACL check would fail for bookmark delete", None);
+            }
+        } else {
+            authz
+                .require_repo_write(ctx, repo, RepoWriteOperation::DeleteBookmark(kind))
+                .await?;
+        }
+        authz
+            .require_bookmark_modify(ctx, repo, self.bookmark)
             .await?;
 
         check_bookmark_sync_config(repo, self.bookmark, kind)?;
 
-        if bookmark_attrs.is_fast_forward_only(self.bookmark) {
+        if repo
+            .repo_bookmark_attrs()
+            .is_fast_forward_only(self.bookmark)
+        {
             // Cannot delete fast-forward-only bookmarks.
             return Err(BookmarkMovementError::DeletionProhibited {
                 bookmark: self.bookmark.clone(),
             });
         }
 
-        check_repo_lock(
-            repo_read_write_fetcher,
-            kind,
-            self.pushvars,
-            repo.repo_permission_checker(),
-            ctx.metadata().identities(),
-        )
-        .await?;
+        check_repo_lock(repo, kind, self.pushvars, ctx.metadata().identities()).await?;
 
         ctx.scuba()
             .clone()
@@ -124,12 +123,7 @@ impl<'op> DeleteBookmarkOp<'op> {
                 txn.delete_scratch(self.bookmark, self.old_target)?;
             }
             BookmarkKind::Publishing | BookmarkKind::PullDefaultPublishing => {
-                txn.delete(
-                    self.bookmark,
-                    self.old_target,
-                    self.reason,
-                    self.bundle_replay,
-                )?;
+                txn.delete(self.bookmark, self.old_target, self.reason)?;
             }
         }
 

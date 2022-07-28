@@ -10,21 +10,21 @@
 #include <folly/Exception.h>
 #include <folly/Random.h>
 #include <folly/executors/ManualExecutor.h>
+#include <folly/portability/GFlags.h>
+#include <folly/portability/GMock.h>
 #include <folly/portability/GTest.h>
 #include <folly/test/TestUtils.h>
-#include <gflags/gflags.h>
-#ifdef _WIN32
-#include "eden/fs/prjfs/Enumerator.h"
-#else
+#include <optional>
 #include "eden/fs/fuse/DirList.h"
-#endif // _WIN32
 #include "eden/fs/inodes/FileInode.h"
 #include "eden/fs/model/Tree.h"
 #include "eden/fs/model/TreeEntry.h"
+#include "eden/fs/prjfs/Enumerator.h"
 #include "eden/fs/store/ObjectFetchContext.h"
 #include "eden/fs/testharness/FakeTreeBuilder.h"
 #include "eden/fs/testharness/TestChecks.h"
 #include "eden/fs/testharness/TestMount.h"
+#include "eden/fs/testharness/TestUtil.h"
 #include "eden/fs/utils/CaseSensitivity.h"
 #include "eden/fs/utils/FaultInjector.h"
 
@@ -32,6 +32,9 @@ using namespace facebook::eden;
 using namespace std::chrono_literals;
 
 namespace {
+constexpr auto kFutureTimeout = 10s;
+constexpr auto materializationTimeoutLimit = 1000ms;
+
 std::string testHashHex{
     "faceb00c"
     "deadbeef"
@@ -466,6 +469,191 @@ TEST(TreeInode, setattr) {
       oldmetadata.timestamps.mtime.toTimespec()};
   somedir->setattr(newMetadata, ObjectFetchContext::getNullContext());
   EXPECT_TRUE(somedir->getContents().rlock()->isMaterialized());
+}
+
+TEST(TreeInode, addNewMaterializationsToInodeTraceBus) {
+  folly::UnboundedQueue<InodeTraceEvent, true, true, false> queue;
+  FakeTreeBuilder builder;
+  builder.setFiles(
+      {{"somedir/sub/foo.txt", "test\n"}, {"dir2/bar.txt", "test 2\n"}});
+  TestMount mount{builder};
+  auto& trace_bus = mount.getEdenMount()->getInodeTraceBus();
+
+  auto somedir = mount.getTreeInode("somedir"_relpath);
+  auto sub = mount.getTreeInode("somedir/sub"_relpath);
+  auto dir2 = mount.getTreeInode("dir2"_relpath);
+
+  // Detect inode materialization events and add events to synchronized queue
+  auto handle = trace_bus.subscribeFunction(
+      folly::to<std::string>(
+          "inodetrace-", mount.getEdenMount()->getPath().basename()),
+      [&](const InodeTraceEvent& event) {
+        if (event.eventType == InodeEventType::MATERIALIZE) {
+          queue.enqueue(event);
+        }
+      });
+
+  // Wait for any initial materialization events to complete
+  while (queue.try_dequeue_for(materializationTimeoutLimit).has_value()) {
+  };
+
+  // Test removing an inode (in this case a tree inode which also materializes
+  // that tree inode before removing it)
+  somedir->getOrLoadChildTree("sub"_pc, ObjectFetchContext::getNullContext())
+      .thenValue([somedir](TreeInodePtr&&) {
+        return somedir->removeRecursively(
+            "sub"_pc,
+            InvalidationRequired::No,
+            ObjectFetchContext::getNullContext());
+      })
+      .get(0ms);
+  EXPECT_TRUE(isInodeMaterializedInQueue(
+      queue, InodeEventProgress::START, sub->getNodeId()));
+  EXPECT_TRUE(isInodeMaterializedInQueue(
+      queue, InodeEventProgress::START, somedir->getNodeId()));
+  EXPECT_TRUE(isInodeMaterializedInQueue(
+      queue, InodeEventProgress::END, somedir->getNodeId()));
+  EXPECT_TRUE(isInodeMaterializedInQueue(
+      queue, InodeEventProgress::END, sub->getNodeId()));
+
+  // Test creating a directory
+  auto newdir =
+      somedir->mkdir("newdir"_pc, S_IFREG | 0740, InvalidationRequired::No);
+  EXPECT_TRUE(isInodeMaterializedInQueue(
+      queue, InodeEventProgress::START, newdir->getNodeId()));
+  EXPECT_TRUE(isInodeMaterializedInQueue(
+      queue, InodeEventProgress::END, newdir->getNodeId()));
+
+  // Test creating a file (on an already materialized parent)
+  auto newfile = newdir->mknod(
+      "newfile.txt"_pc, S_IFREG | 0740, 0, InvalidationRequired::No);
+  EXPECT_TRUE(isInodeMaterializedInQueue(
+      queue, InodeEventProgress::START, newfile->getNodeId()));
+  EXPECT_TRUE(isInodeMaterializedInQueue(
+      queue, InodeEventProgress::END, newfile->getNodeId()));
+
+  // Test creating a file (on an unmaterialized parent)
+  auto newfile2 = dir2->mknod(
+      "newfile2.txt"_pc, S_IFREG | 0740, 0, InvalidationRequired::No);
+  EXPECT_TRUE(isInodeMaterializedInQueue(
+      queue, InodeEventProgress::START, dir2->getNodeId()));
+  EXPECT_TRUE(isInodeMaterializedInQueue(
+      queue, InodeEventProgress::END, dir2->getNodeId()));
+  EXPECT_TRUE(isInodeMaterializedInQueue(
+      queue, InodeEventProgress::START, newfile2->getNodeId()));
+  EXPECT_TRUE(isInodeMaterializedInQueue(
+      queue, InodeEventProgress::END, newfile2->getNodeId()));
+
+  // Test creating a symlink
+  auto symlink = newdir->symlink(
+      "symlink.txt"_pc, "newfile.txt", InvalidationRequired::No);
+  EXPECT_TRUE(isInodeMaterializedInQueue(
+      queue, InodeEventProgress::START, symlink->getNodeId()));
+  EXPECT_TRUE(isInodeMaterializedInQueue(
+      queue, InodeEventProgress::END, symlink->getNodeId()));
+
+  // Ensure we do not count any other materializations a second time
+  EXPECT_FALSE(queue.try_dequeue_for(materializationTimeoutLimit).has_value());
+}
+
+void collectResults(
+    std::vector<std::pair<PathComponent, ImmediateFuture<VirtualInode>>>
+        results) {
+  for (auto& result : results) {
+    std::move(result.second).get(kFutureTimeout);
+  }
+}
+
+TEST(TreeInode, getOrFindChildrenSimple) {
+  FakeTreeBuilder builder;
+  builder.setFile("somedir/foo.txt", "test\n");
+  TestMount mount{builder};
+  auto somedir = mount.getTreeInode("somedir"_relpath);
+
+  auto result =
+      somedir->getChildren(ObjectFetchContext::getNullContext(), false);
+  EXPECT_EQ(1, result.size());
+  EXPECT_THAT(result, testing::Contains(testing::Key("foo.txt"_pc)));
+  collectResults(std::move(result));
+}
+
+TEST(TreeInode, getOrFindChildrenLoadInodes) {
+  FakeTreeBuilder builder;
+  builder.setFile("somedir/bar.txt", "test\n");
+  builder.setFile("somedir/foo.txt", "test\n");
+  TestMount mount{builder};
+  auto somedir = mount.getTreeInode("somedir"_relpath);
+
+  somedir->unloadChildrenNow();
+  auto result =
+      somedir->getChildren(ObjectFetchContext::getNullContext(), true);
+
+  EXPECT_EQ(2, result.size());
+  EXPECT_THAT(result, testing::Contains(testing::Key("bar.txt"_pc)));
+  EXPECT_THAT(result, testing::Contains(testing::Key("foo.txt"_pc)));
+  collectResults(std::move(result));
+}
+
+TEST(TreeInode, getOrFindChildrenMaterializedLoadedChild) {
+  FakeTreeBuilder builder;
+  builder.setFile("somedir/foo.txt", "test\n");
+  TestMount mount{builder};
+  auto somedir = mount.getTreeInode("somedir"_relpath);
+  somedir->mknod("newfile.txt"_pc, S_IFREG | 0740, 0, InvalidationRequired::No);
+
+  auto result =
+      somedir->getChildren(ObjectFetchContext::getNullContext(), false);
+
+  EXPECT_EQ(2, result.size());
+  EXPECT_THAT(result, testing::Contains(testing::Key("foo.txt"_pc)));
+  EXPECT_THAT(result, testing::Contains(testing::Key("newfile.txt"_pc)));
+  collectResults(std::move(result));
+}
+
+TEST(TreeInode, getOrFindChildrenMaterializedUnloadedChild) {
+  FakeTreeBuilder builder;
+  builder.setFile("somedir/foo.txt", "test\n");
+  builder.setFile("somedir/zoo.txt", "test\n");
+  TestMount mount{builder};
+  auto somedir = mount.getTreeInode("somedir"_relpath);
+  {
+    somedir->mknod(
+        "newfile.txt"_pc, S_IFREG | 0740, 0, InvalidationRequired::No);
+  }
+
+  somedir->unloadChildrenNow();
+  auto result =
+      somedir->getChildren(ObjectFetchContext::getNullContext(), false);
+
+  EXPECT_EQ(3, result.size());
+  EXPECT_THAT(result, testing::Contains(testing::Key("foo.txt"_pc)));
+  EXPECT_THAT(result, testing::Contains(testing::Key("newfile.txt"_pc)));
+  EXPECT_THAT(result, testing::Contains(testing::Key("zoo.txt"_pc)));
+  collectResults(std::move(result));
+}
+
+TEST(TreeInode, getOrFindChildrenRemovedChild) {
+  FakeTreeBuilder builder;
+  builder.setFile("somedir/foo.txt", "test\n");
+  TestMount mount{builder};
+  auto somedir = mount.getTreeInode("somedir"_relpath);
+  somedir->mknod("newfile.txt"_pc, S_IFREG | 0740, 0, InvalidationRequired::No);
+
+  somedir
+      ->unlink(
+          "foo.txt"_pc,
+          InvalidationRequired::No,
+          ObjectFetchContext::getNullContext())
+      .get();
+
+  auto result =
+      somedir->getChildren(ObjectFetchContext::getNullContext(), false);
+
+  EXPECT_EQ(1, result.size());
+  EXPECT_THAT(
+      result, testing::Not(testing::Contains(testing::Key("foo.txt"_pc))));
+  EXPECT_THAT(result, testing::Contains(testing::Key("newfile.txt"_pc)));
+  collectResults(std::move(result));
 }
 
 #endif

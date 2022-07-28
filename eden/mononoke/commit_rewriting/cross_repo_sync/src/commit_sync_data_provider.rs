@@ -5,16 +5,23 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Error};
-use bookmark_renaming::{get_bookmark_renamers, BookmarkRenamer, BookmarkRenamers};
+use anyhow::anyhow;
+use anyhow::Error;
+use bookmark_renaming::get_bookmark_renamers;
+use bookmark_renaming::BookmarkRenamer;
+use bookmark_renaming::BookmarkRenamers;
 use bookmarks::BookmarkName;
 use live_commit_sync_config::LiveCommitSyncConfig;
-use metaconfig_types::{
-    CommitSyncConfig, CommitSyncConfigVersion, CommitSyncDirection, CommonCommitSyncConfig,
-};
+use metaconfig_types::CommitSyncConfig;
+use metaconfig_types::CommitSyncConfigVersion;
+use metaconfig_types::CommitSyncDirection;
+use metaconfig_types::CommonCommitSyncConfig;
 use mononoke_types::RepositoryId;
-use movers::{get_movers, Mover, Movers};
-use std::{collections::HashSet, sync::Arc};
+use movers::get_movers;
+use movers::Mover;
+use movers::Movers;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub enum CommitSyncDataProvider {
@@ -133,7 +140,7 @@ impl CommitSyncDataProvider {
         match self {
             Live(live_commit_sync_config) => {
                 let commit_sync_config = live_commit_sync_config
-                    .get_commit_sync_config_by_version(repo_id, &version)
+                    .get_commit_sync_config_by_version(repo_id, version)
                     .await?;
 
                 Ok(commit_sync_config.small_repos.keys().cloned().collect())
@@ -179,7 +186,7 @@ fn get_movers_from_config(
 ) -> Result<Movers, Error> {
     let (direction, small_repo_id) =
         get_direction_and_small_repo_id(common_config, source_repo_id, target_repo_id)?;
-    get_movers(&commit_sync_config, small_repo_id, direction)
+    get_movers(commit_sync_config, small_repo_id, direction)
 }
 
 fn get_bookmark_renamers_from_config(

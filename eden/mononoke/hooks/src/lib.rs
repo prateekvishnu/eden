@@ -20,26 +20,38 @@ mod facebook;
 pub mod hook_loader;
 mod rust_hooks;
 
-use anyhow::{Error, Result};
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
 use bookmarks::BookmarkName;
 use bytes::Bytes;
 use context::CoreContext;
 pub use errors::*;
 use fbinit::FacebookInit;
-use futures::{
-    stream::{futures_unordered::FuturesUnordered, TryStreamExt},
-    try_join, Future, TryFutureExt,
-};
+use futures::stream::futures_unordered::FuturesUnordered;
+use futures::stream::TryStreamExt;
+use futures::try_join;
+use futures::Future;
+use futures::TryFutureExt;
 use futures_stats::TimedFutureExt;
-pub use hooks_content_stores::{FileContentManager, PathContent};
-use metaconfig_types::{BookmarkOrRegex, HookBypass, HookConfig, HookManagerParams};
-use mononoke_types::{BasicFileChange, BonsaiChangeset, ChangesetId, MPath};
-use permission_checker::{ArcMembershipChecker, MembershipCheckerBuilder};
+pub use hooks_content_stores::FileContentManager;
+pub use hooks_content_stores::PathContent;
+use metaconfig_types::BookmarkOrRegex;
+use metaconfig_types::HookBypass;
+use metaconfig_types::HookConfig;
+use metaconfig_types::HookManagerParams;
+use mononoke_types::BasicFileChange;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::ChangesetId;
+use mononoke_types::MPath;
+use permission_checker::AclProvider;
+use permission_checker::ArcMembershipChecker;
+use permission_checker::NeverMember;
 use regex::Regex;
 use scuba::builder::ServerData;
 use scuba_ext::MononokeScubaSampleBuilder;
 use slog::debug;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
@@ -48,6 +60,7 @@ use std::str;
 /// Manages hooks and allows them to be installed and uninstalled given a name
 /// Knows how to run hooks
 
+#[facet::facet]
 pub struct HookManager {
     repo_name: String,
     hooks: HashMap<String, Hook>,
@@ -64,6 +77,7 @@ pub struct HookManager {
 impl HookManager {
     pub async fn new(
         fb: FacebookInit,
+        acl_provider: impl AclProvider,
         content_manager: Box<dyn FileContentManager>,
         hook_manager_params: HookManagerParams,
         mut scuba: MononokeScubaSampleBuilder,
@@ -80,15 +94,9 @@ impl HookManager {
             });
 
         let (reviewers_membership, admin_membership) = if hook_manager_params.disable_acl_checker {
-            (
-                MembershipCheckerBuilder::never_member(),
-                MembershipCheckerBuilder::never_member(),
-            )
+            (NeverMember::new(), NeverMember::new())
         } else {
-            try_join!(
-                MembershipCheckerBuilder::for_reviewers_group(fb),
-                MembershipCheckerBuilder::for_admin_group(fb),
-            )?
+            try_join!(acl_provider.reviewers_group(), acl_provider.admin_group())?
         };
 
         let scuba_bypassed_commits: MononokeScubaSampleBuilder =
@@ -109,6 +117,22 @@ impl HookManager {
             all_hooks_bypassed: hook_manager_params.all_hooks_bypassed,
             scuba_bypassed_commits,
         })
+    }
+
+    // Create a very simple HookManager, for use inside of the TestRepoFactory.
+    pub fn new_test(repo_name: String, content_manager: Box<dyn FileContentManager>) -> Self {
+        Self {
+            repo_name,
+            hooks: HashMap::new(),
+            bookmark_hooks: HashMap::new(),
+            regex_hooks: Vec::new(),
+            content_manager,
+            reviewers_membership: NeverMember::new().into(),
+            admin_membership: NeverMember::new().into(),
+            scuba: MononokeScubaSampleBuilder::with_discard(),
+            all_hooks_bypassed: false,
+            scuba_bypassed_commits: MononokeScubaSampleBuilder::with_discard(),
+        }
     }
 
     pub fn register_changeset_hook(
@@ -456,7 +480,7 @@ impl Hook {
                 ctx,
                 bookmark,
                 content_manager,
-                &hook_name,
+                hook_name,
                 scuba,
                 cs,
                 cs_id,
@@ -469,7 +493,7 @@ impl Hook {
                         ctx,
                         bookmark,
                         content_manager,
-                        &hook_name,
+                        hook_name,
                         scuba.clone(),
                         cs,
                         cs_id,
@@ -635,7 +659,7 @@ impl fmt::Display for HookExecution {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HookRejectionInfo {
     /// A short description for summarizing this failure with similar failures
-    pub description: &'static str,
+    pub description: Cow<'static, str>,
     /// A full explanation of what went wrong, suitable for presenting to the user (should include guidance for fixing this failure, where possible)
     pub long_description: String,
 }
@@ -656,7 +680,7 @@ impl HookRejectionInfo {
             .into()
             .unwrap_or_else(|| description.to_string());
         Self {
-            description,
+            description: Cow::Borrowed(description),
             long_description,
         }
     }

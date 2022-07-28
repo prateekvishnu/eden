@@ -6,21 +6,28 @@
  */
 
 //! Tests for the Changesets store.
-use super::{CachingChangesets, SqlChangesets, SqlChangesetsBuilder};
+use super::CachingChangesets;
+use super::SqlChangesets;
+use super::SqlChangesetsBuilder;
 use anyhow::Error;
 use assert_matches::assert_matches;
 use caching_ext::MockStoreStats;
-use changesets::{ChangesetEntry, ChangesetInsert, Changesets};
+use changesets::ChangesetEntry;
+use changesets::ChangesetInsert;
+use changesets::Changesets;
 use context::CoreContext;
 use fbinit::FacebookInit;
 use futures::Future;
 use maplit::hashset;
-use mononoke_types::{ChangesetIdPrefix, ChangesetIdsResolvedFromPrefix};
+use mononoke_types::ChangesetIdPrefix;
+use mononoke_types::ChangesetIdsResolvedFromPrefix;
 use mononoke_types_mocks::changesetid::*;
 use mononoke_types_mocks::repo::*;
 use rendezvous::RendezVousOptions;
 use sql_construct::SqlConstruct;
-use std::{collections::HashSet, str::FromStr, sync::Arc};
+use std::collections::HashSet;
+use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::sql::SqlChangesetsError;
 
@@ -491,11 +498,7 @@ async fn get_many_by_prefix<C: Changesets>(fb: FacebookInit, changesets: C) -> R
 
     // found several changesets within the limit by hex string prefix
     let actual = changesets
-        .get_many_by_prefix(
-            ctx.clone(),
-            ChangesetIdPrefix::from_str(&"fff").unwrap(),
-            10,
-        )
+        .get_many_by_prefix(ctx.clone(), ChangesetIdPrefix::from_str("fff").unwrap(), 10)
         .await?;
     assert_eq!(
         actual,

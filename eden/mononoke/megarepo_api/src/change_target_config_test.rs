@@ -7,20 +7,25 @@
 
 use crate::add_sync_target::AddSyncTarget;
 use crate::change_target_config::ChangeTargetConfig;
-use crate::megarepo_test_utils::{MegarepoTest, SyncTargetConfigBuilder};
+use crate::megarepo_test_utils::MegarepoTest;
+use crate::megarepo_test_utils::SyncTargetConfigBuilder;
 use anyhow::Error;
 use blobstore::Loadable;
 use context::CoreContext;
 use fbinit::FacebookInit;
-use maplit::{btreemap, hashmap};
+use maplit::btreemap;
+use maplit::hashmap;
 use megarepo_config::MononokeMegarepoConfigs;
 use megarepo_config::Target;
-use megarepo_mapping::{SourceName, REMAPPING_STATE_FILE};
-use mononoke_types::{FileType, MPath};
+use megarepo_mapping::SourceName;
+use megarepo_mapping::REMAPPING_STATE_FILE;
+use mononoke_types::FileType;
+use mononoke_types::MPath;
 use std::sync::Arc;
-use tests_utils::{
-    bookmark, list_working_copy_utf8_with_types, resolve_cs_id, CreateCommitContext,
-};
+use tests_utils::bookmark;
+use tests_utils::list_working_copy_utf8_with_types;
+use tests_utils::resolve_cs_id;
+use tests_utils::CreateCommitContext;
 
 #[fbinit::test]
 async fn test_change_target_config(fb: FacebookInit) -> Result<(), Error> {
@@ -122,21 +127,21 @@ async fn init_megarepo(ctx: &CoreContext, test: &mut MegarepoTest) -> Result<(),
         .build(&mut test.configs_storage);
 
     println!("Create initial source commits and bookmarks");
-    let first_source_cs_id = CreateCommitContext::new_root(&ctx, &test.blobrepo)
+    let first_source_cs_id = CreateCommitContext::new_root(ctx, &test.blobrepo)
         .add_file("first", "first")
         .commit()
         .await?;
 
-    bookmark(&ctx, &test.blobrepo, first_source_name.to_string())
+    bookmark(ctx, &test.blobrepo, first_source_name.to_string())
         .set_to(first_source_cs_id)
         .await?;
 
-    let second_source_cs_id = CreateCommitContext::new_root(&ctx, &test.blobrepo)
+    let second_source_cs_id = CreateCommitContext::new_root(ctx, &test.blobrepo)
         .add_file("second", "second")
         .commit()
         .await?;
 
-    bookmark(&ctx, &test.blobrepo, second_source_name.to_string())
+    bookmark(ctx, &test.blobrepo, second_source_name.to_string())
         .set_to(second_source_cs_id)
         .await?;
 
@@ -149,7 +154,7 @@ async fn init_megarepo(ctx: &CoreContext, test: &mut MegarepoTest) -> Result<(),
         AddSyncTarget::new(&configs_storage, &test.mononoke, &test.mutable_renames);
     add_sync_target
         .run(
-            &ctx,
+            ctx,
             sync_target_config,
             btreemap! {
                 first_source_name.clone() => first_source_cs_id,

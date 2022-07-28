@@ -14,85 +14,145 @@ use std::hash::Hash;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use acl_regions::{build_acl_regions, ArcAclRegions};
-use anyhow::{Context, Result};
+use acl_regions::build_acl_regions;
+use acl_regions::ArcAclRegions;
+use anyhow::Context;
+use anyhow::Result;
 use async_once_cell::AsyncOnceCell;
-use blobstore::{Blobstore, BlobstoreEnumerableWithUnlink};
-use blobstore_factory::{
-    default_scrub_handler, make_blobstore, make_blobstore_enumerable_with_unlink,
-    make_metadata_sql_factory, ComponentSamplingHandler, MetadataSqlFactory, ScrubHandler,
-};
-use bonsai_git_mapping::{ArcBonsaiGitMapping, SqlBonsaiGitMappingBuilder};
-use bonsai_globalrev_mapping::{
-    ArcBonsaiGlobalrevMapping, CachingBonsaiGlobalrevMapping, SqlBonsaiGlobalrevMappingBuilder,
-};
-use bonsai_hg_mapping::{ArcBonsaiHgMapping, CachingBonsaiHgMapping, SqlBonsaiHgMappingBuilder};
-use bonsai_svnrev_mapping::{
-    ArcBonsaiSvnrevMapping, CachingBonsaiSvnrevMapping, SqlBonsaiSvnrevMappingBuilder,
-};
-use bookmarks::{bookmark_heads_fetcher, ArcBookmarkUpdateLog, ArcBookmarks, CachedBookmarks};
-use cacheblob::{
-    new_cachelib_blobstore_no_lease, new_memcache_blobstore, CachelibBlobstoreOptions,
-    InProcessLease, LeaseOps, MemcacheOps,
-};
-use changeset_fetcher::{ArcChangesetFetcher, SimpleChangesetFetcher};
+use blobstore::Blobstore;
+use blobstore::BlobstoreEnumerableWithUnlink;
+use blobstore_factory::default_scrub_handler;
+use blobstore_factory::make_blobstore;
+use blobstore_factory::make_blobstore_enumerable_with_unlink;
+use blobstore_factory::make_metadata_sql_factory;
+use blobstore_factory::ComponentSamplingHandler;
+use blobstore_factory::MetadataSqlFactory;
+use blobstore_factory::ScrubHandler;
+use bonsai_git_mapping::ArcBonsaiGitMapping;
+use bonsai_git_mapping::SqlBonsaiGitMappingBuilder;
+use bonsai_globalrev_mapping::ArcBonsaiGlobalrevMapping;
+use bonsai_globalrev_mapping::CachingBonsaiGlobalrevMapping;
+use bonsai_globalrev_mapping::SqlBonsaiGlobalrevMappingBuilder;
+use bonsai_hg_mapping::ArcBonsaiHgMapping;
+use bonsai_hg_mapping::CachingBonsaiHgMapping;
+use bonsai_hg_mapping::SqlBonsaiHgMappingBuilder;
+use bonsai_svnrev_mapping::ArcBonsaiSvnrevMapping;
+use bonsai_svnrev_mapping::CachingBonsaiSvnrevMapping;
+use bonsai_svnrev_mapping::SqlBonsaiSvnrevMappingBuilder;
+use bookmarks::bookmark_heads_fetcher;
+use bookmarks::ArcBookmarkUpdateLog;
+use bookmarks::ArcBookmarks;
+use bookmarks::CachedBookmarks;
+use cacheblob::new_cachelib_blobstore_no_lease;
+use cacheblob::new_memcache_blobstore;
+use cacheblob::CachelibBlobstoreOptions;
+use cacheblob::InProcessLease;
+use cacheblob::LeaseOps;
+use cacheblob::MemcacheOps;
+use changeset_fetcher::ArcChangesetFetcher;
+use changeset_fetcher::SimpleChangesetFetcher;
 use changesets::ArcChangesets;
-use changesets_impl::{CachingChangesets, SqlChangesetsBuilder};
+use changesets_impl::CachingChangesets;
+use changesets_impl::SqlChangesetsBuilder;
 use cloned::cloned;
 use context::CoreContext;
 use context::SessionContainer;
 use cross_repo_sync::create_commit_syncer_lease;
-use dbbookmarks::{ArcSqlBookmarks, SqlBookmarksBuilder};
+use dbbookmarks::ArcSqlBookmarks;
+use dbbookmarks::SqlBookmarksBuilder;
 #[cfg(fbcode_build)]
 use derived_data_client_library::Client as DerivationServiceClient;
-use derived_data_manager::{ArcDerivedDataManagerSet, DerivedDataManagerSet};
-use derived_data_remote::{DerivationClient, RemoteDerivationOptions};
-use environment::{Caching, MononokeEnvironment};
-use ephemeral_blobstore::{ArcRepoEphemeralStore, RepoEphemeralStore, RepoEphemeralStoreBuilder};
+use derived_data_manager::ArcDerivedDataManagerSet;
+use derived_data_manager::DerivedDataManagerSet;
+use derived_data_remote::DerivationClient;
+use derived_data_remote::RemoteDerivationOptions;
+use environment::Caching;
+use environment::MononokeEnvironment;
+use ephemeral_blobstore::ArcRepoEphemeralStore;
+use ephemeral_blobstore::RepoEphemeralStore;
+use ephemeral_blobstore::RepoEphemeralStoreBuilder;
 use fbinit::FacebookInit;
 use filenodes::ArcFilenodes;
-use filestore::{ArcFilestoreConfig, FilestoreConfig};
+use filestore::ArcFilestoreConfig;
+use filestore::FilestoreConfig;
 use futures_watchdog::WatchdogExt;
+use hook_manager_factory::make_hook_manager;
+use hooks::ArcHookManager;
+use hooks_content_stores::RepoFileContentManager;
 use live_commit_sync_config::CfgrLiveCommitSyncConfig;
-use mercurial_mutation::{ArcHgMutationStore, SqlHgMutationStoreBuilder};
-use metaconfig_types::{
-    AllowlistEntry, ArcRepoConfig, BlobConfig, CensoredScubaParams, CommonConfig,
-    MetadataDatabaseConfig, Redaction, RedactionConfig, RepoConfig,
-};
-use mutable_counters::{ArcMutableCounters, SqlMutableCountersBuilder};
-use mutable_renames::{ArcMutableRenames, MutableRenames, SqlMutableRenamesStore};
+use mercurial_mutation::ArcHgMutationStore;
+use mercurial_mutation::CachedHgMutationStore;
+use mercurial_mutation::SqlHgMutationStoreBuilder;
+use metaconfig_types::ArcRepoConfig;
+use metaconfig_types::BlobConfig;
+use metaconfig_types::CensoredScubaParams;
+use metaconfig_types::CommonConfig;
+use metaconfig_types::Identity;
+use metaconfig_types::MetadataDatabaseConfig;
+use metaconfig_types::Redaction;
+use metaconfig_types::RedactionConfig;
+use metaconfig_types::RepoConfig;
+use metaconfig_types::RepoReadOnly;
+use mutable_counters::ArcMutableCounters;
+use mutable_counters::SqlMutableCountersBuilder;
+use mutable_renames::ArcMutableRenames;
+use mutable_renames::MutableRenames;
+use mutable_renames::SqlMutableRenamesStore;
 use newfilenodes::NewFilenodesBuilder;
 use parking_lot::Mutex;
+use permission_checker::AclProvider;
 use phases::ArcPhases;
-use pushrebase_mutation_mapping::{
-    ArcPushrebaseMutationMapping, SqlPushrebaseMutationMappingConnection,
-};
+use pushrebase_mutation_mapping::ArcPushrebaseMutationMapping;
+use pushrebase_mutation_mapping::SqlPushrebaseMutationMappingConnection;
 use readonlyblob::ReadOnlyBlobstore;
-use redactedblobstore::{ArcRedactionConfigBlobstore, RedactionConfigBlobstore};
-use redactedblobstore::{RedactedBlobs, SqlRedactedContentStore};
-use repo_blobstore::{ArcRepoBlobstore, RepoBlobstore};
-use repo_cross_repo::{ArcRepoCrossRepo, RepoCrossRepo};
-use repo_derived_data::{ArcRepoDerivedData, RepoDerivedData};
-use repo_identity::{ArcRepoIdentity, RepoIdentity};
-use repo_permission_checker::{ArcRepoPermissionChecker, ProdRepoPermissionChecker};
-use requests_table::{ArcLongRunningRequestsQueue, SqlLongRunningRequestsQueue};
+use redactedblobstore::ArcRedactionConfigBlobstore;
+use redactedblobstore::RedactedBlobs;
+use redactedblobstore::RedactionConfigBlobstore;
+use redactedblobstore::SqlRedactedContentStore;
+use repo_blobstore::ArcRepoBlobstore;
+use repo_blobstore::RepoBlobstore;
+use repo_bookmark_attrs::ArcRepoBookmarkAttrs;
+use repo_bookmark_attrs::RepoBookmarkAttrs;
+use repo_cross_repo::ArcRepoCrossRepo;
+use repo_cross_repo::RepoCrossRepo;
+use repo_derived_data::ArcRepoDerivedData;
+use repo_derived_data::RepoDerivedData;
+use repo_identity::ArcRepoIdentity;
+use repo_identity::RepoIdentity;
+use repo_lock::AlwaysLockedRepoLock;
+use repo_lock::ArcRepoLock;
+use repo_lock::MutableRepoLock;
+use repo_lock::SqlRepoLock;
+use repo_permission_checker::ArcRepoPermissionChecker;
+use repo_permission_checker::ProdRepoPermissionChecker;
+use repo_sparse_profiles::ArcRepoSparseProfiles;
+use repo_sparse_profiles::RepoSparseProfiles;
+use repo_sparse_profiles::SqlSparseProfilesSizes;
+use requests_table::ArcLongRunningRequestsQueue;
+use requests_table::SqlLongRunningRequestsQueue;
 use scuba_ext::MononokeScubaSampleBuilder;
-use segmented_changelog::{
-    new_server_segmented_changelog, new_server_segmented_changelog_manager,
-    ArcSegmentedChangelogManager, SegmentedChangelogSqlConnections,
-};
+use segmented_changelog::new_server_segmented_changelog;
+use segmented_changelog::new_server_segmented_changelog_manager;
+use segmented_changelog::ArcSegmentedChangelogManager;
+use segmented_changelog::SegmentedChangelogSqlConnections;
 use segmented_changelog_types::ArcSegmentedChangelog;
-use skiplist::{ArcSkiplistIndex, SkiplistIndex};
+use skiplist::ArcSkiplistIndex;
+use skiplist::SkiplistIndex;
 use slog::o;
 use sql::SqlConnectionsWithSchema;
-use sql_construct::{SqlConstruct, SqlConstructFromDatabaseConfig};
+use sql_construct::SqlConstruct;
+use sql_construct::SqlConstructFromDatabaseConfig;
+use sql_construct::SqlConstructFromMetadataDatabaseConfig;
 use sqlphases::SqlPhasesBuilder;
+use streaming_clone::ArcStreamingClone;
+use streaming_clone::StreamingCloneBuilder;
 use synced_commit_mapping::SqlSyncedCommitMapping;
 use thiserror::Error;
 use tunables::tunables;
 use virtually_sharded_blobstore::VirtuallyShardedBlobstore;
 
-pub use blobstore_factory::{BlobstoreOptions, ReadOnlyStorage};
+pub use blobstore_factory::BlobstoreOptions;
+pub use blobstore_factory::ReadOnlyStorage;
 
 const DERIVED_DATA_LEASE: &str = "derived-data-lease";
 
@@ -149,13 +209,12 @@ pub struct RepoFactory {
     scrub_handler: Arc<dyn ScrubHandler>,
     blobstore_component_sampler: Option<Arc<dyn ComponentSamplingHandler>>,
     bonsai_hg_mapping_overwrite: bool,
-    security_config: Vec<AllowlistEntry>,
+    global_allowlist: Vec<Identity>,
 }
 
 impl RepoFactory {
     pub fn new(env: Arc<MononokeEnvironment>, common: &CommonConfig) -> RepoFactory {
         RepoFactory {
-            env,
             censored_scuba_params: common.censored_scuba_params.clone(),
             sql_factories: RepoFactoryCache::new(),
             sql_connections: RepoFactoryCache::new(),
@@ -165,8 +224,9 @@ impl RepoFactory {
             scrub_handler: default_scrub_handler(),
             blobstore_component_sampler: None,
             redaction_config: common.redaction_config.clone(),
-            security_config: common.security_config.clone(),
+            global_allowlist: common.global_allowlist.clone(),
             bonsai_hg_mapping_overwrite: false,
+            env,
         }
     }
 
@@ -379,7 +439,7 @@ impl RepoFactory {
         &self,
         config: &BlobConfig,
     ) -> Result<ArcRedactionConfigBlobstore> {
-        let blobstore = self.blobstore(&config).await?;
+        let blobstore = self.blobstore(config).await?;
         Ok(Arc::new(RedactionConfigBlobstore::new(blobstore)))
     }
 
@@ -412,6 +472,10 @@ impl RepoFactory {
             builder = builder.with_log_file(scuba_log_file)?;
         }
         Ok(builder)
+    }
+
+    pub fn acl_provider(&self) -> &dyn AclProvider {
+        self.env.acl_provider.as_ref()
     }
 }
 
@@ -514,6 +578,15 @@ pub enum RepoFactoryError {
 
     #[error("Error opening mutable counters")]
     MutableCounters,
+
+    #[error("Error creating hook manager")]
+    HookManager,
+
+    #[error("Error creating bookmark attributes")]
+    RepoBookmarkAttrs,
+
+    #[error("Error creating streaming clone")]
+    StreamingClone,
 }
 
 #[facet::factory(name: String, config: RepoConfig)]
@@ -720,11 +793,15 @@ impl RepoFactory {
     ) -> Result<ArcRepoPermissionChecker> {
         let repo_name = repo_identity.name();
         let permission_checker = ProdRepoPermissionChecker::new(
-            self.env.fb,
             &self.env.logger,
-            &repo_config.hipster_acl,
+            self.env.acl_provider.as_ref(),
+            repo_config.hipster_acl.as_deref(),
+            repo_config
+                .source_control_service
+                .service_write_hipster_acl
+                .as_deref(),
             repo_name,
-            &self.security_config,
+            &self.global_allowlist,
         )
         .await?;
         Ok(Arc::new(permission_checker))
@@ -778,7 +855,16 @@ impl RepoFactory {
             .open::<SqlHgMutationStoreBuilder>()
             .context(RepoFactoryError::HgMutationStore)?
             .with_repo_id(repo_identity.id());
-        Ok(Arc::new(hg_mutation_store))
+
+        if let Some(pool) = self.maybe_volatile_pool("hg_mutation_store")? {
+            Ok(Arc::new(CachedHgMutationStore::new(
+                self.env.fb,
+                Arc::new(hg_mutation_store),
+                pool,
+            )))
+        } else {
+            Ok(Arc::new(hg_mutation_store))
+        }
     }
 
     pub async fn segmented_changelog(
@@ -796,8 +882,8 @@ impl RepoFactory {
         let pool = self.maybe_volatile_pool("segmented_changelog")?;
         let segmented_changelog = new_server_segmented_changelog(
             self.env.fb,
-            &self.ctx(Some(&repo_identity)),
-            &repo_identity,
+            &self.ctx(Some(repo_identity)),
+            repo_identity,
             repo_config.segmented_changelog_config.clone(),
             sql_connections,
             changeset_fetcher.clone(),
@@ -886,7 +972,7 @@ impl RepoFactory {
             )
             .await?;
         SkiplistIndex::from_blobstore(
-            &self.ctx(Some(&repo_identity)),
+            &self.ctx(Some(repo_identity)),
             &repo_config.skiplist_index_blobstore_key,
             &blobstore_without_cache.boxed(),
         )
@@ -908,14 +994,13 @@ impl RepoFactory {
     }
 
     pub fn filestore_config(&self, repo_config: &ArcRepoConfig) -> ArcFilestoreConfig {
-        let filestore_config = repo_config
-            .filestore
-            .as_ref()
-            .map(|p| FilestoreConfig {
+        let filestore_config = repo_config.filestore.as_ref().map_or_else(
+            FilestoreConfig::no_chunking_filestore,
+            |p| FilestoreConfig {
                 chunk_size: Some(p.chunk_size),
                 concurrency: p.concurrency,
-            })
-            .unwrap_or_else(|| FilestoreConfig::no_chunking_filestore());
+            },
+        );
         Arc::new(filestore_config)
     }
 
@@ -1049,6 +1134,105 @@ impl RepoFactory {
             skiplist_index.clone(),
             changeset_fetcher.clone(),
         )
+    }
+
+    pub async fn hook_manager(
+        &self,
+        repo_config: &ArcRepoConfig,
+        repo_identity: &ArcRepoIdentity,
+        repo_derived_data: &ArcRepoDerivedData,
+        bookmarks: &ArcBookmarks,
+        repo_blobstore: &ArcRepoBlobstore,
+    ) -> Result<ArcHookManager> {
+        let content_store = RepoFileContentManager::from_parts(
+            bookmarks.clone(),
+            repo_blobstore.clone(),
+            repo_derived_data.clone(),
+        );
+
+        let disabled_hooks = self
+            .env
+            .disabled_hooks
+            .get(repo_identity.name())
+            .cloned()
+            .unwrap_or_default();
+
+        let hook_manager = make_hook_manager(
+            self.env.fb,
+            self.env.acl_provider.as_ref(),
+            content_store,
+            repo_config,
+            repo_identity.name().to_string(),
+            &disabled_hooks,
+        )
+        .watched(&self.env.logger)
+        .await
+        .context(RepoFactoryError::HookManager)?;
+
+        Ok(Arc::new(hook_manager))
+    }
+
+    pub async fn sparse_profiles(
+        &self,
+        repo_config: &ArcRepoConfig,
+    ) -> Result<ArcRepoSparseProfiles> {
+        let sql = self
+            .sql_factory(&repo_config.storage_config.metadata)
+            .await?
+            .open::<SqlSparseProfilesSizes>()
+            .ok();
+        Ok(Arc::new(RepoSparseProfiles {
+            sql_profile_sizes: sql,
+        }))
+    }
+
+    pub fn repo_lock(
+        &self,
+        repo_config: &ArcRepoConfig,
+        repo_identity: &ArcRepoIdentity,
+    ) -> Result<ArcRepoLock> {
+        match repo_config.readonly {
+            RepoReadOnly::ReadOnly(ref reason) => {
+                Ok(Arc::new(AlwaysLockedRepoLock::new(reason.clone())))
+            }
+            RepoReadOnly::ReadWrite => {
+                let sql = SqlRepoLock::with_metadata_database_config(
+                    self.env.fb,
+                    &repo_config.storage_config.metadata,
+                    &self.env.mysql_options,
+                    self.env.readonly_storage.0,
+                )?;
+
+                Ok(Arc::new(MutableRepoLock::new(sql, repo_identity.id())))
+            }
+        }
+    }
+
+    pub async fn repo_bookmark_attrs(
+        &self,
+        repo_config: &ArcRepoConfig,
+    ) -> Result<ArcRepoBookmarkAttrs> {
+        let repo_bookmark_attrs = RepoBookmarkAttrs::new(
+            self.env.acl_provider.as_ref(),
+            repo_config.bookmarks.clone(),
+        )
+        .await
+        .context(RepoFactoryError::RepoBookmarkAttrs)?;
+        Ok(Arc::new(repo_bookmark_attrs))
+    }
+
+    pub async fn streaming_clone(
+        &self,
+        repo_config: &ArcRepoConfig,
+        repo_identity: &ArcRepoIdentity,
+        repo_blobstore: &ArcRepoBlobstore,
+    ) -> Result<ArcStreamingClone> {
+        let streaming_clone = self
+            .open::<StreamingCloneBuilder>(&repo_config.storage_config.metadata)
+            .await
+            .context(RepoFactoryError::StreamingClone)?
+            .build(repo_identity.id(), repo_blobstore.clone());
+        Ok(Arc::new(streaming_clone))
     }
 }
 

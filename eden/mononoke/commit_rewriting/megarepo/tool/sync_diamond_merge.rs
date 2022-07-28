@@ -10,36 +10,64 @@
 /// NOTE - this is not a production quality tool, but rather a best effort attempt to
 /// half-automate a rare case that might occur. Tool most likely doesn't cover all the cases.
 /// USE WITH CARE!
-use anyhow::{format_err, Context, Error};
+use anyhow::format_err;
+/// This is a very hacky temporary tool that's used with only one purpose -
+/// to half-manually sync a diamond merge commit from a small repo into a large repo.
+/// NOTE - this is not a production quality tool, but rather a best effort attempt to
+/// half-automate a rare case that might occur. Tool most likely doesn't cover all the cases.
+/// USE WITH CARE!
+use anyhow::Context;
+/// This is a very hacky temporary tool that's used with only one purpose -
+/// to half-manually sync a diamond merge commit from a small repo into a large repo.
+/// NOTE - this is not a production quality tool, but rather a best effort attempt to
+/// half-automate a rare case that might occur. Tool most likely doesn't cover all the cases.
+/// USE WITH CARE!
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use blobrepo_utils::convert_diff_result_into_file_change_for_diamond_merge;
 use blobstore::Loadable;
-use bookmarks::{BookmarkName, BookmarkUpdateReason};
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
 use cacheblob::LeaseOps;
 use cloned::cloned;
 use commit_transformation::upload_commits;
 use context::CoreContext;
-use cross_repo_sync::{
-    create_commit_syncers, rewrite_commit, update_mapping_with_version, CandidateSelectionHint,
-    CommitRewrittenToEmpty, CommitSyncContext, CommitSyncOutcome, CommitSyncer, Syncers,
-};
-use futures::{
-    compat::Future01CompatExt,
-    future::{FutureExt, TryFutureExt},
-    stream::{futures_unordered::FuturesUnordered, StreamExt, TryStreamExt},
-};
-use futures_ext::{BoxStream, StreamExt as _};
-use futures_old::{Future, IntoFuture, Stream};
+use cross_repo_sync::create_commit_syncers;
+use cross_repo_sync::rewrite_commit;
+use cross_repo_sync::update_mapping_with_version;
+use cross_repo_sync::CandidateSelectionHint;
+use cross_repo_sync::CommitRewrittenToEmpty;
+use cross_repo_sync::CommitSyncContext;
+use cross_repo_sync::CommitSyncOutcome;
+use cross_repo_sync::CommitSyncer;
+use cross_repo_sync::Syncers;
+use futures::compat::Future01CompatExt;
+use futures::future::FutureExt;
+use futures::future::TryFutureExt;
+use futures::stream::futures_unordered::FuturesUnordered;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use futures_ext::BoxStream;
+use futures_ext::StreamExt as _;
+use futures_old::Future;
+use futures_old::IntoFuture;
+use futures_old::Stream;
 use live_commit_sync_config::LiveCommitSyncConfig;
-use manifest::{bonsai_diff, BonsaiDiffFileChange};
+use manifest::bonsai_diff;
+use manifest::BonsaiDiffFileChange;
 use maplit::hashmap;
 use mercurial_derived_data::DeriveHgChangeset;
-use mercurial_types::{HgFileNodeId, HgManifestId};
+use mercurial_types::HgFileNodeId;
+use mercurial_types::HgManifestId;
 use metaconfig_types::CommitSyncConfigVersion;
 use mononoke_api_types::InnerRepo;
-use mononoke_types::{BonsaiChangeset, ChangesetId, FileChange, MPath};
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::ChangesetId;
+use mononoke_types::FileChange;
+use mononoke_types::MPath;
 use revset::DifferenceOfUnionsOfAncestorsNodeStream;
-use slog::{info, warn};
+use slog::info;
+use slog::warn;
 use sorted_vector_map::SortedVectorMap;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -160,7 +188,7 @@ pub async fn do_sync_diamond_merge(
         .await?;
 
     let onto_value =
-        maybe_onto_value.ok_or(format_err!("cannot find bookmark {}", onto_bookmark))?;
+        maybe_onto_value.ok_or_else(|| format_err!("cannot find bookmark {}", onto_bookmark))?;
 
     let (rewritten, version_for_merge) = create_rewritten_merge_commit(
         ctx.clone(),
@@ -190,7 +218,6 @@ pub async fn do_sync_diamond_merge(
         &onto_bookmark,
         new_merge_cs_id,
         BookmarkUpdateReason::ManualMove,
-        None,
     )?;
     book_txn.commit().await?;
 
@@ -263,12 +290,12 @@ async fn create_rewritten_merge_commit(
     )
     .await?;
     let mut rewritten =
-        maybe_rewritten.ok_or(Error::msg("merge commit was unexpectedly rewritten out"))?;
+        maybe_rewritten.ok_or_else(|| Error::msg("merge commit was unexpectedly rewritten out"))?;
 
     let mut additional_file_changes = generate_additional_file_changes(
         ctx.clone(),
         large_root,
-        &large_repo,
+        large_repo,
         &syncers.large_to_small,
         onto_value,
         &root_version,
@@ -293,7 +320,7 @@ async fn generate_additional_file_changes(
     onto_value: ChangesetId,
     version: &CommitSyncConfigVersion,
 ) -> Result<SortedVectorMap<MPath, FileChange>, Error> {
-    let bonsai_diff = find_bonsai_diff(ctx.clone(), &large_repo, root, onto_value)
+    let bonsai_diff = find_bonsai_diff(ctx.clone(), large_repo, root, onto_value)
         .collect()
         .compat()
         .await?;
@@ -304,15 +331,14 @@ async fn generate_additional_file_changes(
             BonsaiDiffFileChange::Changed(ref path, ..)
             | BonsaiDiffFileChange::ChangedReusedId(ref path, ..)
             | BonsaiDiffFileChange::Deleted(ref path) => {
-                let maybe_new_path = large_to_small.get_mover_by_version(&version).await?(path)?;
+                let maybe_new_path = large_to_small.get_mover_by_version(version).await?(path)?;
                 if maybe_new_path.is_some() {
                     continue;
                 }
             }
         }
 
-        let fc =
-            convert_diff_result_into_file_change_for_diamond_merge(&ctx, &large_repo, diff_res);
+        let fc = convert_diff_result_into_file_change_for_diamond_merge(&ctx, large_repo, diff_res);
         additional_file_changes.push(fc);
     }
 
@@ -330,10 +356,12 @@ async fn remap_commit(
         .get_commit_sync_outcome(&ctx, cs_id)
         .await?;
 
-    let sync_outcome = maybe_sync_outcome.ok_or(format_err!(
-        "{} from small repo hasn't been remapped in large repo",
-        cs_id
-    ))?;
+    let sync_outcome = maybe_sync_outcome.ok_or_else(|| {
+        format_err!(
+            "{} from small repo hasn't been remapped in large repo",
+            cs_id
+        )
+    })?;
 
     use CommitSyncOutcome::*;
     match sync_outcome {
@@ -404,8 +432,12 @@ fn validate_parents(parents: Vec<ChangesetId>) -> Result<(ChangesetId, Changeset
             parents
         ));
     }
-    let p1 = parents.get(0).ok_or(Error::msg("not a merge commit"))?;
-    let p2 = parents.get(1).ok_or(Error::msg("not a merge commit"))?;
+    let p1 = parents
+        .get(0)
+        .ok_or_else(|| Error::msg("not a merge commit"))?;
+    let p2 = parents
+        .get(1)
+        .ok_or_else(|| Error::msg("not a merge commit"))?;
 
     Ok((*p1, *p2))
 }
@@ -418,7 +450,7 @@ fn validate_roots(roots: Vec<&ChangesetId>) -> Result<&ChangesetId, Error> {
     roots
         .get(0)
         .cloned()
-        .ok_or(Error::msg("no roots found, this is not a diamond merge"))
+        .ok_or_else(|| Error::msg("no roots found, this is not a diamond merge"))
 }
 
 fn find_bonsai_diff(

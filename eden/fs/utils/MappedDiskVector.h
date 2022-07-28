@@ -7,8 +7,7 @@
 
 #pragma once
 
-#include <sys/mman.h>
-#include <unistd.h>
+#include <folly/portability/Unistd.h>
 #include <type_traits>
 
 #include <eden/fs/utils/Bug.h>
@@ -17,6 +16,10 @@
 #include <folly/FileUtil.h>
 #include <folly/Range.h>
 #include <folly/logging/xlog.h>
+
+#ifndef _WIN32
+#include <sys/mman.h>
+#endif
 
 namespace facebook::eden {
 

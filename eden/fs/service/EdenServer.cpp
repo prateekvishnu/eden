@@ -28,8 +28,8 @@
 #include <folly/io/async/AsyncSignalHandler.h>
 #include <folly/io/async/HHWheelTimer.h>
 #include <folly/logging/xlog.h>
+#include <folly/portability/GFlags.h>
 #include <folly/stop_watch.h>
-#include <gflags/gflags.h>
 #include <signal.h>
 #include <thrift/lib/cpp/concurrency/ThreadManager.h>
 #include <thrift/lib/cpp2/server/ThriftProcessor.h>
@@ -127,7 +127,7 @@ DEFINE_int32(
     apache::thrift::concurrency::ThreadManager::DEFAULT_MAX_QUEUE_SIZE,
     "Maximum number of active thrift requests");
 DEFINE_bool(thrift_enable_codel, false, "Enable Codel queuing timeout");
-DEFINE_int32(thrift_queue_timeout, 5000, "Request queue timeout in ms");
+DEFINE_int32(thrift_queue_timeout, 30000, "Request queue timeout in ms");
 
 DEFINE_int64(
     unload_interval_minutes,
@@ -583,9 +583,22 @@ Future<TakeoverData> EdenServer::stopMountsForTakeover(
         } else if (auto* channel = info.edenMount->getNfsdChannel()) {
           XLOG(DBG7) << "Calling takeover stop on nfsd3";
           channel->takeoverStop();
-        } else {
+        } else if (!info.edenMount->fsChannelIsInitialized()) {
           return EDEN_BUG_FUTURE(TakeoverData)
-              << "Takeover isn't (yet) supported for non-FUSE mounts.";
+              << "Takeover isn't (yet) supported during mount initialization."
+              << "Mount State "
+              << folly::to_underlying(info.edenMount->getState());
+        } else {
+          auto mountProtocol = info.edenMount->getMountProtocol();
+          std::string formatedMountProtocol = "<unknown>";
+          if (mountProtocol.has_value()) {
+            formatedMountProtocol =
+                fmt::format("{}", folly::to_underlying(mountProtocol.value()));
+          }
+          return EDEN_BUG_FUTURE(TakeoverData)
+              << "Takeover isn't (yet) supported for non-FUSE/NFS mounts."
+              << "Mount type: " << formatedMountProtocol << ". Mount State: "
+              << folly::to_underlying(info.edenMount->getState());
         }
 
         futures.emplace_back(std::move(future).thenValue(

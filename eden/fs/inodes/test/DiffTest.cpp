@@ -84,11 +84,6 @@ class DiffTest {
       folly::StringPiece userIgnoreFileContents = "",
       CaseSensitivity caseSensitive = kPathMapDefaultCaseSensitive) {
     ScmStatusDiffCallback callback;
-    DiffContext::LoadFileFunction loadFileContentsFromPath =
-        [this](ObjectFetchContext& fetchContext, RelativePathPiece path) {
-          return mount_.getEdenMount()->EdenMount::loadFileContentsFromPath(
-              fetchContext, path, CacheHint::LikelyNeededAgain);
-        };
     DiffContext diffContext{
         &callback,
         folly::CancellationToken{},
@@ -96,14 +91,17 @@ class DiffTest {
         caseSensitive,
         mount_.getEdenMount()->getObjectStore(),
         std::make_unique<TopLevelIgnores>(
-            systemWideIgnoreFileContents, userIgnoreFileContents),
-        std::move(loadFileContentsFromPath)};
+            systemWideIgnoreFileContents, userIgnoreFileContents)};
     auto commitHash = mount_.getEdenMount()->getCheckedOutRootId();
-    auto diffFuture = mount_.getEdenMount()->diff(&diffContext, commitHash);
+    auto diffFuture = mount_.getEdenMount()
+                          ->diff(&diffContext, commitHash)
+                          .semi()
+                          .via(mount_.getServerExecutor().get());
+    mount_.drainServerExecutor();
     EXPECT_FUTURE_RESULT(diffFuture);
     return callback.extractStatus();
   }
-  folly::Future<ScmStatus> diffFuture(bool listIgnored = false) {
+  ImmediateFuture<ScmStatus> diffFuture(bool listIgnored = false) {
     auto commitHash = mount_.getEdenMount()->getWorkingCopyParent();
     auto diffFuture = mount_.getEdenMount()->diff(
         commitHash,
@@ -154,7 +152,8 @@ ScmStatus DiffTest::resetCommitAndDiff(
     mount_.loadAllInodes();
   }
   mount_.resetCommit(builder, /* setReady = */ true);
-  auto df = diffFuture();
+  auto df = diffFuture().semi().via(mount_.getServerExecutor().get());
+  mount_.drainServerExecutor();
   return EXPECT_FUTURE_RESULT(df);
 }
 
@@ -766,7 +765,7 @@ TEST(DiffTest, ignoreSystemLevelAndUser) {
 }
 
 #ifndef _WIN32
-// Test gitignore file which is a symlink
+// Test gitignore file which is a symlink. Symlinked gitignore are ignored.
 TEST(DiffTest, ignoreSymlink) {
   DiffTest test({
       {"actual", "/1.txt\nignore.txt\njunk/\n!important.txt\n"},
@@ -791,9 +790,11 @@ TEST(DiffTest, ignoreSymlink) {
       *result.entries_ref(),
       UnorderedElementsAre(
           std::make_pair(".gitignore", ScmFileStatus::ADDED),
+          std::make_pair("1.txt", ScmFileStatus::ADDED),
           std::make_pair("a/.gitignore", ScmFileStatus::ADDED),
           std::make_pair("a/second", ScmFileStatus::ADDED),
           std::make_pair("b/.gitignore", ScmFileStatus::ADDED),
+          std::make_pair("ignore.txt", ScmFileStatus::ADDED),
           std::make_pair("src/.gitignore", ScmFileStatus::ADDED)));
 
   result = test.diff(true);
@@ -805,8 +806,8 @@ TEST(DiffTest, ignoreSymlink) {
           std::make_pair("a/second", ScmFileStatus::ADDED),
           std::make_pair("b/.gitignore", ScmFileStatus::ADDED),
           std::make_pair("src/.gitignore", ScmFileStatus::ADDED),
-          std::make_pair("1.txt", ScmFileStatus::IGNORED),
-          std::make_pair("ignore.txt", ScmFileStatus::IGNORED)));
+          std::make_pair("1.txt", ScmFileStatus::ADDED),
+          std::make_pair("ignore.txt", ScmFileStatus::ADDED)));
 }
 #endif // !_WIN32
 
@@ -1490,11 +1491,15 @@ TEST(DiffTest, fileNotReady) {
   builder2.getRoot()->setReady();
 
   // Run the diff
-  auto diffFuture = mount.getEdenMount()->diff(
-      commitHash2,
-      folly::CancellationToken{},
-      /*listIgnored=*/false,
-      /*enforceCurrentParent=*/false);
+  auto diffFuture = mount.getEdenMount()
+                        ->diff(
+                            commitHash2,
+                            folly::CancellationToken{},
+                            /*listIgnored=*/false,
+                            /*enforceCurrentParent=*/false)
+                        .semi()
+                        .via(mount.getServerExecutor().get());
+  mount.drainServerExecutor();
 
   // The diff should not be ready yet
   EXPECT_FALSE(diffFuture.isReady());
@@ -1511,6 +1516,8 @@ TEST(DiffTest, fileNotReady) {
   builder2.setReady("src");
   builder1.setReady("doc");
   builder2.setReady("doc");
+
+  mount.drainServerExecutor();
 
   EXPECT_FALSE(diffFuture.isReady());
 
@@ -1544,6 +1551,8 @@ TEST(DiffTest, fileNotReady) {
     u1->trigger();
   }
 
+  mount.drainServerExecutor();
+
   EXPECT_FALSE(diffFuture.isReady());
 
   // Process the modified files under doc/
@@ -1564,6 +1573,8 @@ TEST(DiffTest, fileNotReady) {
   // However explicitly mark all objects as ready just in case.
   builder1.setAllReady();
   builder2.setAllReady();
+
+  mount.drainServerExecutor();
 
   // The diff should be complete now.
   ASSERT_TRUE(diffFuture.isReady());
@@ -1607,19 +1618,26 @@ TEST(DiffTest, cancelledDiff) {
 
   auto cancellationSource = folly::CancellationSource{};
 
-  auto diffFuture = mount.getEdenMount()->diff(
-      commitHash2,
-      cancellationSource.getToken(),
-      /*listIgnored=*/false,
-      /*enforceCurrentParent=*/false);
+  auto diffFuture = mount.getEdenMount()
+                        ->diff(
+                            commitHash2,
+                            cancellationSource.getToken(),
+                            /*listIgnored=*/false,
+                            /*enforceCurrentParent=*/false)
+                        .semi()
+                        .via(mount.getServerExecutor().get());
+  mount.drainServerExecutor();
   EXPECT_FALSE(diffFuture.isReady());
 
   cancellationSource.requestCancellation();
+  mount.drainServerExecutor();
   EXPECT_FALSE(diffFuture.isReady());
 
   builder2.setReady("a.txt");
+  mount.drainServerExecutor();
   EXPECT_FALSE(diffFuture.isReady());
   builder2.setReady("src");
+  mount.drainServerExecutor();
   EXPECT_TRUE(diffFuture.isReady());
 
   auto result = std::move(diffFuture).get(10ms);
@@ -2068,4 +2086,123 @@ TEST(DiffTest, diffBetweenRoots) {
           std::make_pair("a", ScmFileStatus::MODIFIED),
           std::make_pair("c", ScmFileStatus::REMOVED),
           std::make_pair("d", ScmFileStatus::ADDED)));
+}
+
+TEST(DiffTest, multiTreeDiff) {
+  TestMount testMount;
+
+  auto builder1 = FakeTreeBuilder();
+  builder1.setFile("a", "A in 1\n");
+  builder1.setFile("b", "B in 1\n");
+  builder1.setFile("c", "C in 1\n");
+  auto rootTree1 = builder1.finalize(testMount.getBackingStore(), true);
+  auto commit1 = testMount.getBackingStore()->putCommit("1", builder1);
+  commit1->setReady();
+
+  auto builder2 = builder1.clone();
+  builder2.replaceFile("a", "A in 2\n");
+  builder2.removeFile("c");
+  builder2.setFile("d", "D in 2\n");
+  auto rootTree2 = builder2.finalize(testMount.getBackingStore(), true);
+  auto commit2 = testMount.getBackingStore()->putCommit("2", builder2);
+  commit2->setReady();
+
+  // Checkout commit #2
+  testMount.initialize(RootId("2"));
+
+  const auto& edenMount = testMount.getEdenMount();
+
+  auto root = edenMount->getRootInode();
+
+  ScmStatusDiffCallback callback;
+  DiffContext diffContext{
+      &callback,
+      folly::CancellationToken{},
+      false, // listIgnored
+      kPathMapDefaultCaseSensitive,
+      testMount.getEdenMount()->getObjectStore(),
+      std::make_unique<TopLevelIgnores>("", "")};
+
+  // Modify "a" to match commit 1, even though we're on commit 2.
+  testMount.overwriteFile("a", "A in 1\n");
+
+  // Modify "b" to match neither commit 1 nor commit 2.
+  testMount.overwriteFile("b", "B in 3\n");
+
+  // Test diff against no trees
+  std::vector<std::shared_ptr<const Tree>> trees;
+  root->diff(
+          &diffContext,
+          RelativePathPiece{},
+          std::move(trees),
+          diffContext.getToplevelIgnore(),
+          false)
+      .get(0ms);
+
+  auto status = callback.extractStatus();
+  EXPECT_THAT(*status.errors(), UnorderedElementsAre());
+  EXPECT_THAT(
+      *status.entries(),
+      UnorderedElementsAre(
+          std::make_pair("a", ScmFileStatus::ADDED),
+          std::make_pair("b", ScmFileStatus::ADDED),
+          std::make_pair("d", ScmFileStatus::ADDED)));
+
+  // Test diff against commit1
+  callback = ScmStatusDiffCallback();
+  trees = {std::make_shared<const Tree>(rootTree1->get())};
+  root->diff(
+          &diffContext,
+          RelativePathPiece{},
+          std::move(trees),
+          diffContext.getToplevelIgnore(),
+          false)
+      .get(0ms);
+
+  status = callback.extractStatus();
+  EXPECT_THAT(*status.errors(), UnorderedElementsAre());
+  EXPECT_THAT(
+      *status.entries(),
+      UnorderedElementsAre(
+          std::make_pair("b", ScmFileStatus::MODIFIED),
+          std::make_pair("c", ScmFileStatus::REMOVED),
+          std::make_pair("d", ScmFileStatus::ADDED)));
+
+  // Test diff against commit2
+  callback = ScmStatusDiffCallback();
+  trees = {std::make_shared<const Tree>(rootTree2->get())};
+  root->diff(
+          &diffContext,
+          RelativePathPiece{},
+          std::move(trees),
+          diffContext.getToplevelIgnore(),
+          false)
+      .get(0ms);
+
+  status = callback.extractStatus();
+  EXPECT_THAT(*status.errors(), UnorderedElementsAre());
+  EXPECT_THAT(
+      *status.entries(),
+      UnorderedElementsAre(
+          std::make_pair("a", ScmFileStatus::MODIFIED),
+          std::make_pair("b", ScmFileStatus::MODIFIED)));
+
+  // Test diff against commit1 and commit2
+  callback = ScmStatusDiffCallback();
+  trees = {
+      std::make_shared<const Tree>(rootTree1->get()),
+      std::make_shared<const Tree>(rootTree2->get())};
+  root->diff(
+          &diffContext,
+          RelativePathPiece{},
+          std::move(trees),
+          diffContext.getToplevelIgnore(),
+          false)
+      .get(0ms);
+
+  status = callback.extractStatus();
+  EXPECT_THAT(*status.errors(), UnorderedElementsAre());
+  EXPECT_THAT(
+      *status.entries(),
+      UnorderedElementsAre(std::make_pair("b", ScmFileStatus::MODIFIED)));
 }

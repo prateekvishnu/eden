@@ -7,22 +7,26 @@
 
 use std::time::Duration;
 
-use anyhow::{format_err, Context, Error};
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use bytes::Bytes;
+use changesets::deserialize_cs_entries;
 use clap_old::Arg;
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers;
+use context::CoreContext;
+use context::SessionContainer;
+use fbinit::FacebookInit;
 use futures::future::join_all;
 use futures::stream;
-use slog::{error, info, o};
-
-use changesets::deserialize_cs_entries;
-use cmdlib::{
-    args::{self, MononokeMatches},
-    helpers,
-};
-use context::{CoreContext, SessionContainer};
-use fbinit::FacebookInit;
-use segmented_changelog::{self, seedheads_from_config, SegmentedChangelogTailer};
+use segmented_changelog::seedheads_from_config;
+use segmented_changelog::SegmentedChangelogTailer;
+use slog::error;
+use slog::info;
+use slog::o;
 
 const ONCE_ARG: &str = "once";
 const REPO_ARG: &str = "repo";
@@ -178,7 +182,7 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
                 Vec::with_capacity(head_args_len)
             };
             if let Some(head_args) = head_args {
-                for head_arg in head_args.into_iter() {
+                for head_arg in head_args {
                     let head = helpers::csid_resolve(&ctx, blobrepo.clone(), head_arg)
                         .await
                         .with_context(|| {

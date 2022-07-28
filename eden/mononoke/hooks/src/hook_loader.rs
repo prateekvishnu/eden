@@ -8,16 +8,23 @@
 //! This sub module contains functions to load hooks for the server
 
 use crate::errors::*;
-use crate::{ChangesetHook, FileHook, HookManager};
+use crate::ChangesetHook;
+use crate::FileHook;
+use crate::HookManager;
 use anyhow::Error;
 use fbinit::FacebookInit;
 use metaconfig_types::RepoConfig;
+use permission_checker::AclProvider;
 use std::collections::HashSet;
 
 #[cfg(fbcode_build)]
-use crate::facebook::rust_hooks::{hook_name_to_changeset_hook, hook_name_to_file_hook};
+use crate::facebook::rust_hooks::hook_name_to_changeset_hook;
+#[cfg(fbcode_build)]
+use crate::facebook::rust_hooks::hook_name_to_file_hook;
 #[cfg(not(fbcode_build))]
-use crate::rust_hooks::{hook_name_to_changeset_hook, hook_name_to_file_hook};
+use crate::rust_hooks::hook_name_to_changeset_hook;
+#[cfg(not(fbcode_build))]
+use crate::rust_hooks::hook_name_to_file_hook;
 
 enum LoadedRustHook {
     ChangesetHook(Box<dyn ChangesetHook>),
@@ -26,6 +33,7 @@ enum LoadedRustHook {
 
 pub async fn load_hooks(
     fb: FacebookInit,
+    acl_provider: &dyn AclProvider,
     hook_manager: &mut HookManager,
     config: &RepoConfig,
     disabled_hooks: &HashSet<String>,
@@ -46,6 +54,7 @@ pub async fn load_hooks(
                 fb,
                 &hook.name,
                 &hook.config,
+                acl_provider,
                 hook_manager.get_reviewers_perm_checker(),
                 hook_manager.repo_name(),
             )

@@ -5,35 +5,48 @@
  * GNU General Public License version 2.
  */
 
-use reloader::{Loader, Reloader};
+use reloader::Loader;
+use reloader::Reloader;
 use std::cmp::min;
-#[deny(warnings)]
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::num::NonZeroI64;
 use std::sync::Arc;
 
-use anyhow::{Error, Result};
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
 use blobstore::Blobstore;
 use bytes::Bytes;
 use cloned::cloned;
-use context::{CoreContext, PerfCounterType};
+use context::CoreContext;
+use context::PerfCounterType;
 use dashmap::DashMap;
 use futures::future::try_join_all;
-use futures::stream::{futures_unordered::FuturesUnordered, TryStreamExt};
+use futures::stream::futures_unordered::FuturesUnordered;
+use futures::stream::TryStreamExt;
 use futures_util::try_join;
-use maplit::{hashmap, hashset};
-use slog::{info, Logger};
+use maplit::hashmap;
+use maplit::hashset;
+use slog::info;
+use slog::Logger;
 use tokio::task;
 
-use changeset_fetcher::{ArcChangesetFetcher, ChangesetFetcher};
-use mononoke_types::{ChangesetId, Generation, FIRST_GENERATION};
+use changeset_fetcher::ArcChangesetFetcher;
+use changeset_fetcher::ChangesetFetcher;
+use mononoke_types::ChangesetId;
+use mononoke_types::Generation;
+use mononoke_types::FIRST_GENERATION;
 
-use common::{
-    advance_bfs_layer, changesets_with_generation_numbers, check_if_node_exists, fetch_generation,
-    get_parents,
-};
-use reachabilityindex::{errors::*, LeastCommonAncestorsHint, NodeFrontier, ReachabilityIndex};
+use common::advance_bfs_layer;
+use common::changesets_with_generation_numbers;
+use common::check_if_node_exists;
+use common::fetch_generation;
+use common::get_parents;
+use reachabilityindex::errors::*;
+use reachabilityindex::LeastCommonAncestorsHint;
+use reachabilityindex::NodeFrontier;
+use reachabilityindex::ReachabilityIndex;
 
 use fbthrift::compact_protocol;
 
@@ -232,10 +245,12 @@ async fn compute_single_skip_edge(
 
     let target_changeset = target_frontier
         .get(&target_gen)
-        .ok_or_else(|| ErrorKind::ProgrammingError("frontier doesn't have target generation"))?
+        .ok_or(ErrorKind::ProgrammingError(
+            "frontier doesn't have target generation",
+        ))?
         .iter()
         .next()
-        .ok_or_else(|| ErrorKind::ProgrammingError("inconsistent frontier state"))?;
+        .ok_or(ErrorKind::ProgrammingError("inconsistent frontier state"))?;
     Ok(*target_changeset)
 }
 
@@ -352,7 +367,7 @@ async fn find_nodes_to_index(
     loop {
         bfs_layer = bfs_layer
             .into_iter()
-            .filter(|(hash, _gen)| !skip_list_edges.mapping.contains_key(&hash))
+            .filter(|(hash, _gen)| !skip_list_edges.mapping.contains_key(hash))
             .collect();
 
         if curr_depth == 0 || bfs_layer.is_empty() {
@@ -639,6 +654,9 @@ impl ReachabilityIndex for SkiplistIndex {
             changeset_fetcher.get_generation_number(ctx.clone(), anc_hash),
             changeset_fetcher.get_generation_number(ctx.clone(), desc_hash),
         )?;
+        if anc_gen > desc_gen {
+            return Ok(false);
+        }
         ctx.perf_counters()
             .set_counter(PerfCounterType::SkiplistAncestorGen, anc_gen.value() as i64);
         ctx.perf_counters().set_counter(
@@ -646,8 +664,8 @@ impl ReachabilityIndex for SkiplistIndex {
             desc_gen.value() as i64,
         );
         let frontier = process_frontier(
-            &ctx,
-            &changeset_fetcher,
+            ctx,
+            changeset_fetcher,
             &self.skip_list_edges.load(),
             NodeFrontier::new(hashmap! {desc_gen => hashset!{desc_hash}}),
             anc_gen,
@@ -778,8 +796,7 @@ async fn move_nonskippable_nodes(
     }
     Ok(changeset_parent_gen
         .into_iter()
-        .map(|(_cs_id, parent_gens)| parent_gens)
-        .flatten()
+        .flat_map(|(_cs_id, parent_gens)| parent_gens)
         .collect())
 }
 
@@ -811,7 +828,7 @@ async fn process_frontier_single_skip(
 
     let (_, all_cs_ids) = node_frontier
         .remove_max_gen()
-        .ok_or_else(|| ErrorKind::ProgrammingError("frontier can't be empty"))?;
+        .ok_or(ErrorKind::ProgrammingError("frontier can't be empty"))?;
     let (no_skiplist_edges, skipped_frontier) = move_skippable_nodes(
         skip_edges.clone(),
         all_cs_ids.into_iter().collect(),
@@ -845,7 +862,7 @@ async fn process_frontier_single_skip(
     }
     let new_max_gen = node_frontier
         .max_gen()
-        .ok_or_else(|| ErrorKind::ProgrammingError("frontier can't be empty"))?;
+        .ok_or(ErrorKind::ProgrammingError("frontier can't be empty"))?;
     Ok((node_frontier, old_max_gen.value() - new_max_gen.value()))
 }
 
@@ -941,8 +958,8 @@ impl SkiplistIndex {
         gen: Generation,
     ) -> Result<(NodeFrontier, NodeFrontier), Error> {
         try_join!(
-            self.lca_hint(&ctx, &changeset_fetcher, frontier1.clone(), gen,),
-            self.lca_hint(&ctx, &changeset_fetcher, frontier2.clone(), gen,),
+            self.lca_hint(ctx, changeset_fetcher, frontier1.clone(), gen,),
+            self.lca_hint(ctx, changeset_fetcher, frontier2.clone(), gen,),
         )
     }
 
@@ -975,10 +992,10 @@ impl SkiplistIndex {
         let mut gen = min(
             frontier1
                 .max_gen()
-                .ok_or_else(|| ErrorKind::ProgrammingError("frontier can't be empty"))?,
+                .ok_or(ErrorKind::ProgrammingError("frontier can't be empty"))?,
             frontier2
                 .max_gen()
-                .ok_or_else(|| ErrorKind::ProgrammingError("frontier can't be empty"))?,
+                .ok_or(ErrorKind::ProgrammingError("frontier can't be empty"))?,
         )
         .add(1);
         let mut step = 1;
@@ -1024,7 +1041,7 @@ impl SkiplistIndex {
             debug_assert!(frontier1.max_gen() == frontier2.max_gen());
             if frontier1
                 .max_gen()
-                .ok_or_else(|| ErrorKind::ProgrammingError("frontier can't be empty"))?
+                .ok_or(ErrorKind::ProgrammingError("frontier can't be empty"))?
                 == FIRST_GENERATION
             {
                 break;
@@ -1057,7 +1074,7 @@ impl SkiplistIndex {
             } else {
                 frontier1 = candidate_frontier1;
                 frontier2 = candidate_frontier2;
-                gen = gen.checked_sub(1).ok_or_else(|| {
+                gen = gen.checked_sub(1).ok_or({
                     ErrorKind::ProgrammingError("impossible state during LCA computation")
                 })?;
             }
@@ -1080,11 +1097,11 @@ impl SkiplistIndex {
     ) -> Result<Vec<ChangesetId>, Error> {
         let ancestor_gen = fetch_generation(ctx, changeset_fetcher, ancestor).await?;
         let node_frontier =
-            NodeFrontier::new_from_single_node(&ctx, changeset_fetcher.clone(), descendant).await?;
+            NodeFrontier::new_from_single_node(ctx, changeset_fetcher.clone(), descendant).await?;
         let mut trace = SkiplistTraversalTrace::new();
 
         let node_frontier = process_frontier(
-            &ctx,
+            ctx,
             changeset_fetcher,
             &self.skip_list_edges.load(),
             node_frontier,
@@ -1122,10 +1139,9 @@ impl SkiplistIndex {
 
 #[cfg(test)]
 mod test {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
 
     use async_trait::async_trait;
     use blobrepo::BlobRepo;
@@ -1135,19 +1151,28 @@ mod test {
     use dashmap::DashMap;
     use fbinit::FacebookInit;
     use futures::compat::Future01CompatExt;
-    use futures::stream::{iter, StreamExt, TryStreamExt};
-    use futures_ext_compat::{BoxFuture, FutureExt as FBFutureExt};
-    use futures_old::future::{join_all, Future};
+    use futures::stream::iter;
+    use futures::stream::StreamExt;
+    use futures::stream::TryStreamExt;
+    use futures_ext_compat::BoxFuture;
+    use futures_ext_compat::FutureExt as FBFutureExt;
+    use futures_old::future::join_all;
+    use futures_old::future::Future;
     use futures_old::stream::Stream;
-    use futures_util::future::{FutureExt, TryFutureExt};
+    use futures_util::future::FutureExt;
+    use futures_util::future::TryFutureExt;
     use revset::AncestorsNodeStream;
     use std::collections::HashSet;
 
     use super::*;
+    use fixtures::BranchEven;
+    use fixtures::BranchUneven;
+    use fixtures::BranchWide;
+    use fixtures::Linear;
+    use fixtures::MergeEven;
+    use fixtures::MergeUneven;
     use fixtures::TestRepoFixture;
-    use fixtures::{
-        BranchEven, BranchUneven, BranchWide, Linear, MergeEven, MergeUneven, UnsharedMergeEven,
-    };
+    use fixtures::UnsharedMergeEven;
     use test_helpers::string_to_bonsai;
     use test_helpers::test_branch_wide_reachability;
     use test_helpers::test_linear_reachability;
@@ -1441,19 +1466,19 @@ mod test {
 
     #[fbinit::test]
     async fn linear_reachability(fb: FacebookInit) {
-        let sli_constructor = || SkiplistIndex::new();
+        let sli_constructor = SkiplistIndex::new;
         test_linear_reachability(fb, sli_constructor).await;
     }
 
     #[fbinit::test]
     async fn merge_uneven_reachability(fb: FacebookInit) {
-        let sli_constructor = || SkiplistIndex::new();
+        let sli_constructor = SkiplistIndex::new;
         test_merge_uneven_reachability(fb, sli_constructor).await;
     }
 
     #[fbinit::test]
     async fn branch_wide_reachability(fb: FacebookInit) {
-        let sli_constructor = || SkiplistIndex::new();
+        let sli_constructor = SkiplistIndex::new;
         test_branch_wide_reachability(fb, sli_constructor).await;
     }
 

@@ -8,14 +8,16 @@
 use anyhow::Error;
 use metaconfig_types::HgsqlName;
 use sql::mysql;
-use sql::{queries, Connection};
-use sql_construct::{SqlConstruct, SqlConstructFromMetadataDatabaseConfig};
+use sql::queries;
+use sql::Connection;
+use sql_construct::SqlConstruct;
+use sql_construct::SqlConstructFromMetadataDatabaseConfig;
 use sql_ext::SqlConnections;
 
-use sql::mysql_async::{
-    prelude::{ConvIr, FromValue},
-    FromValueError, Value,
-};
+use sql::mysql_async::prelude::ConvIr;
+use sql::mysql_async::prelude::FromValue;
+use sql::mysql_async::FromValueError;
+use sql::mysql_async::Value;
 
 use metaconfig_types::RepoReadOnly;
 
@@ -117,7 +119,7 @@ impl SqlRepoReadWriteStatus {
     ) -> Result<bool, Error> {
         SetReadWriteStatus::query(
             &self.write_connection,
-            &[(hgsql_name.as_ref(), &state, &reason)],
+            &[(hgsql_name.as_ref(), state, reason)],
         )
         .await
         .map(|res| res.affected_rows() > 0)
@@ -173,18 +175,18 @@ impl RepoReadWriteFetcher {
 
     async fn set_state(&self, state: &HgMononokeReadWrite, reason: &String) -> Result<bool, Error> {
         match &self.sql_repo_read_write_status {
-            Some(status) => status.set_state(&self.hgsql_name, &state, &reason).await,
+            Some(status) => status.set_state(&self.hgsql_name, state, reason).await,
             None => Err(Error::msg("db name is not specified")),
         }
     }
 
     pub async fn set_mononoke_read_write(&self, reason: &String) -> Result<bool, Error> {
-        self.set_state(&HgMononokeReadWrite::MononokeWrite, &reason)
+        self.set_state(&HgMononokeReadWrite::MononokeWrite, reason)
             .await
     }
 
     pub async fn set_read_only(&self, reason: &String) -> Result<bool, Error> {
-        self.set_state(&HgMononokeReadWrite::NoWrite, &reason).await
+        self.set_state(&HgMononokeReadWrite::NoWrite, reason).await
     }
 }
 

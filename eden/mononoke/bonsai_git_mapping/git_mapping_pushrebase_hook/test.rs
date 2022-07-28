@@ -16,7 +16,8 @@ use mononoke_types::RepositoryId;
 use mononoke_types_mocks::hash::*;
 use pushrebase::do_pushrebase_bonsai;
 use test_repo_factory::TestRepoFactory;
-use tests_utils::{bookmark, CreateCommitContext};
+use tests_utils::bookmark;
+use tests_utils::CreateCommitContext;
 
 use crate::GitMappingPushrebaseHook;
 
@@ -63,7 +64,6 @@ async fn pushrebase_populates_git_mapping_impl(fb: FacebookInit) -> Result<(), E
         &Default::default(),
         &book,
         &hashset![cs2.clone()],
-        None,
         &hooks,
     )
     .await?
@@ -72,7 +72,7 @@ async fn pushrebase_populates_git_mapping_impl(fb: FacebookInit) -> Result<(), E
     let cs2_rebased = rebased
         .iter()
         .find(|e| e.id_old == cs2.get_changeset_id())
-        .ok_or(Error::msg("missing cs2"))?
+        .ok_or_else(|| Error::msg("missing cs2"))?
         .id_new
         .load(ctx, repo.blobstore())
         .await?;
@@ -105,7 +105,6 @@ async fn pushrebase_populates_git_mapping_impl(fb: FacebookInit) -> Result<(), E
         &Default::default(),
         &book,
         &hashset![cs3.clone(), cs4.clone()],
-        None,
         &hooks,
     )
     .await?
@@ -114,7 +113,7 @@ async fn pushrebase_populates_git_mapping_impl(fb: FacebookInit) -> Result<(), E
     let cs3_rebased = rebased
         .iter()
         .find(|e| e.id_old == cs3.get_changeset_id())
-        .ok_or(Error::msg("missing cs3"))?
+        .ok_or_else(|| Error::msg("missing cs3"))?
         .id_new
         .load(ctx, repo.blobstore())
         .await?;
@@ -122,7 +121,7 @@ async fn pushrebase_populates_git_mapping_impl(fb: FacebookInit) -> Result<(), E
     let cs4_rebased = rebased
         .iter()
         .find(|e| e.id_old == cs4.get_changeset_id())
-        .ok_or(Error::msg("missing cs4"))?
+        .ok_or_else(|| Error::msg("missing cs4"))?
         .id_new
         .load(ctx, repo.blobstore())
         .await?;

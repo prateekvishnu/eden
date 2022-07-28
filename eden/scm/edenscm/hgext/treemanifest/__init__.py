@@ -63,32 +63,24 @@ server, rather than relying on the server to perform this computation.
 """
 from __future__ import absolute_import
 
-import abc
-import contextlib
 import hashlib
 import os
-import random
-import shutil
 import struct
-import time
 
 from bindings import manifest as rustmanifest, revisionstore
 from edenscm.mercurial import (
     bundle2,
     bundlerepo,
     changegroup,
-    changelog,
     changelog2,
     commands,
-    encoding,
+    eagerepo,
     error,
     exchange,
     extensions,
     git,
     hg,
     localrepo,
-    manifest,
-    mdiff,
     perftrace,
     phases,
     progress,
@@ -106,24 +98,22 @@ from edenscm.mercurial import (
 from edenscm.mercurial.commands import debug as debugcommands
 from edenscm.mercurial.i18n import _, _n
 from edenscm.mercurial.node import bin, hex, nullid, short
-from edenscm.mercurial.pycompat import decodeutf8, range
+from edenscm.mercurial.pycompat import range
 
 from .. import clienttelemetry
-from ..extutil import flock
 from ..remotefilelog import (
     cmdtable as remotefilelogcmdtable,
-    mutablestores,
     resolveprefetchopts,
     shallowbundle,
     shallowrepo,
     shallowutil,
     wirepack,
 )
-from ..remotefilelog.contentstore import manifestrevlogstore, unioncontentstore
-from ..remotefilelog.datapack import makedatapackstore, memdatapack
-from ..remotefilelog.historypack import makehistorypackstore, memhistorypack
+from ..remotefilelog.contentstore import unioncontentstore
+from ..remotefilelog.datapack import memdatapack
+from ..remotefilelog.historypack import memhistorypack
 from ..remotefilelog.metadatastore import unionmetadatastore
-from ..remotefilelog.repack import domaintenancerepack, repacklockvfs
+from ..remotefilelog.repack import domaintenancerepack
 
 
 try:
@@ -424,12 +414,17 @@ def _prunesharedpacks(repo, packpath):
 
 
 def setuptreestores(repo, mfl):
-    ui = repo.ui
     if git.isgitstore(repo):
         mfl._isgit = True
+        mfl._iseager = False
         mfl.datastore = git.openstore(repo)
+    elif eagerepo.iseagerepo(repo):
+        mfl._isgit = False
+        mfl._iseager = True
+        mfl.datastore = repo.fileslog.contentstore
     else:
         mfl._isgit = False
+        mfl._iseager = False
         mfl.makeruststore()
 
 
@@ -492,9 +487,22 @@ class basetreemanifestlog(object):
         linknode,
         linkrev=None,
     ):
-        dpack, hpack = self._getmutablelocalpacks()
-
         newtreeiter = _finalize(self, newtree, p1node, p2node)
+
+        if self._iseager:
+            # eagerepo does not have history pack but requires p1node and
+            # p2node to be part of the sha1 blob.
+            store = self.datastore
+            rootnode = None
+            for nname, nnode, ntext, _np1text, np1, np2 in newtreeiter:
+                rawtext = revlog.textwithheader(ntext, np1, np2)
+                node = store.add_sha1_blob(rawtext)
+                assert node == nnode, f"{node} == {nnode}"
+                if rootnode is None and nname == "":
+                    rootnode = node
+            return rootnode
+
+        dpack, hpack = self._getmutablelocalpacks()
 
         node = None
         for nname, nnode, ntext, _np1text, np1, np2 in newtreeiter:
@@ -508,7 +516,7 @@ class basetreemanifestlog(object):
 
     def commitsharedpacks(self):
         """Persist the dirty trees written to the shared packs."""
-        if self._isgit:
+        if self._isgit or self._iseager:
             return
 
         self.datastore.markforrefresh()
@@ -538,7 +546,8 @@ class basetreemanifestlog(object):
             )
         # git store does not have the Python `.get(path, node)` method.
         # it can only be accessed via the Rust treemanifest.
-        if node == nullid or self._isgit:
+        # eager store does not require remote lookup.
+        if node == nullid or self._isgit or self._iseager:
             return treemanifestctx(self, dir, node)
         if node in self._treemanifestcache:
             return self._treemanifestcache[node]
@@ -561,6 +570,7 @@ class basetreemanifestlog(object):
         return None
 
     def makeruststore(self):
+        assert not self._iseager
         remotestore = revisionstore.pyremotestore(remotetreestore(self._repo))
         correlator = clienttelemetry.correlator(self._repo.ui)
         edenapistore = self.edenapistore(self._repo)
@@ -572,7 +582,7 @@ class basetreemanifestlog(object):
             # Of the normal contentstore fallback path?
             self.treescmstore = revisionstore.treescmstore(
                 self._repo.svfs.vfs.base,
-                self.ui._rcfg._rcfg,
+                self.ui._rcfg,
                 remotestore,
                 None,
                 edenapistore,
@@ -585,7 +595,7 @@ class basetreemanifestlog(object):
                 self.datastore = self.treescmstore.get_contentstore()
             self.historystore = revisionstore.metadatastore(
                 self._repo.svfs.vfs.base,
-                self.ui._rcfg._rcfg,
+                self.ui._rcfg,
                 remotestore,
                 None,
                 None,
@@ -1012,7 +1022,6 @@ def _registerbundle2parts():
         if category != PACK_CATEGORY:
             raise error.Abort(_("invalid treegroup pack category: %s") % category)
 
-        cl = repo.changelog
         mfl = repo.manifestlog
 
         if part.params.get("cache", "False") == "True":
@@ -1065,7 +1074,7 @@ def _registerbundle2parts():
         b2caps=None,
         heads=None,
         common=None,
-        **kwargs
+        **kwargs,
     ):
         """add parts containing trees being pulled"""
         if (
@@ -1161,7 +1170,7 @@ def pull(orig, ui, repo, *pats, **opts):
 def _postpullprefetch(ui, repo):
     if "default" not in repo.ui.paths:
         return
-    if git.isgitstore(repo):
+    if git.isgitstore(repo) or eagerepo.iseagerepo(repo):
         return
 
     ctxs = []

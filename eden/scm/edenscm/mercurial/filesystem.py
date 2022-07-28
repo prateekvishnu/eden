@@ -161,28 +161,13 @@ class physicalfilesystem(object):
         repo-rooted file path and the bool is whether the file exists on disk
         or not.
         """
-        if self.ui.configbool("workingcopy", "rustpendingchanges"):
-            physicalfs = workingcopy.physicalfilesystem(self.opener.join(""))
-            threadcount = self.ui.configint("workingcopy", "rustwalkerthreads")
-            pendingchanges = physicalfs.pendingchanges(
-                self.dirstate._repo[self.dirstate.p1()].manifest(),
-                self.dirstate._repo.fileslog.filescmstore,
-                self.dirstate._map._tree,
-                match,
-                False,
-                self.dirstate._lastnormaltime,
-                threadcount,
-            )
-            for fn in pendingchanges:
-                yield fn
-        else:
-            results = []
-            for fn in self._pendingchanges(match, listignored):
-                results.append(fn[0])
-                yield fn
+        results = []
+        for fn in self._pendingchanges(match, listignored):
+            results.append(fn[0])
+            yield fn
 
-            oldid = self.dirstate.identity()
-            self._postpendingfixup(oldid, results)
+        oldid = self.dirstate.identity()
+        self._postpendingfixup(oldid, results)
 
     def _pendingchanges(self, match, listignored):
         dmap = self.dirstate._map
@@ -572,7 +557,7 @@ def findthingstopurge(dirstate, match, findfiles, finddirs, includeignored):
     return files, dirs
 
 
-def badtype(mode):
+def badtype(mode: int) -> str:
     kind = _("unknown")
     if stat.S_ISCHR(mode):
         kind = _("character device")

@@ -5,25 +5,34 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Error};
-use blobrepo::{save_bonsai_changesets, BlobRepo};
+use anyhow::anyhow;
+use anyhow::Error;
+use blobrepo::save_bonsai_changesets;
+use blobrepo::BlobRepo;
 use blobstore::Loadable;
-use bookmarks::{BookmarkName, BookmarkUpdateReason};
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
 use commit_transformation::copy_file_contents;
 use context::CoreContext;
-use cross_repo_sync::types::{Source, Target};
+use cross_repo_sync::types::Source;
+use cross_repo_sync::types::Target;
 use derived_data::BonsaiDerived;
 use fsnodes::RootFsnodeId;
 use futures::TryStreamExt;
 use manifest::ManifestOps;
-use mononoke_types::{
-    fsnode::FsnodeFile, BonsaiChangesetMut, ChangesetId, ContentId, DateTime, FileChange, FileType,
-    MPath,
-};
+use mononoke_types::fsnode::FsnodeFile;
+use mononoke_types::BonsaiChangesetMut;
+use mononoke_types::ChangesetId;
+use mononoke_types::ContentId;
+use mononoke_types::DateTime;
+use mononoke_types::FileChange;
+use mononoke_types::FileType;
+use mononoke_types::MPath;
 use slog::info;
 use std::collections::BTreeMap;
 
-use crate::common::{decode_latest_synced_state_extras, encode_latest_synced_state_extras};
+use crate::common::decode_latest_synced_state_extras;
+use crate::common::encode_latest_synced_state_extras;
 
 pub async fn add_source_repo(
     ctx: &CoreContext,
@@ -40,8 +49,8 @@ pub async fn add_source_repo(
 
     // First list files that needs copying to hyper repo and prepend
     // source repo name to each path.
-    let root_fsnode_id = RootFsnodeId::derive(&ctx, &source_repo, source_bcs_id).await?;
-    let prefix = MPath::new(source_repo.name().to_string())?;
+    let root_fsnode_id = RootFsnodeId::derive(ctx, source_repo, source_bcs_id).await?;
+    let prefix = MPath::new(source_repo.name())?;
     let leaf_entries = root_fsnode_id
         .fsnode_id()
         .list_leaf_entries(ctx.clone(), source_repo.get_blobstore())
@@ -51,10 +60,10 @@ pub async fn add_source_repo(
         .await?;
 
     let parent = hyper_repo
-        .get_bonsai_bookmark(ctx.clone(), &hyper_repo_bookmark)
+        .get_bonsai_bookmark(ctx.clone(), hyper_repo_bookmark)
         .await?;
     if let Some(parent) = parent {
-        ensure_no_file_intersection(&ctx, &hyper_repo, parent, &leaf_entries).await?;
+        ensure_no_file_intersection(ctx, hyper_repo, parent, &leaf_entries).await?;
     }
 
     info!(
@@ -63,9 +72,9 @@ pub async fn add_source_repo(
         leaf_entries.len()
     );
     copy_file_contents(
-        &ctx,
-        &source_repo,
-        &hyper_repo,
+        ctx,
+        source_repo,
+        hyper_repo,
         leaf_entries.iter().map(|(_, fsnode)| *fsnode.content_id()),
         |i| {
             if i % 100 == 0 {
@@ -106,16 +115,10 @@ pub async fn add_source_repo(
                 cs_id,
                 parent,
                 BookmarkUpdateReason::ManualMove,
-                None,
             )?;
         }
         None => {
-            txn.create(
-                hyper_repo_bookmark,
-                cs_id,
-                BookmarkUpdateReason::ManualMove,
-                None,
-            )?;
+            txn.create(hyper_repo_bookmark, cs_id, BookmarkUpdateReason::ManualMove)?;
         }
     };
     let success = txn.commit().await?;
@@ -172,7 +175,7 @@ async fn create_new_bonsai_changeset_for_source_repo(
                 idx,
                 len
             ),
-            file_changes: chunk.into_iter().cloned().collect(),
+            file_changes: chunk.iter().cloned().collect(),
             is_snapshot: false,
             extra: Default::default(),
         };
@@ -216,7 +219,7 @@ async fn ensure_no_file_intersection(
     hyper_repo_cs_id: ChangesetId,
     leaf_entries: &[(MPath, FsnodeFile)],
 ) -> Result<(), Error> {
-    let root_fsnode_id = RootFsnodeId::derive(&ctx, &hyper_repo, hyper_repo_cs_id).await?;
+    let root_fsnode_id = RootFsnodeId::derive(ctx, hyper_repo, hyper_repo_cs_id).await?;
     let hyper_repo_files = root_fsnode_id
         .fsnode_id()
         .list_leaf_entries(ctx.clone(), hyper_repo.get_blobstore())
@@ -224,7 +227,7 @@ async fn ensure_no_file_intersection(
         .await?;
 
     for (path, _) in leaf_entries {
-        if hyper_repo_files.contains_key(&path) {
+        if hyper_repo_files.contains_key(path) {
             return Err(anyhow!("File {} is already present in hyper repo!", path));
         }
     }
@@ -237,9 +240,13 @@ mod tests {
     use super::*;
     use fbinit::FacebookInit;
     use maplit::hashmap;
-    use mononoke_types::{MPath, RepositoryId};
+    use mononoke_types::MPath;
+    use mononoke_types::RepositoryId;
     use test_repo_factory::TestRepoFactory;
-    use tests_utils::{bookmark, list_working_copy_utf8, resolve_cs_id, CreateCommitContext};
+    use tests_utils::bookmark;
+    use tests_utils::list_working_copy_utf8;
+    use tests_utils::resolve_cs_id;
+    use tests_utils::CreateCommitContext;
 
     #[fbinit::test]
     async fn add_source_repo_simple(fb: FacebookInit) -> Result<(), Error> {

@@ -7,7 +7,8 @@
 
 use std::cell::RefCell;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::thread;
 use std::thread_local;
 use std::time::Duration;
@@ -15,10 +16,15 @@ use std::time::Duration;
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use cached_config::ConfigHandle;
-use futures::{future::poll_fn, Future, FutureExt};
+use futures::future::poll_fn;
+use futures::Future;
+use futures::FutureExt;
 use once_cell::sync::OnceCell;
-use slog::{debug, warn, Logger};
-use std::sync::atomic::{AtomicBool, AtomicI64};
+use slog::debug;
+use slog::warn;
+use slog::Logger;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicI64;
 
 use tunables_derive::Tunables;
 use tunables_structs::Tunables as TunablesStruct;
@@ -58,6 +64,7 @@ pub fn tunables() -> TunablesReference {
 
 // This type exists to simplify code generation in tunables-derive
 pub type TunableString = ArcSwap<String>;
+pub type TunableVecOfStrings = ArcSwap<Vec<String>>;
 
 pub type TunableBoolByRepo = ArcSwap<HashMap<String, bool>>;
 pub type TunableStringByRepo = ArcSwap<HashMap<String, String>>;
@@ -193,11 +200,6 @@ pub struct MononokeTunables {
 
     // Disable derivation via direved data service.
     derived_data_disable_remote_derivation: AtomicBool,
-    // Set preferred region for derivation remotely
-    // Sets TargetLocality in SR client making
-    // the requests from the client goes to that region
-    // if there are available hosts.
-    derived_data_service_target_region: TunableString,
 
     // Disable the parallel derivation for DM and default to serial
     deleted_manifest_disable_new_parallel_derivation: AtomicBool,
@@ -206,7 +208,11 @@ pub struct MononokeTunables {
     multiplex_blobstore_get_do_queue_lookup: AtomicBool,
     multiplex_blobstore_is_present_do_queue_lookup: AtomicBool,
 
+    // Not in use.
+    // TODO(mitrandir): clean it up
     fastlog_use_mutable_renames: TunableBoolByRepo,
+    // Disable mutable renames for fastlog in case they cause problems.
+    fastlog_disable_mutable_renames: TunableBoolByRepo,
     megarepo_api_dont_set_file_mutable_renames: AtomicBool,
     megarepo_api_dont_set_directory_mutable_renames: AtomicBool,
 
@@ -238,9 +244,8 @@ pub struct MononokeTunables {
     // Usually filenode lookup is used while generating hg changesets
     filenode_lookup_timeout_ms: AtomicI64,
 
-    // Sampling ratio for warm boomark cache.
-    // Only tw_task_id % warm_bookmark_cache_loggin_tw_task_sampling == 0 will have sampling enabled
-    warm_bookmark_cache_loggin_tw_task_sampling: AtomicI64,
+    // Sampling ratio percentage for warm boomark cache.
+    warm_bookmark_cache_logging_sampling_pct: AtomicI64,
 
     // Setting this tunable to a new non-zero value and restarting
     // mononoke hosts will invalidate the cache
@@ -249,6 +254,14 @@ pub struct MononokeTunables {
     // Setting this tunable to a new non-zero value and restarting
     // mononoke hosts will invalidate bonsai_hg_mapping cache
     bonsai_hg_mapping_sitever: AtomicI64,
+
+    // Setting this tunable to a new non-zero value will update the
+    // TTL for the mutation store cache
+    hg_mutation_store_caching_ttl_secs: AtomicI64,
+
+    // Setting this tunable to a new non-zero value and restarting
+    // mononoke hosts will invalidate hg mutation store cache
+    hg_mutation_store_sitever: AtomicI64,
 
     // EdenAPI requests that take long than this get logged unsampled
     edenapi_unsampled_duration_threshold_ms: AtomicI64,
@@ -269,6 +282,28 @@ pub struct MononokeTunables {
 
     // Percentage of wireproto unbundle pushrebase requests redirected to SCS
     pushrebase_redirect_to_scs_pct: AtomicI64,
+
+    // Which region writes should be done to, in order to minimise latency.
+    // This should align with underlying storage (SQL/Manifold) write regions.
+    // Notice writes still work from any region, and this field is not necessarily
+    // enforced.
+    preferred_write_region: TunableString,
+
+    // The replication_status call is problematic for SQL so we're experimenting
+    // with removing it, but this tunable can be used as a quick killswitch to
+    // enable them again.
+    sql_lag_monitoring_blocklist: TunableVecOfStrings,
+
+    // If set, the hook won't be created at all
+    disable_check_write_permissions_hook: AtomicBool,
+    // If set, the check result will be discarded for user identities
+    log_only_for_users_in_cwp_hook: AtomicBool,
+    // If set, the check result will be discarded for service identities
+    log_only_for_services_in_cwp_hook: AtomicBool,
+
+    // If set, the wireproto implementation will only log the repo write ACL
+    // check result.
+    log_only_wireproto_write_acl: AtomicBool,
 }
 
 fn log_tunables(tunables: &TunablesStruct) -> String {
@@ -366,6 +401,7 @@ fn update_tunables(new_tunables: Arc<TunablesStruct>) -> Result<()> {
     tunables.update_bools(&new_tunables.killswitches);
     tunables.update_ints(&new_tunables.ints);
     tunables.update_strings(&new_tunables.strings);
+    tunables.update_vec_of_strings(&new_tunables.vec_of_strings);
 
     if let Some(killswitches_by_repo) = &new_tunables.killswitches_by_repo {
         tunables.update_by_repo_bools(killswitches_by_repo);
@@ -431,6 +467,7 @@ mod test {
         boolean: AtomicBool,
         num: AtomicI64,
         string: TunableString,
+        vecofstrings: TunableVecOfStrings,
 
         repobool: TunableBoolByRepo,
         repobool2: TunableBoolByRepo,
@@ -476,6 +513,7 @@ mod test {
         empty.update_bools(&bools);
         empty.update_ints(&ints);
         empty.update_strings(&HashMap::new());
+        empty.update_vec_of_strings(&HashMap::new());
     }
 
     #[test]
@@ -486,7 +524,7 @@ mod test {
         let test = TestTunables::default();
         assert_eq!(test.get_boolean(), false);
         test.update_bools(&d);
-        assert_eq!(test.get_boolean(), true);
+        assert!(test.get_boolean());
     }
 
     #[test]
@@ -498,7 +536,7 @@ mod test {
         let test = TestTunables::default();
         assert_eq!(test.get_boolean(), false);
         test.update_bools(&d);
-        assert_eq!(test.get_boolean(), true);
+        assert!(test.get_boolean());
 
         test.update_bools(&hashmap! {});
         assert_eq!(test.get_boolean(), false);
@@ -570,6 +608,20 @@ mod test {
         assert_eq!(test.get_string().as_str(), "");
         test.update_strings(&d);
         assert_eq!(test.get_string().as_str(), "value");
+    }
+
+    #[test]
+    fn update_vec_of_strings() {
+        let mut d = HashMap::new();
+        d.insert(s("vecofstrings"), vec![s("value"), s("value2")]);
+
+        let test = TestTunables::default();
+        assert!(&test.get_vecofstrings().is_empty());
+        test.update_vec_of_strings(&d);
+        assert_eq!(
+            &test.get_vecofstrings().as_slice(),
+            &[s("value"), s("value2")]
+        );
     }
 
     #[test]

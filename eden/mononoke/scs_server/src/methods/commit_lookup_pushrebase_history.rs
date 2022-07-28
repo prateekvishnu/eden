@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use context::CoreContext;
 use metaconfig_types::CommonCommitSyncConfig;
-use mononoke_api::{Mononoke, RepoContext};
+use mononoke_api::Mononoke;
+use mononoke_api::RepoContext;
 use mononoke_types::ChangesetId;
 use phases::PhasesRef;
 use source_control as thrift;
@@ -73,7 +74,9 @@ impl RepoChangesetsPushrebaseHistory {
             .mononoke
             .repo(self.ctx.clone(), repo_name)
             .await?
-            .ok_or(errors::repo_not_found(repo_name.clone()))?;
+            .ok_or_else(|| errors::repo_not_found(repo_name.clone()))?
+            .build()
+            .await?;
         Ok(repo)
     }
 
@@ -238,11 +241,10 @@ impl SourceControlServiceImpl {
         let mut pushrebased = false;
         if history.try_traverse_pushrebase().await? {
             pushrebased = true;
-        } else {
-            if history.try_traverse_commit_sync().await? {
-                pushrebased = history.try_traverse_pushrebase().await?;
-            }
+        } else if history.try_traverse_commit_sync().await? {
+            pushrebased = history.try_traverse_pushrebase().await?;
         }
+
         if pushrebased {
             history.try_traverse_commit_sync().await?;
         }

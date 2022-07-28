@@ -5,14 +5,22 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{Context, Error};
-use context::{CoreContext, PerfCounterType};
-use filenodes::{FilenodeResult, PreparedFilenode};
+use anyhow::Context;
+use anyhow::Error;
+use context::CoreContext;
+use context::PerfCounterType;
+use filenodes::FilenodeResult;
+use filenodes::PreparedFilenode;
 use futures::future;
-use mercurial_types::{HgChangesetId, HgFileNodeId, RepoPath};
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::RepoPath;
 use mononoke_types::RepositoryId;
-use path_hash::{PathBytes, PathHash, PathHashBytes};
-use sql::{queries, Connection};
+use path_hash::PathBytes;
+use path_hash::PathHash;
+use path_hash::PathHashBytes;
+use sql::queries;
+use sql::Connection;
 use stats::prelude::*;
 use std::collections::HashSet;
 use thiserror::Error as DeriveError;
@@ -106,10 +114,10 @@ impl FilenodesWriter {
         for chunk in filenodes.chunks(self.chunk_size) {
             let read_conn = &self.read_connections[shard_number];
             let write_conn = &self.write_connections[shard_number];
-            ensure_paths_exists(ctx, &read_conn, &write_conn, repo_id, chunk)
+            ensure_paths_exists(ctx, read_conn, write_conn, repo_id, chunk)
                 .await
                 .context("Error ensuring filenode paths exist")?;
-            insert_filenodes(ctx, &write_conn, repo_id, chunk, replace)
+            insert_filenodes(ctx, write_conn, repo_id, chunk, replace)
                 .await
                 .context("Error inserting filenodes")?;
         }
@@ -132,7 +140,7 @@ async fn ensure_paths_exists(
 
     ctx.perf_counters()
         .increment_counter(PerfCounterType::SqlReadsMaster);
-    let mut paths_present = SelectAllPaths::query(&read_conn, &repo_id, &path_hashes[..])
+    let mut paths_present = SelectAllPaths::query(read_conn, &repo_id, &path_hashes[..])
         .await?
         .into_iter()
         .map(|r| r.0)
@@ -156,7 +164,7 @@ async fn ensure_paths_exists(
 
     ctx.perf_counters()
         .increment_counter(PerfCounterType::SqlWrites);
-    InsertPaths::query(&write_conn, &paths_to_insert[..])
+    InsertPaths::query(write_conn, &paths_to_insert[..])
         .await
         .with_context(|| format!("Error inserting {} filenode paths", paths_to_insert.len()))?;
 
@@ -223,15 +231,15 @@ async fn insert_filenodes(
     ctx.perf_counters()
         .increment_counter(PerfCounterType::SqlWrites);
     if replace {
-        ReplaceFilenodes::query(&write_conn, &filenode_rows[..]).await?;
+        ReplaceFilenodes::query(write_conn, &filenode_rows[..]).await?;
     } else {
-        InsertFilenodes::query(&write_conn, &filenode_rows[..]).await?;
+        InsertFilenodes::query(write_conn, &filenode_rows[..]).await?;
     }
 
     if !copydata_rows.is_empty() {
         ctx.perf_counters()
             .increment_counter(PerfCounterType::SqlWrites);
-        InsertFixedcopyinfo::query(&write_conn, &copydata_rows[..]).await?;
+        InsertFixedcopyinfo::query(write_conn, &copydata_rows[..]).await?;
     }
 
     Ok(())

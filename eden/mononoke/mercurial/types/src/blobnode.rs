@@ -6,12 +6,16 @@
  */
 
 use bytes::Bytes;
-use futures_old::{Future, Stream};
-use quickcheck::{Arbitrary, Gen};
-use serde_derive::{Deserialize, Serialize};
+use futures_old::Future;
+use futures_old::Stream;
+use quickcheck::Arbitrary;
+use quickcheck::Gen;
+use serde_derive::Deserialize;
+use serde_derive::Serialize;
 
 use crate::blob::HgBlob;
-use crate::hash::{self, Context};
+use crate::hash;
+use crate::hash::Context;
 use crate::nodehash::HgNodeHash;
 
 /// Equivalent type from Mercurial's Rust code representing parents.
@@ -36,10 +40,10 @@ impl HgParents {
     }
 
     pub fn get_nodes(&self) -> (Option<HgNodeHash>, Option<HgNodeHash>) {
-        match self {
-            &HgParents::None => (None, None),
-            &HgParents::One(p1) => (Some(p1), None),
-            &HgParents::Two(p1, p2) => (Some(p1), Some(p2)),
+        match *self {
+            HgParents::None => (None, None),
+            HgParents::One(p1) => (Some(p1), None),
+            HgParents::Two(p1, p2) => (Some(p1), Some(p2)),
         }
     }
 }
@@ -144,11 +148,11 @@ impl HgBlobNode {
 fn hg_node_id_hash_context(parents: &HgParents) -> Context {
     let null = hash::NULL;
 
-    let (h1, h2) = match &parents {
-        &HgParents::None => (&null, &null),
-        &HgParents::One(ref p1) => (&null, &p1.0),
-        &HgParents::Two(ref p1, ref p2) if p1 > p2 => (&p2.0, &p1.0),
-        &HgParents::Two(ref p1, ref p2) => (&p1.0, &p2.0),
+    let (h1, h2) = match parents {
+        HgParents::None => (&null, &null),
+        HgParents::One(ref p1) => (&null, &p1.0),
+        HgParents::Two(ref p1, ref p2) if p1 > p2 => (&p2.0, &p1.0),
+        HgParents::Two(ref p1, ref p2) => (&p1.0, &p2.0),
     };
 
     let mut ctxt = Context::new();
@@ -217,7 +221,7 @@ mod test {
         }
         {
             let pid: Option<HgNodeHash> = Some(p.nodeid());
-            let n = HgBlobNode::new(blob.clone(), pid, pid);
+            let n = HgBlobNode::new(blob, pid, pid);
             assert_eq!(n.parents, HgParents::Two(pid.unwrap(), pid.unwrap()));
         }
     }
@@ -258,7 +262,7 @@ mod test {
             let stream = stream::iter_ok::<_, ()>(input.clone());
 
             let bytes = input.iter().fold(BytesMut::new(), |mut bytes, chunk| {
-                bytes.extend_from_slice(&chunk);
+                bytes.extend_from_slice(chunk);
                 bytes
             }).freeze();
 

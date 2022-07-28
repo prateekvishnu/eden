@@ -22,6 +22,7 @@ chrono = { version = "0.4", features = ["clock", "serde", "std"], default-featur
 clientinfo = { version = "0.1.0", path = "../../../scm/lib/clientinfo" }
 cloned = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 cmdlib = { version = "0.1.0", path = "../../cmdlib" }
+connection_security_checker = { version = "0.1.0", path = "../../common/connection_security_checker" }
 context = { version = "0.1.0", path = "../context" }
 edenapi_service = { version = "0.1.0", path = "../../edenapi_service" }
 failure_ext = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
@@ -37,7 +38,7 @@ hgproto = { version = "0.1.0", path = "../../hgproto" }
 hostname = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 http = "0.2"
 hyper = { version = "0.14.7", features = ["client", "http1", "http2"] }
-lazy_static = "1.0"
+lazy_static = "1.4"
 maplit = "1.0"
 metaconfig_types = { version = "0.1.0", path = "../../metaconfig/types" }
 metadata = { version = "0.1.0", path = "../metadata" }
@@ -51,11 +52,12 @@ qps = { version = "0.1.0", path = "../qps" }
 quiet_stream = { version = "0.1.0", path = "../../quiet_stream" }
 rate_limiting = { version = "0.1.0", path = "../../rate_limiting" }
 repo_client = { version = "0.1.0", path = "../../repo_client" }
+repo_identity = { version = "0.1.0", path = "../../repo_attributes/repo_identity" }
 scribe_ext = { version = "0.1.0", path = "../../common/scribe_ext" }
 scuba_ext = { version = "0.1.0", path = "../../common/scuba_ext" }
 serde_json = { version = "1.0.79", features = ["float_roundtrip", "unbounded_depth"] }
 session_id = { version = "0.1.0", path = "../session_id" }
-sha-1 = "0.8"
+sha-1 = "0.10"
 slog = { version = "2.7", features = ["max_level_trace", "nested-values"] }
 slog-kvfilter = "0.7"
 slog-term = "2.8"

@@ -19,10 +19,8 @@ import os
 import pdb
 import re
 import signal
-import socket
 import sys
 import time
-import traceback
 
 import bindings
 
@@ -35,20 +33,15 @@ from . import (
     encoding,
     error,
     extensions,
-    help,
     hg,
     hintutil,
     hook,
     i18n,
-    mononokepeer,
     perftrace,
     profiling,
     pycompat,
     registrar,
     scmutil,
-    sshpeer,
-    templatekw,
-    templater,
     ui as uimod,
     uiconfig,
     util,
@@ -521,42 +514,6 @@ def dispatch(req):
             duration,
         )
 
-        threshold = req.ui.configint("tracing", "threshold")
-        if duration >= threshold:
-            key = "flat/perftrace-%(host)s-%(pid)s-%(time)s" % {
-                "host": socket.gethostname(),
-                "pid": os.getpid(),
-                "time": time.time(),
-            }
-            # TODO: Move this into a background task that renders from
-            # blackbox instead.
-            # The "duration" is chosen dynamically for long commands.
-            # The ASCII implementation will fold repetitive calls so
-            # the length of the output is practically bounded.
-            output = bindings.tracing.singleton.ascii(
-                # Minimum resolution = 1% of max(duration, threshold)
-                # It's in microseconds (1e6) to divide it by 100 = 1e4
-                int((max([duration, threshold]) * 1e4))
-            )
-            if req.ui.configbool("tracing", "stderr"):
-                req.ui.warn("%s\n" % output)
-            req.ui.log("perftrace", "Trace:\n%s\n", output, key=key, payload=output)
-            req.ui.log("perftracekey", "Trace key:%s\n", key, perftracekey=key)
-
-        def truncateduration(duration):
-            """Truncate the passed in duration to only 3 significant digits."""
-            millis = int(duration * 1000)
-            if millis < 1000:
-                return millis
-
-            for power in range(3, 19):
-                threshold = 10**power
-                if millis < threshold:
-                    factor = int(threshold / 1000)
-                    return int(millis / factor) * factor
-            return millis
-
-        req.ui._measuredtimes["command_duration"] = truncateduration(duration)
         retmask = req.ui.configint("ui", "exitcodemask")
 
         try:
@@ -844,7 +801,7 @@ def _parse(ui, args):
     if args:
         try:
             replacement, aliases = cliparser.expandargs(
-                ui._rcfg._rcfg, commandnames, args, strict
+                ui._rcfg, commandnames, args, strict
             )
         except cliparser.AmbiguousCommand as e:
             e.args[2].sort()
@@ -864,9 +821,9 @@ def _parse(ui, args):
         # FIXME: Find a way to avoid calling expandargs twice.
         fullargs = (
             fullargs[:replace]
-            + cliparser.expandargs(
-                ui._rcfg._rcfg, commandnames, fullargs[replace:], strict
-            )[0]
+            + cliparser.expandargs(ui._rcfg, commandnames, fullargs[replace:], strict)[
+                0
+            ]
         )
 
         # Only need to figure out the command name. Parse result is dropped.
@@ -962,6 +919,12 @@ def runcommand(lui, repo, cmd, fullargs, ui, options, d, cmdpats, cmdoptions):
         hintutil.loadhintconfig(lui)
         ui.log("jobid", jobid=encoding.environ.get("HG_JOB_ID", "unknown"))
         ret = _runcommand(ui, options, cmd, d)
+
+        # Special case clone return value so we have access to the new repo.
+        if cmd == "clone":
+            repo = ret
+            ret = 0 if repo else 1
+
         # run post-hook, passing command result
         hook.hook(
             lui,

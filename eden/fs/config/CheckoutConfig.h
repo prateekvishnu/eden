@@ -14,11 +14,8 @@
 #include "eden/fs/config/ParentCommit.h"
 #include "eden/fs/model/RootId.h"
 #include "eden/fs/utils/CaseSensitivity.h"
-#include "eden/fs/utils/PathFuncs.h"
-
-#ifdef _WIN32
 #include "eden/fs/utils/Guid.h"
-#endif
+#include "eden/fs/utils/PathFuncs.h"
 
 namespace facebook::eden {
 
@@ -97,7 +94,14 @@ class CheckoutConfig {
   /**
    * Get the channel type that this mount should be using.
    */
-  MountProtocol getMountProtocol() const {
+  MountProtocol getMountProtocol() const;
+
+  /**
+   * Get the raw MountProtocol stored in the config.
+   *
+   * This should generally not be used except in tests.
+   */
+  MountProtocol getRawMountProtocol() const {
     return mountProtocol_;
   }
 
@@ -150,7 +154,7 @@ class CheckoutConfig {
   const AbsolutePath mountPath_;
   std::string repoType_;
   std::string repoSource_;
-  MountProtocol mountProtocol_;
+  MountProtocol mountProtocol_{kMountProtocolDefault};
   CaseSensitivity caseSensitive_{kPathMapDefaultCaseSensitive};
   bool requireUtf8Path_{true};
 

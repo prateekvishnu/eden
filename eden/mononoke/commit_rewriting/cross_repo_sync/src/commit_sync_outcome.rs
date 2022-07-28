@@ -6,21 +6,26 @@
  */
 
 use crate::commit_sync_data_provider::CommitSyncDataProvider;
-use crate::types::{Source, Target};
-use anyhow::{anyhow, Error};
+use crate::types::Source;
+use crate::types::Target;
+use anyhow::anyhow;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use bookmarks::BookmarkName;
 use context::CoreContext;
 use futures::future::try_join_all;
 use futures::Future;
-use metaconfig_types::{CommitSyncConfigVersion, CommitSyncDirection};
-use mononoke_types::{ChangesetId, RepositoryId};
+use metaconfig_types::CommitSyncConfigVersion;
+use metaconfig_types::CommitSyncDirection;
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
 use reachabilityindex::LeastCommonAncestorsHint;
 use slog::debug;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
-use synced_commit_mapping::{SyncedCommitMapping, WorkingCopyEquivalence};
+use synced_commit_mapping::SyncedCommitMapping;
+use synced_commit_mapping::WorkingCopyEquivalence;
 
 /// The state of a source repo commit in a target repo, assuming
 /// that any multiple `RewrittenAs` options have been resolved
@@ -528,7 +533,7 @@ impl DesiredRelationship {
                 target_repo_lca_hint
                     .0
                     .is_ancestor(
-                        &ctx,
+                        ctx,
                         &target_repo_fetcher,
                         target_cs_id.0,
                         comparison_cs_id.0,
@@ -540,7 +545,7 @@ impl DesiredRelationship {
                 target_repo_lca_hint
                     .0
                     .is_ancestor(
-                        &ctx,
+                        ctx,
                         &target_repo_fetcher,
                         comparison_cs_id.0,
                         target_cs_id.0,
@@ -580,7 +585,7 @@ fn get_only_or_in_desired_relationship_selector<'a>(
             }))
             .await?;
 
-        let mut candidates = candidates.into_iter().filter_map(|i| i);
+        let mut candidates = candidates.into_iter().flatten();
         match (candidates.next(), candidates.next()) {
             (None, None) => Err(anyhow!(
                 "{}",
@@ -662,15 +667,18 @@ mod tests {
     use bookmarks::BookmarkUpdateReason;
     use fbinit::FacebookInit;
     use live_commit_sync_config::TestLiveCommitSyncConfig;
-    use mononoke_types_mocks::changesetid::{FOURS_CSID, ONES_CSID, THREES_CSID, TWOS_CSID};
+    use mononoke_types_mocks::changesetid::FOURS_CSID;
+    use mononoke_types_mocks::changesetid::ONES_CSID;
+    use mononoke_types_mocks::changesetid::THREES_CSID;
+    use mononoke_types_mocks::changesetid::TWOS_CSID;
     use skiplist::SkiplistIndex;
     use sql::rusqlite::Connection as SqliteConnection;
     use sql::Connection;
     use sql_construct::SqlConstruct;
     use sql_ext::SqlConnections;
-    use synced_commit_mapping::{
-        SqlSyncedCommitMapping, SyncedCommitMappingEntry, SyncedCommitSourceRepo,
-    };
+    use synced_commit_mapping::SqlSyncedCommitMapping;
+    use synced_commit_mapping::SyncedCommitMappingEntry;
+    use synced_commit_mapping::SyncedCommitSourceRepo;
     use test_repo_factory::TestRepoFactory;
     use tests_utils::drawdag::create_from_dag;
 
@@ -695,7 +703,7 @@ mod tests {
         let m = SqlSyncedCommitMapping::from_sql_connections(SqlConnections::new_single(con));
         for (small_bcs_id, large_bcs_id) in entires {
             m.add(
-                &ctx,
+                ctx,
                 SyncedCommitMappingEntry::new(
                     large_repo_id,
                     large_bcs_id,
@@ -974,7 +982,7 @@ mod tests {
         book: &BookmarkName,
     ) -> Result<(), Error> {
         let mut txn = blob_repo.update_bookmark_transaction(ctx.clone());
-        txn.force_set(&book, bcs_id, BookmarkUpdateReason::TestMove, None)
+        txn.force_set(book, bcs_id, BookmarkUpdateReason::TestMove)
             .unwrap();
         txn.commit().await?;
         Ok(())

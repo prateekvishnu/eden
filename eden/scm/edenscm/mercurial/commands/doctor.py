@@ -5,7 +5,6 @@
 
 from __future__ import absolute_import
 
-import contextlib
 import os
 import typing
 
@@ -115,7 +114,7 @@ def doctor(ui, **opts) -> typing.Optional[int]:
                 revisionstore.repair,
                 localpath,
                 suffix,
-                ui._uiconfig._rcfg._rcfg,
+                ui._uiconfig._rcfg,
             )
 
     ui.write(_("checking commit references\n"))
@@ -605,7 +604,7 @@ def runglobalindexedlogdoctor(ui):
                 revisionstore.repair,
                 None,
                 suffix,
-                ui._uiconfig._rcfg._rcfg,
+                ui._uiconfig._rcfg,
             )
 
 
@@ -621,7 +620,7 @@ class ChangelogRepo(object):
         self.ui = ui
         self.svfs = svfs
         self.storerequirements = scmutil.readrequires(svfs)
-        self._rsrepo = rsrepo.repo(root, self.ui._rcfg._rcfg)
+        self._rsrepo = rsrepo.repo(root, self.ui._rcfg)
 
     @property
     def edenapi(self):

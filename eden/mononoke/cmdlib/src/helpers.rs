@@ -5,32 +5,47 @@
  * GNU General Public License version 2.
  */
 
-use std::{fs, future::Future, io, path::Path, str::FromStr, time::Duration};
+use std::fs;
+use std::future::Future;
+use std::io;
+use std::path::Path;
+use std::str::FromStr;
+use std::time::Duration;
 
-use anyhow::{bail, format_err, Context, Error, Result};
+use anyhow::bail;
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use fbinit::FacebookInit;
-use futures::{
-    future::{self, Either},
-    stream, StreamExt, TryFutureExt, TryStreamExt,
-};
+use futures::future;
+use futures::future::Either;
+use futures::stream;
+use futures::StreamExt;
+use futures::TryFutureExt;
+use futures::TryStreamExt;
 use services::Fb303Service;
-use slog::{error, info, Logger};
-use tokio::runtime::{Handle, Runtime};
-use tokio::{
-    io::AsyncBufReadExt,
-    signal::unix::{signal, SignalKind},
-    time,
-};
+use slog::error;
+use slog::info;
+use slog::Logger;
+use tokio::io::AsyncBufReadExt;
+use tokio::runtime::Handle;
+use tokio::runtime::Runtime;
+use tokio::signal::unix::signal;
+use tokio::signal::unix::SignalKind;
+use tokio::time;
 
 use crate::args::MononokeMatches;
 use crate::monitoring;
 use blobrepo::BlobRepo;
 use blobstore::Loadable;
 use bonsai_hg_mapping::BonsaiHgMappingRef;
-use bookmarks::{BookmarkName, BookmarksRef};
+use bookmarks::BookmarkName;
+use bookmarks::BookmarksRef;
 use context::CoreContext;
 use mercurial_derived_data::DeriveHgChangeset;
-use mercurial_types::{HgChangesetId, HgManifestId};
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgManifestId;
 use mononoke_types::ChangesetId;
 use repo_identity::RepoIdentityRef;
 use stats::schedule_stats_aggregation_preview;
@@ -52,6 +67,7 @@ pub fn setup_repo_dir<P: AsRef<Path>>(data_dir: P, create: CreateStorage) -> Res
     }
 
     // Validate directory layout
+    #[allow(clippy::single_element_loop)]
     for subdir in &["blobs"] {
         let subdir = data_dir.join(subdir);
 
@@ -98,7 +114,7 @@ pub async fn csids_resolve_from_file(
     }
 
     stream::iter(csids)
-        .map(|csid| csid_resolve_impl(&ctx, &container, csid))
+        .map(|csid| csid_resolve_impl(ctx, &container, csid))
         .buffered(100)
         .try_collect::<Vec<_>>()
         .await

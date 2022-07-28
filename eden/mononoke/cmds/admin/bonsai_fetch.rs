@@ -8,13 +8,19 @@
 use anyhow::Context;
 use bonsai_hg_mapping::BonsaiHgMapping;
 use bookmarks::Bookmarks;
-use clap_old::{App, ArgMatches, SubCommand};
-use cmdlib::args::{self, MononokeMatches};
+use clap_old::App;
+use clap_old::ArgMatches;
+use clap_old::SubCommand;
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
 use context::CoreContext;
 use ephemeral_blobstore::BubbleId;
 use ephemeral_blobstore::RepoEphemeralStore;
 use fbinit::FacebookInit;
-use mononoke_types::{BonsaiChangeset, ChangesetId, DateTime, FileChange};
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::ChangesetId;
+use mononoke_types::DateTime;
+use mononoke_types::FileChange;
 use repo_blobstore::RepoBlobstore;
 use repo_identity::RepoIdentity;
 use serde_derive::Serialize;
@@ -22,7 +28,8 @@ use slog::Logger;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use crate::common::{fetch_bonsai_changeset, print_bonsai_changeset};
+use crate::common::fetch_bonsai_changeset;
+use crate::common::print_bonsai_changeset;
 use crate::error::SubcommandError;
 
 pub const BONSAI_FETCH: &str = "bonsai-fetch";
@@ -67,7 +74,7 @@ pub async fn subcommand_bonsai_fetch<'a>(
         #[facet]
         ephemeral_blobstore: RepoEphemeralStore,
     }
-    let container: BonsaiFetchContainer = args::open_repo(fb, &logger, &matches).await?;
+    let container: BonsaiFetchContainer = args::open_repo(fb, &logger, matches).await?;
     let blobstore = if let Some(bubble_id) = bubble {
         let bubble = container.ephemeral_blobstore.open_bubble(bubble_id).await?;
         bubble.wrap_repo_blobstore((*container.blobstore).clone())

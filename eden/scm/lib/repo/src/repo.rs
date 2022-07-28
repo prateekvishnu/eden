@@ -5,8 +5,8 @@
  * GNU General Public License version 2.
  */
 
+use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,11 +28,13 @@ use revisionstore::EdenApiTreeStore;
 use revisionstore::MemcacheStore;
 use storemodel::ReadFileContents;
 use storemodel::TreeStore;
+use types::HgId;
 use util::path::absolute;
 
 use crate::commits::open_dag_commits;
 use crate::errors;
 use crate::init;
+use crate::requirements::Requirements;
 
 pub struct Repo {
     path: PathBuf,
@@ -42,6 +44,8 @@ pub struct Repo {
     store_path: PathBuf,
     dot_hg_path: PathBuf,
     shared_dot_hg_path: PathBuf,
+    pub requirements: Requirements,
+    pub store_requirements: Requirements,
     repo_name: Option<String>,
     metalog: Option<Arc<RwLock<MetaLog>>>,
     eden_api: Option<Arc<dyn EdenApi>>,
@@ -183,6 +187,9 @@ impl Repo {
                     .map(|v| v.to_string())
             });
 
+        let requirements = Requirements::open(&dot_hg_path.join("requires"))?;
+        let store_requirements = Requirements::open(&store_path.join("requires"))?;
+
         Ok(Repo {
             path,
             config,
@@ -191,6 +198,8 @@ impl Repo {
             store_path,
             dot_hg_path,
             shared_dot_hg_path,
+            requirements,
+            store_requirements,
             repo_name,
             metalog: None,
             eden_api: None,
@@ -261,6 +270,10 @@ impl Repo {
         self.store_path.join("metalog")
     }
 
+    /// Constructs the EdenAPI client.
+    ///
+    /// This requires configs like `paths.default`. Avoid calling this function for
+    /// local-only operations.
     pub fn eden_api(&mut self) -> Result<Arc<dyn EdenApi>, EdenApiError> {
         match &self.eden_api {
             Some(eden_api) => Ok(eden_api.clone()),
@@ -279,9 +292,7 @@ impl Repo {
         match &self.dag_commits {
             Some(commits) => Ok(commits.clone()),
             None => {
-                let metalog = self.metalog()?;
-                let eden_api = self.eden_api()?;
-                let commits = open_dag_commits(&self.store_path, metalog, eden_api)?;
+                let commits = open_dag_commits(self)?;
                 let commits = Arc::new(RwLock::new(commits));
                 self.dag_commits = Some(commits.clone());
                 Ok(commits)
@@ -293,21 +304,22 @@ impl Repo {
         self.dag_commits = None;
     }
 
-    pub fn add_requirement(&self, requirement: &str) -> Result<()> {
-        fs::OpenOptions::new()
-            .write(true)
-            .append(true)
-            .open(self.shared_dot_hg_path().join("requires"))?
-            .write_all(requirement.as_bytes())?;
+    pub fn remote_bookmarks(&mut self) -> Result<BTreeMap<String, HgId>> {
+        match self.metalog()?.read().get("remotenames")? {
+            Some(rn) => Ok(refencode::decode_remotenames(&rn)?),
+            None => Err(errors::RemotenamesMetalogKeyError.into()),
+        }
+    }
+
+    pub fn add_requirement(&mut self, requirement: &str) -> Result<()> {
+        self.requirements.add(requirement);
+        self.requirements.flush()?;
         Ok(())
     }
 
-    pub fn add_store_requirement(&self, requirement: &str) -> Result<()> {
-        fs::OpenOptions::new()
-            .write(true)
-            .append(true)
-            .open(self.store_path().join("requires"))?
-            .write_all(requirement.as_bytes())?;
+    pub fn add_store_requirement(&mut self, requirement: &str) -> Result<()> {
+        self.store_requirements.add(requirement);
+        self.store_requirements.flush()?;
         Ok(())
     }
 
@@ -396,4 +408,13 @@ fn read_sharedpath(path: &Path) -> Result<PathBuf> {
         }
     }
     Ok(sharedpath.unwrap_or_else(|| path.to_path_buf()))
+}
+
+impl std::fmt::Debug for Repo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Repo")
+            .field("path", &self.path)
+            .field("repo_name", &self.repo_name)
+            .finish()
+    }
 }

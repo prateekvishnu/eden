@@ -5,19 +5,30 @@
  * GNU General Public License version 2.
  */
 
-use super::revlog::{serialize_extras, Extra, RevlogChangeset};
-use crate::{
-    nodehash::{HgChangesetId, HgManifestId},
-    HgBlobNode, HgChangesetEnvelopeMut, HgNodeHash, HgParents, MPath,
-};
-use anyhow::{bail, Error, Result};
+use super::revlog::serialize_extras;
+use super::revlog::Extra;
+use super::revlog::RevlogChangeset;
+use crate::nodehash::HgChangesetId;
+use crate::nodehash::HgManifestId;
+use crate::HgBlobNode;
+use crate::HgChangesetEnvelopeMut;
+use crate::HgNodeHash;
+use crate::HgParents;
+use crate::MPath;
+use anyhow::bail;
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
-use blobstore::{Blobstore, Loadable, LoadableError};
+use blobstore::Blobstore;
+use blobstore::Loadable;
+use blobstore::LoadableError;
 use bytes::Bytes;
 use context::CoreContext;
 use mononoke_types::DateTime;
-use std::fmt::{self, Display};
-use std::{collections::BTreeMap, io::Write};
+use std::collections::BTreeMap;
+use std::fmt;
+use std::fmt::Display;
+use std::io::Write;
 
 const STEP_PARENTS_METADATA_KEY: &str = "stepparents";
 
@@ -267,7 +278,7 @@ impl HgBlobChangeset {
 
         if let Some(step_parents) = self.extra().get(STEP_PARENTS_METADATA_KEY.as_bytes()) {
             let step_parents = std::str::from_utf8(step_parents)?;
-            for csid in step_parents.split(",") {
+            for csid in step_parents.split(',') {
                 let csid = csid.parse()?;
                 ret.push(csid);
             }
@@ -299,14 +310,13 @@ impl Display for HgBlobChangeset {
             .iter()
             .enumerate()
             .find(|(_, &c)| c == b'\n')
-            .map(|(i, _)| i)
-            .unwrap_or(message.len());
+            .map_or(message.len(), |(i, _)| i);
 
         write!(
             f,
             "changeset: {}\nauthor: {}\ndate: {}\nsummary: {}\n",
             self.changesetid,
-            String::from_utf8_lossy(&self.user()),
+            String::from_utf8_lossy(self.user()),
             self.time().as_chrono().to_rfc2822(),
             String::from_utf8_lossy(&self.message()[0..title_end])
         )

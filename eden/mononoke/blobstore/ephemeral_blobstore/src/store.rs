@@ -15,12 +15,17 @@ use chrono::Duration as ChronoDuration;
 use context::CoreContext;
 use derivative::Derivative;
 use metaconfig_types::BubbleDeletionMode;
-use mononoke_types::{ChangesetId, DateTime, RepositoryId, Timestamp};
+use mononoke_types::ChangesetId;
+use mononoke_types::DateTime;
+use mononoke_types::RepositoryId;
+use mononoke_types::Timestamp;
 use sql::queries;
 use sql_ext::SqlConnections;
 use std::time::Duration;
 
-use crate::bubble::{Bubble, BubbleId, ExpiryStatus};
+use crate::bubble::Bubble;
+use crate::bubble::BubbleId;
+use crate::bubble::ExpiryStatus;
 use crate::error::EphemeralBlobstoreError;
 
 /// Ephemeral Store.
@@ -192,7 +197,7 @@ impl RepoEphemeralStoreInner {
         cs_id: &ChangesetId,
     ) -> Result<Option<BubbleId>> {
         let rows =
-            SelectBubbleFromChangeset::query(&self.connections.read_connection, &repo_id, &cs_id)
+            SelectBubbleFromChangeset::query(&self.connections.read_connection, repo_id, cs_id)
                 .await?;
         Ok(rows.into_iter().next().map(|b| b.0))
     }
@@ -246,7 +251,7 @@ impl RepoEphemeralStoreInner {
         max: u32,
     ) -> Result<Vec<String>> {
         let bubble = self.open_bubble_raw(bubble_id, false).await?;
-        Ok(bubble.keys_in_bubble(ctx, start_from, max).await?)
+        bubble.keys_in_bubble(ctx, start_from, max).await
     }
 
     /// Method responsible for deleting the bubble and all the data contained within.
@@ -359,7 +364,7 @@ impl RepoEphemeralStore {
     fn inner(&self) -> Result<&RepoEphemeralStoreInner, EphemeralBlobstoreError> {
         self.inner
             .as_deref()
-            .ok_or_else(|| EphemeralBlobstoreError::NoEphemeralBlobstore(self.repo_id))
+            .ok_or(EphemeralBlobstoreError::NoEphemeralBlobstore(self.repo_id))
     }
 
     pub async fn create_bubble(&self, custom_duration: Option<Duration>) -> Result<Bubble> {
@@ -433,12 +438,16 @@ mod test {
     use super::*;
     use crate::builder::RepoEphemeralStoreBuilder;
     use anyhow::anyhow;
-    use blobstore::{Blobstore, BlobstoreBytes, BlobstoreEnumerableWithUnlink, BlobstoreKeyParam};
+    use blobstore::Blobstore;
+    use blobstore::BlobstoreBytes;
+    use blobstore::BlobstoreEnumerableWithUnlink;
+    use blobstore::BlobstoreKeyParam;
     use context::CoreContext;
     use fbinit::FacebookInit;
     use maplit::hashset;
     use memblob::Memblob;
-    use metaconfig_types::{BubbleDeletionMode, PackFormat};
+    use metaconfig_types::BubbleDeletionMode;
+    use metaconfig_types::PackFormat;
     use mononoke_types_mocks::repo::REPO_ZERO;
     use packblob::PackBlob;
     use repo_blobstore::RepoBlobstore;

@@ -21,7 +21,7 @@ use revisionstore::LegacyStore;
 use revisionstore::RemoteDataStore;
 use revisionstore::StoreKey;
 use revisionstore::StoreResult;
-use storemodel::bytes;
+use storemodel::minibytes::Bytes;
 use storemodel::ReadFileContents;
 use storemodel::TreeStore;
 use types::Key;
@@ -30,6 +30,7 @@ use types::RepoPath;
 
 use crate::contentstore;
 use crate::filescmstore;
+use crate::pyfilescmstore;
 use crate::treescmstore;
 use crate::PythonHgIdDataStore;
 
@@ -40,6 +41,7 @@ pub(crate) fn register(py: Python) {
 
     register_into(py, |py, c: contentstore| c.to_read_file_contents(py));
     register_into(py, |py, f: filescmstore| f.to_read_file_contents(py));
+    register_into(py, |py, p: pyfilescmstore| p.to_read_file_contents(py));
 }
 
 impl contentstore {
@@ -69,6 +71,15 @@ impl filescmstore {
     }
 }
 
+impl pyfilescmstore {
+    fn to_read_file_contents(
+        &self,
+        py: Python,
+    ) -> Arc<dyn ReadFileContents<Error = anyhow::Error> + Send + Sync> {
+        self.extract_inner(py)
+    }
+}
+
 impl treescmstore {
     fn to_dyn_treestore(&self, py: Python) -> Arc<dyn TreeStore + Send + Sync> {
         let store = self.extract_inner(py) as Arc<dyn LegacyStore>;
@@ -94,18 +105,18 @@ impl<T> ManifestStore<T> {
 }
 
 impl<T: HgIdDataStore + RemoteDataStore> TreeStore for ManifestStore<T> {
-    fn get(&self, path: &RepoPath, node: Node) -> Result<bytes::Bytes> {
+    fn get(&self, path: &RepoPath, node: Node) -> Result<Bytes> {
         if node.is_null() {
             return Ok(Default::default());
         }
         let key = Key::new(path.to_owned(), node);
         match self.underlying.get(StoreKey::hgid(key))? {
             StoreResult::NotFound(key) => Err(format_err!("Key {:?} not found in manifest", key)),
-            StoreResult::Found(data) => Ok(bytes::Bytes::from(data)),
+            StoreResult::Found(data) => Ok(data.into()),
         }
     }
 
-    fn insert(&self, _path: &RepoPath, _node: Node, _data: bytes::Bytes) -> Result<()> {
+    fn insert(&self, _path: &RepoPath, _node: Node, _data: Bytes) -> Result<()> {
         unimplemented!(
             "At this time we don't expect to ever write manifest in rust using python stores."
         );

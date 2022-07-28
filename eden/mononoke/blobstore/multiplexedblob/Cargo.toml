@@ -14,7 +14,7 @@ blobstore = { version = "0.1.0", path = ".." }
 blobstore_stats = { version = "0.1.0", path = "../blobstore_stats" }
 blobstore_sync_queue = { version = "0.1.0", path = "../../blobstore_sync_queue" }
 chrono = { version = "0.4", features = ["clock", "serde", "std"], default-features = false }
-clap = { version = "=3.1.8", features = ["derive", "regex", "unicode", "wrap_help"] }
+clap = { version = "3.2.10", features = ["derive", "regex", "unicode", "wrap_help"] }
 cloned = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 context = { version = "0.1.0", path = "../../server/context" }
 futures = { version = "0.3.13", features = ["async-await", "compat"] }
@@ -22,7 +22,7 @@ futures_stats = { version = "0.1.0", git = "https://github.com/facebookexperimen
 itertools = "0.10.3"
 metaconfig_types = { version = "0.1.0", path = "../../metaconfig/types" }
 mononoke_types = { version = "0.1.0", path = "../../mononoke_types" }
-once_cell = "1.8"
+once_cell = "1.12"
 scuba_ext = { version = "0.1.0", path = "../../common/scuba_ext" }
 slog = { version = "2.7", features = ["max_level_trace", "nested-values"] }
 strum = "0.21"
@@ -34,6 +34,7 @@ tunables = { version = "0.1.0", path = "../../tunables" }
 twox-hash = "1.6.1"
 
 [dev-dependencies]
+blobstore_test_utils = { version = "0.1.0", path = "../test_utils" }
 borrowed = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 bytes = { version = "1.1", features = ["serde"] }
 fbinit = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }

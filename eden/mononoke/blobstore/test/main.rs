@@ -19,12 +19,17 @@ use fbinit::FacebookInit;
 use strum::IntoEnumIterator;
 use tempdir::TempDir;
 
-use blobstore::{Blobstore, BlobstorePutOps, BlobstoreUnlinkOps, OverwriteStatus, PutBehaviour};
+use blobstore::Blobstore;
+use blobstore::BlobstorePutOps;
+use blobstore::BlobstoreUnlinkOps;
+use blobstore::OverwriteStatus;
+use blobstore::PutBehaviour;
 use context::CoreContext;
 use fileblob::Fileblob;
 use memblob::Memblob;
 use mononoke_types::BlobstoreBytes;
-use sqlblob::{get_test_config_store, Sqlblob};
+use sqlblob::get_test_config_store;
+use sqlblob::Sqlblob;
 
 async fn overwrite<B: Blobstore + BlobstorePutOps>(
     fb: FacebookInit,
@@ -146,7 +151,7 @@ async fn roundtrip_and_link<B: BlobstoreUnlinkOps>(
 
     // Check we get error when unlinking an unknown key
     let unknown_key = "expected_missing_key";
-    assert!(blobstore.unlink(ctx, &unknown_key).await.is_err());
+    assert!(blobstore.unlink(ctx, unknown_key).await.is_err());
 
     Ok(())
 }
@@ -327,9 +332,7 @@ async fn cache_blob_tests(fb: FacebookInit, expect_zstd: bool) -> Result<(), Err
     let large_key = "large_key";
     let size = 5 * 1024 * 1024;
     let mut large_value = Vec::with_capacity(size);
-    for _ in 0..size {
-        large_value.push(b'a');
-    }
+    large_value.resize(size, b'a');
     let large_value = BlobstoreBytes::from_bytes(large_value);
 
     cache_blob

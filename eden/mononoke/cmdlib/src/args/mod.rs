@@ -18,27 +18,45 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use anyhow::{bail, format_err, Error, Result};
+use anyhow::bail;
+use anyhow::format_err;
+use anyhow::Error;
+use anyhow::Result;
 use cached_config::ConfigStore;
 use clap_old::ArgMatches;
 use fbinit::FacebookInit;
 use scribe_ext::Scribe;
-use slog::{info, warn, Logger};
+use slog::info;
+use slog::warn;
+use slog::Logger;
 
-pub use metaconfig_parser::{RepoConfigs, StorageConfigs};
-use metaconfig_types::{BlobConfig, CommonConfig, Redaction, RepoConfig};
+pub use metaconfig_parser::RepoConfigs;
+pub use metaconfig_parser::StorageConfigs;
+use metaconfig_types::BlobConfig;
+use metaconfig_types::CommonConfig;
+use metaconfig_types::Redaction;
+use metaconfig_types::RepoConfig;
 use mononoke_types::RepositoryId;
-use repo_factory::{RepoFactory, RepoFactoryBuilder};
+use repo_factory::RepoFactory;
+use repo_factory::RepoFactoryBuilder;
 use sql_construct::SqlConstructFromMetadataDatabaseConfig;
 
-use crate::helpers::{setup_repo_dir, CreateStorage};
+use crate::helpers::setup_repo_dir;
+use crate::helpers::CreateStorage;
 
-use self::app::{
-    CONFIG_PATH, REPO_ID, REPO_NAME, SCRIBE_LOGGING_DIRECTORY, SOURCE_REPO_ID, SOURCE_REPO_NAME,
-    TARGET_REPO_ID, TARGET_REPO_NAME,
-};
+use self::app::CONFIG_PATH;
+use self::app::REPO_ID;
+use self::app::REPO_NAME;
+use self::app::SCRIBE_LOGGING_DIRECTORY;
+use self::app::SOURCE_REPO_ID;
+use self::app::SOURCE_REPO_NAME;
+use self::app::TARGET_REPO_ID;
+use self::app::TARGET_REPO_NAME;
 
-pub use self::app::{ArgType, MononokeAppBuilder, MononokeClapApp, RepoRequirement};
+pub use self::app::ArgType;
+pub use self::app::MononokeAppBuilder;
+pub use self::app::MononokeClapApp;
+pub use self::app::RepoRequirement;
 pub use self::matches::MononokeMatches;
 
 fn get_repo_id_and_name_from_values<'a>(
@@ -55,6 +73,24 @@ pub struct ResolvedRepo {
     pub id: RepositoryId,
     pub name: String,
     pub config: RepoConfig,
+}
+
+pub fn resolve_repo_by_name<'a>(
+    config_store: &ConfigStore,
+    matches: &'a MononokeMatches<'a>,
+    repo_name: &str,
+) -> Result<ResolvedRepo> {
+    let configs = load_repo_configs(config_store, matches)?;
+    resolve_repo_given_name(repo_name, &configs)
+}
+
+pub fn resolve_repo_by_id<'a>(
+    config_store: &ConfigStore,
+    matches: &'a MononokeMatches<'a>,
+    repo_id: i32,
+) -> Result<ResolvedRepo> {
+    let configs = load_repo_configs(config_store, matches)?;
+    resolve_repo_given_id(RepositoryId::new(repo_id), &configs)
 }
 
 pub fn resolve_repo<'a>(
@@ -235,6 +271,22 @@ where
     )
 }
 
+pub fn open_sql_with_config<'a, T>(
+    fb: FacebookInit,
+    matches: &'a MononokeMatches<'a>,
+    repo_config: &RepoConfig,
+) -> Result<T, Error>
+where
+    T: SqlConstructFromMetadataDatabaseConfig,
+{
+    T::with_metadata_database_config(
+        fb,
+        &repo_config.storage_config.metadata,
+        matches.mysql_options(),
+        matches.readonly_storage().0,
+    )
+}
+
 pub fn open_source_sql<'a, T>(
     fb: FacebookInit,
     config_store: &ConfigStore,
@@ -294,6 +346,19 @@ where
 }
 
 #[inline]
+pub fn open_repo_by_name<'a, R: 'a>(
+    fb: FacebookInit,
+    logger: &'a Logger,
+    matches: &'a MononokeMatches<'a>,
+    repo_name: String,
+) -> impl Future<Output = Result<R, Error>> + 'a
+where
+    R: for<'builder> facet::AsyncBuildable<'builder, RepoFactoryBuilder<'builder>>,
+{
+    open_repo_by_name_internal(fb, logger, matches, false, None, None, repo_name)
+}
+
+#[inline]
 pub fn open_repo_with_factory<'a, R: 'a>(
     fb: FacebookInit,
     logger: &'a Logger,
@@ -320,9 +385,32 @@ where
     open_repo_internal(fb, logger, matches, false, Some(Redaction::Disabled), None)
 }
 
+/// Open the repo corresponding to the provided repo-name.
+/// Make sure that the opened repo has redaction disabled
+#[inline]
+pub fn open_repo_by_name_unredacted<'a, R: 'a>(
+    fb: FacebookInit,
+    logger: &'a Logger,
+    matches: &'a MononokeMatches<'a>,
+    repo_name: String,
+) -> impl Future<Output = Result<R, Error>> + 'a
+where
+    R: for<'builder> facet::AsyncBuildable<'builder, RepoFactoryBuilder<'builder>>,
+{
+    open_repo_by_name_internal(
+        fb,
+        logger,
+        matches,
+        false,
+        Some(Redaction::Disabled),
+        None,
+        repo_name,
+    )
+}
+
 pub fn get_repo_factory<'a>(matches: &'a MononokeMatches<'a>) -> Result<RepoFactory, Error> {
     let config_store = matches.config_store();
-    let common_config = load_common_config(config_store, &matches)?;
+    let common_config = load_common_config(config_store, matches)?;
     Ok(RepoFactory::new(
         matches.environment().clone(),
         &common_config,
@@ -362,7 +450,7 @@ where
     R: for<'builder> facet::AsyncBuildable<'builder, RepoFactoryBuilder<'builder>>,
 {
     let config_store = matches.config_store();
-    let source_repo_id = get_source_repo_id(&config_store, matches)?;
+    let source_repo_id = get_source_repo_id(config_store, matches)?;
     let repo_factory = get_repo_factory(matches)?;
 
     open_repo_internal_with_repo_id(
@@ -385,7 +473,7 @@ where
     R: for<'builder> facet::AsyncBuildable<'builder, RepoFactoryBuilder<'builder>>,
 {
     let config_store = matches.config_store();
-    let source_repo_id = get_target_repo_id(&config_store, matches)?;
+    let source_repo_id = get_target_repo_id(config_store, matches)?;
     let repo_factory = get_repo_factory(matches)?;
 
     open_repo_internal_with_repo_id(
@@ -402,7 +490,7 @@ where
 pub fn get_shutdown_grace_period<'a>(matches: &MononokeMatches<'a>) -> Result<Duration> {
     let seconds = matches
         .value_of("shutdown-grace-period")
-        .ok_or(Error::msg("shutdown-grace-period must be specified"))?
+        .ok_or_else(|| Error::msg("shutdown-grace-period must be specified"))?
         .parse()
         .map_err(Error::from)?;
     Ok(Duration::from_secs(seconds))
@@ -411,7 +499,7 @@ pub fn get_shutdown_grace_period<'a>(matches: &MononokeMatches<'a>) -> Result<Du
 pub fn get_shutdown_timeout<'a>(matches: &MononokeMatches<'a>) -> Result<Duration> {
     let seconds = matches
         .value_of("shutdown-timeout")
-        .ok_or(Error::msg("shutdown-timeout must be specified"))?
+        .ok_or_else(|| Error::msg("shutdown-timeout must be specified"))?
         .parse()
         .map_err(Error::from)?;
     Ok(Duration::from_secs(seconds))
@@ -427,7 +515,7 @@ pub fn get_scribe<'a>(fb: FacebookInit, matches: &MononokeMatches<'a>) -> Result
 pub fn get_config_path<'a>(matches: &'a MononokeMatches<'a>) -> Result<&'a str> {
     matches
         .value_of(CONFIG_PATH)
-        .ok_or(Error::msg(format!("{} must be specified", CONFIG_PATH)))
+        .ok_or_else(|| Error::msg(format!("{} must be specified", CONFIG_PATH)))
 }
 
 pub fn load_repo_configs<'a>(
@@ -511,6 +599,34 @@ where
     open_repo_internal_with_repo_id(
         logger,
         RepoIdentifier::Id(repo_id),
+        matches,
+        create,
+        redaction_override,
+        repo_factory,
+    )
+    .await
+}
+
+async fn open_repo_by_name_internal<R>(
+    _: FacebookInit,
+    logger: &Logger,
+    matches: &MononokeMatches<'_>,
+    create: bool,
+    redaction_override: Option<Redaction>,
+    maybe_repo_factory: Option<RepoFactory>,
+    repo_name: String,
+) -> Result<R, Error>
+where
+    R: for<'builder> facet::AsyncBuildable<'builder, RepoFactoryBuilder<'builder>>,
+{
+    let repo_factory = match maybe_repo_factory {
+        Some(repo_factory) => repo_factory,
+        None => get_repo_factory(matches)?,
+    };
+
+    open_repo_internal_with_repo_id(
+        logger,
+        RepoIdentifier::Name(repo_name),
         matches,
         create,
         redaction_override,
@@ -613,7 +729,7 @@ where
 pub fn get_usize_opt<'a>(matches: &impl Borrow<ArgMatches<'a>>, key: &str) -> Option<usize> {
     matches.borrow().value_of(key).map(|val| {
         val.parse::<usize>()
-            .expect(&format!("{} must be integer", key))
+            .unwrap_or_else(|_| panic!("{} must be integer", key))
     })
 }
 
@@ -635,10 +751,10 @@ pub fn get_and_parse_opt<'a, T: ::std::str::FromStr, M: Borrow<ArgMatches<'a>>>(
 where
     <T as std::str::FromStr>::Err: std::fmt::Debug,
 {
-    matches
-        .borrow()
-        .value_of(key)
-        .map(|val| val.parse::<T>().expect(&format!("{} - invalid value", key)))
+    matches.borrow().value_of(key).map(|val| {
+        val.parse::<T>()
+            .unwrap_or_else(|_| panic!("{} - invalid value", key))
+    })
 }
 
 #[inline]
@@ -657,7 +773,7 @@ where
 pub fn get_u64_opt<'a>(matches: &impl Borrow<ArgMatches<'a>>, key: &str) -> Option<u64> {
     matches.borrow().value_of(key).map(|val| {
         val.parse::<u64>()
-            .expect(&format!("{} must be integer", key))
+            .unwrap_or_else(|_| panic!("{} must be integer", key))
     })
 }
 
@@ -665,7 +781,7 @@ pub fn get_u64_opt<'a>(matches: &impl Borrow<ArgMatches<'a>>, key: &str) -> Opti
 pub fn get_i32_opt<'a>(matches: &impl Borrow<ArgMatches<'a>>, key: &str) -> Option<i32> {
     matches.borrow().value_of(key).map(|val| {
         val.parse::<i32>()
-            .expect(&format!("{} must be integer", key))
+            .unwrap_or_else(|_| panic!("{} must be integer", key))
     })
 }
 
@@ -678,7 +794,7 @@ pub fn get_i32<'a>(matches: &impl Borrow<ArgMatches<'a>>, key: &str, default: i3
 pub fn get_i64_opt<'a>(matches: &impl Borrow<ArgMatches<'a>>, key: &str) -> Option<i64> {
     matches.borrow().value_of(key).map(|val| {
         val.parse::<i64>()
-            .expect(&format!("{} must be integer", key))
+            .unwrap_or_else(|_| panic!("{} must be integer", key))
     })
 }
 
@@ -695,8 +811,8 @@ pub fn parse_disabled_hooks_no_repo_prefix<'a>(
 ) -> HashSet<String> {
     let disabled_hooks: HashSet<String> = matches
         .values_of("disabled-hooks")
-        .map(|m| m.collect())
-        .unwrap_or(vec![])
+        .map(Vec::from_iter)
+        .unwrap_or_default()
         .into_iter()
         .map(|s| s.to_string())
         .collect();

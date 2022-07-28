@@ -5,22 +5,33 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::{hash_map, HashMap, HashSet};
+use std::collections::hash_map;
+use std::collections::HashMap;
+use std::collections::HashSet;
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
-use context::{CoreContext, PerfCounterType};
-use futures::future::{self, FutureExt};
-use futures::stream::{self, StreamExt, TryStreamExt};
+use context::CoreContext;
+use context::PerfCounterType;
+use futures::future;
+use futures::future::FutureExt;
+use futures::stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use itertools::Itertools;
 use mercurial_types::HgChangesetId;
-use mononoke_types::{DateTime, RepositoryId};
+use mononoke_types::RepositoryId;
 use slog::debug;
-use smallvec::SmallVec;
-use sql::{queries, Connection};
+use sql::queries;
+use sql::Connection;
 use sql_ext::SqlConnections;
 
-use crate::entry::{HgMutationEntry, HgMutationEntrySet, HgMutationEntrySetAdded};
+use crate::entry::HgMutationEntry;
+use crate::entry::HgMutationEntrySet;
+use crate::entry::HgMutationEntrySetAdded;
 use crate::HgMutationStore;
 
 /// To avoid overloading the database with too many changesets in a single
@@ -110,8 +121,8 @@ impl SqlHgMutationStore {
                 entry.split().len() as u64,
                 entry.op(),
                 entry.user(),
-                entry.time().timestamp_secs(),
-                entry.time().tz_offset_secs(),
+                entry.timestamp(),
+                entry.timezone(),
                 serde_json::to_string(entry.extra())?,
             ));
             for (index, predecessor) in entry.predecessors().iter().enumerate() {
@@ -304,11 +315,12 @@ impl SqlHgMutationStore {
                     }
                     entry.insert(HgMutationEntry::new(
                         successor,
-                        SmallVec::with_capacity(pred_count as usize),
+                        Vec::with_capacity(pred_count as usize),
                         Vec::with_capacity(split_count as usize),
                         op,
                         user,
-                        DateTime::from_timestamp(timestamp, tz)?,
+                        timestamp,
+                        tz,
                         serde_json::from_str(&extra)?,
                     ))
                 }
@@ -442,6 +454,10 @@ impl SqlHgMutationStore {
 
 #[async_trait]
 impl HgMutationStore for SqlHgMutationStore {
+    fn repo_id(&self) -> RepositoryId {
+        self.repo_id
+    }
+
     async fn add_entries(
         &self,
         ctx: &CoreContext,
@@ -546,14 +562,19 @@ impl HgMutationStore for SqlHgMutationStore {
         Ok(())
     }
 
-    async fn all_predecessors(
+    /// Get all predecessor information for the given changeset id, keyed by
+    /// the successor changeset id.
+    ///
+    /// Returns all entries that describe the mutation history of the commits.
+    /// keyed by the successor changeset ids.
+    async fn all_predecessors_by_changeset(
         &self,
         ctx: &CoreContext,
         changeset_ids: HashSet<HgChangesetId>,
-    ) -> Result<Vec<HgMutationEntry>> {
+    ) -> Result<HashMap<HgChangesetId, Vec<HgMutationEntry>>> {
         if changeset_ids.is_empty() {
             // Nothing to fetch
-            return Ok(Vec::new());
+            return Ok(HashMap::new());
         }
 
         let mut entry_set = HgMutationEntrySet::new();
@@ -563,7 +584,7 @@ impl HgMutationStore for SqlHgMutationStore {
         self.fetch_all_predecessors(connection, &mut entry_set)
             .await?;
         let changeset_count = changeset_ids.len();
-        let entries = entry_set.into_all_predecessors(changeset_ids);
+        let entries = entry_set.into_all_predecessors_by_changeset(changeset_ids);
         debug!(
             ctx.logger(),
             "Mutation store fetched {} entries for {} changesets",

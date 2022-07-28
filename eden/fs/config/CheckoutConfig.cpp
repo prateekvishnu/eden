@@ -17,14 +17,16 @@
 #include "eden/fs/utils/FileUtils.h"
 #include "eden/fs/utils/PathMap.h"
 #include "eden/fs/utils/SystemError.h"
+#include "eden/fs/utils/Throw.h"
 
 using folly::ByteRange;
 using folly::IOBuf;
 using folly::StringPiece;
 
+namespace facebook::eden {
 namespace {
 // TOML config file for the individual client.
-const facebook::eden::RelativePathPiece kCheckoutConfig{"config.toml"};
+const RelativePathPiece kCheckoutConfig{"config.toml"};
 
 // Keys for the TOML config file.
 constexpr folly::StringPiece kRepoSection{"repository"};
@@ -39,25 +41,12 @@ constexpr folly::StringPiece kUseWriteBackCache{"use-write-back-cache"};
 constexpr folly::StringPiece kRepoGuid{"guid"};
 #endif
 
-#ifdef _WIN32
-constexpr folly::StringPiece kMountProtocolPrjfs{"prjfs"};
-#else
-constexpr folly::StringPiece kMountProtocolFuse{"fuse"};
-#endif
-constexpr folly::StringPiece kMountProtocolNFS{"nfs"};
-
-#ifdef _WIN32
-constexpr folly::StringPiece kMountProtocolDefault{kMountProtocolPrjfs};
-#else
-constexpr folly::StringPiece kMountProtocolDefault{kMountProtocolFuse};
-#endif
-
 // Files of interest in the client directory.
-const facebook::eden::RelativePathPiece kSnapshotFile{"SNAPSHOT"};
-const facebook::eden::RelativePathPiece kOverlayDir{"local"};
+const RelativePathPiece kSnapshotFile{"SNAPSHOT"};
+const RelativePathPiece kOverlayDir{"local"};
 
 // File holding mapping of client directories.
-const facebook::eden::RelativePathPiece kClientDirectoryMap{"config.json"};
+const RelativePathPiece kClientDirectoryMap{"config.json"};
 
 // Constants for use with the SNAPSHOT file
 //
@@ -100,8 +89,6 @@ enum : uint32_t {
 };
 } // namespace
 
-namespace facebook::eden {
-
 CheckoutConfig::CheckoutConfig(
     AbsolutePathPiece mountPath,
     AbsolutePathPiece clientDirectory)
@@ -115,14 +102,14 @@ ParentCommit CheckoutConfig::getParentCommit() const {
   StringPiece contents{snapshotFileContents};
 
   if (contents.size() < kSnapshotHeaderSize) {
-    throw std::runtime_error(fmt::format(
+    throwf<std::runtime_error>(
         "eden SNAPSHOT file is too short ({} bytes): {}",
         contents.size(),
-        snapshotFile));
+        snapshotFile);
   }
 
   if (!contents.startsWith(kSnapshotFileMagic)) {
-    throw std::runtime_error(fmt::format("unsupported legacy SNAPSHOT file"));
+    throw std::runtime_error("unsupported legacy SNAPSHOT file");
   }
 
   IOBuf buf(IOBuf::WRAP_BUFFER, ByteRange{contents});
@@ -133,10 +120,10 @@ ParentCommit CheckoutConfig::getParentCommit() const {
   switch (version) {
     case kSnapshotFormatVersion1: {
       if (sizeLeft != Hash20::RAW_SIZE && sizeLeft != (Hash20::RAW_SIZE * 2)) {
-        throw std::runtime_error(fmt::format(
+        throwf<std::runtime_error>(
             "unexpected length for eden SNAPSHOT file ({} bytes): {}",
             contents.size(),
-            snapshotFile));
+            snapshotFile);
       }
 
       Hash20 parent1;
@@ -167,8 +154,7 @@ ParentCommit CheckoutConfig::getParentCommit() const {
     }
 
     case kSnapshotFormatCheckoutInProgressVersion: {
-      // Skip the PID
-      cursor.skip(sizeof(uint32_t));
+      auto pid = cursor.readBE<int32_t>();
 
       auto fromLength = cursor.readBE<uint32_t>();
       std::string fromRootId = cursor.readFixedString(fromLength);
@@ -177,7 +163,7 @@ ParentCommit CheckoutConfig::getParentCommit() const {
       std::string toRootId = cursor.readFixedString(toLength);
 
       return ParentCommit::CheckoutInProgress{
-          RootId{std::move(fromRootId)}, RootId{std::move(toRootId)}};
+          RootId{std::move(fromRootId)}, RootId{std::move(toRootId)}, pid};
     }
 
     case kSnapshotFormatWorkingCopyParentAndCheckedOutRevisionVersion: {
@@ -193,10 +179,10 @@ ParentCommit CheckoutConfig::getParentCommit() const {
     }
 
     default:
-      throw std::runtime_error(fmt::format(
+      throwf<std::runtime_error>(
           "unsupported eden SNAPSHOT file format (version {}): {}",
           uint32_t{version},
-          snapshotFile));
+          snapshotFile);
   }
 }
 
@@ -311,11 +297,14 @@ std::unique_ptr<CheckoutConfig> CheckoutConfig::loadFromClientDirectory(
   config->repoType_ = *repository->get_as<std::string>(kRepoTypeKey.str());
   config->repoSource_ = *repository->get_as<std::string>(kRepoSourceKey.str());
 
-  auto mountProtocol = repository->get_as<std::string>(kMountProtocol.str())
-                           .value_or(kMountProtocolDefault);
-  config->mountProtocol_ = mountProtocol == kMountProtocolNFS
-      ? MountProtocol::NFS
-      : (folly::kIsWindows ? MountProtocol::PRJFS : MountProtocol::FUSE);
+  FieldConverter<MountProtocol> converter;
+  MountProtocol mountProtocol = kMountProtocolDefault;
+  auto mountProtocolStr = repository->get_as<std::string>(kMountProtocol.str());
+  if (mountProtocolStr) {
+    mountProtocol = converter.fromString(*mountProtocolStr, {})
+                        .value_or(kMountProtocolDefault);
+  }
+  config->mountProtocol_ = mountProtocol;
 
   // Read optional case-sensitivity.
   auto caseSensitive = repository->get_as<bool>(kRepoCaseSensitiveKey.str());
@@ -332,6 +321,7 @@ std::unique_ptr<CheckoutConfig> CheckoutConfig::loadFromClientDirectory(
 
   auto useWriteBackCache = repository->get_as<bool>(kUseWriteBackCache.str());
   config->useWriteBackCache_ = useWriteBackCache.value_or(false);
+
 #ifdef _WIN32
   auto guid = repository->get_as<std::string>(kRepoGuid.str());
   config->repoGuid_ = guid ? Guid{*guid} : Guid::generate();
@@ -360,6 +350,13 @@ folly::dynamic CheckoutConfig::loadClientDirectoryMap(
   folly::json::serialization_opts options;
   options.allow_trailing_comma = true;
   return folly::parseJson(jsonWithoutComments, options);
+}
+
+MountProtocol CheckoutConfig::getMountProtocol() const {
+  // NFS is the only mount protocol that we allow to be switched from the
+  // default.
+  return mountProtocol_ == MountProtocol::NFS ? MountProtocol::NFS
+                                              : kMountProtocolDefault;
 }
 
 } // namespace facebook::eden

@@ -5,13 +5,19 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Context, Error, Result};
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use blobstore::BlobstoreGetData;
 use derived_data_thrift as thrift;
 use fbthrift::compact_protocol;
-use mononoke_types::{
-    errors::ErrorKind, BlobstoreBytes, BonsaiChangeset, BonsaiChangesetMut, ChangesetId, DateTime,
-};
+use mononoke_types::errors::ErrorKind;
+use mononoke_types::BlobstoreBytes;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::BonsaiChangesetMut;
+use mononoke_types::ChangesetId;
+use mononoke_types::DateTime;
 use sorted_vector_map::SortedVectorMap;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -173,7 +179,7 @@ impl ChangesetInfo {
                 parents: tc
                     .parents
                     .into_iter()
-                    .map(|parent| ChangesetId::from_thrift(parent))
+                    .map(ChangesetId::from_thrift)
                     .collect::<Result<_>>()?,
                 author: tc.author,
                 author_date: DateTime::from_thrift(tc.author_date)?,
@@ -187,9 +193,9 @@ impl ChangesetInfo {
             })
         };
 
-        Ok(catch_block().with_context(|| {
+        catch_block().with_context(|| {
             ErrorKind::InvalidThrift("ChangesetInfo".into(), "Invalid changeset info".into())
-        })?)
+        })
     }
 
     pub fn into_thrift(self) -> thrift::ChangesetInfo {
@@ -242,7 +248,7 @@ impl From<ChangesetInfo> for BlobstoreBytes {
 /// Given a commit message returns the commit title: either the first line of the
 /// message or the message itself, cropped by the DEFAULT_TITLE_LENGTH number of
 /// characters.
-fn get_title(message: &String) -> &str {
+fn get_title(message: &str) -> &str {
     // either first line or the whole message
     let title = message.trim_start().lines().next().unwrap_or("");
     match title.grapheme_indices(true).nth(DEFAULT_TITLE_LENGTH) {
@@ -254,7 +260,11 @@ fn get_title(message: &String) -> &str {
 #[cfg(test)]
 mod test {
     use super::*;
-    use mononoke_types::{BonsaiChangeset, BonsaiChangesetMut, DateTime, FileChange, MPath};
+    use mononoke_types::BonsaiChangeset;
+    use mononoke_types::BonsaiChangesetMut;
+    use mononoke_types::DateTime;
+    use mononoke_types::FileChange;
+    use mononoke_types::MPath;
 
     use sorted_vector_map::sorted_vector_map;
 

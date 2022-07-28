@@ -5,21 +5,27 @@
  * GNU General Public License version 2.
  */
 
-use sql::{Connection, Transaction};
-use sql_construct::{SqlConstruct, SqlConstructFromMetadataDatabaseConfig};
+use sql::Connection;
+use sql::Transaction;
+use sql_construct::SqlConstruct;
+use sql_construct::SqlConstructFromMetadataDatabaseConfig;
 use sql_ext::SqlConnections;
 
-use anyhow::{anyhow, Error};
+use anyhow::anyhow;
+use anyhow::Error;
 use async_trait::async_trait;
 use auto_impl::auto_impl;
-use context::{CoreContext, PerfCounterType};
+use context::CoreContext;
+use context::PerfCounterType;
 use metaconfig_types::CommitSyncConfigVersion;
-use mononoke_types::{ChangesetId, RepositoryId};
-use sql::mysql_async::{
-    prelude::{ConvIr, FromValue},
-    FromValueError, Value,
-};
-use sql::{mysql, queries};
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
+use sql::mysql;
+use sql::mysql_async::prelude::ConvIr;
+use sql::mysql_async::prelude::FromValue;
+use sql::mysql_async::FromValueError;
+use sql::mysql_async::Value;
+use sql::queries;
 use stats::prelude::*;
 use thiserror::Error;
 
@@ -395,7 +401,7 @@ impl SqlSyncedCommitMapping {
         if let Some(ref version_name) = version_name {
             // TODO(stash): make version non-optional
             self.insert_version_for_large_repo_commit(
-                &ctx,
+                ctx,
                 &self.write_connection,
                 large_repo_id,
                 large_bcs_id,
@@ -472,14 +478,14 @@ impl SqlSyncedCommitMapping {
     ) -> Result<bool, Error> {
         let result = if should_overwrite {
             ReplaceVersionForLargeRepoCommit::query(
-                &write_connection,
-                &[(&large_repo_id, &large_cs_id, &version_name)],
+                write_connection,
+                &[(&large_repo_id, &large_cs_id, version_name)],
             )
             .await?
         } else {
             InsertVersionForLargeRepoCommit::query(
-                &write_connection,
-                &[(&large_repo_id, &large_cs_id, &version_name)],
+                write_connection,
+                &[(&large_repo_id, &large_cs_id, version_name)],
             )
             .await?
         };
@@ -515,7 +521,7 @@ impl SyncedCommitMapping for SqlSyncedCommitMapping {
     async fn add(&self, ctx: &CoreContext, entry: SyncedCommitMappingEntry) -> Result<bool, Error> {
         STATS::adds.add_value(1);
 
-        self.add_many(&ctx, vec![entry])
+        self.add_many(ctx, vec![entry])
             .await
             .map(|count| count == 1)
     }
@@ -527,7 +533,7 @@ impl SyncedCommitMapping for SqlSyncedCommitMapping {
     ) -> Result<u64, Error> {
         STATS::add_bulks.add_value(1);
 
-        self.add_many(&ctx, entries).await
+        self.add_many(ctx, entries).await
     }
 
     async fn get(

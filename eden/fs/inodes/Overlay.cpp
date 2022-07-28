@@ -19,18 +19,17 @@
 #include <folly/logging/xlog.h>
 #include <folly/stop_watch.h>
 #include <thrift/lib/cpp2/protocol/Serializer.h>
+#include "eden/fs/config/EdenConfig.h"
 #include "eden/fs/inodes/DirEntry.h"
 #include "eden/fs/inodes/InodeBase.h"
+#include "eden/fs/inodes/InodeTable.h"
+#include "eden/fs/inodes/OverlayFile.h"
 #include "eden/fs/inodes/TreeInode.h"
+#include "eden/fs/inodes/treeoverlay/BufferedTreeOverlay.h"
 #include "eden/fs/inodes/treeoverlay/TreeOverlay.h"
 #include "eden/fs/sqlite/SqliteDatabase.h"
 #include "eden/fs/utils/Bug.h"
 #include "eden/fs/utils/PathFuncs.h"
-
-#ifndef _WIN32
-#include "eden/fs/inodes/InodeTable.h"
-#include "eden/fs/inodes/OverlayFile.h"
-#endif // !_WIN32
 
 namespace facebook::eden {
 
@@ -40,7 +39,8 @@ constexpr uint64_t ioClosedMask = 1ull << 63;
 
 std::unique_ptr<IOverlay> makeOverlay(
     AbsolutePathPiece localDir,
-    Overlay::OverlayType overlayType) {
+    Overlay::OverlayType overlayType,
+    const EdenConfig& config) {
   if (overlayType == Overlay::OverlayType::Tree) {
     return std::make_unique<TreeOverlay>(localDir);
   } else if (overlayType == Overlay::OverlayType::TreeInMemory) {
@@ -50,6 +50,9 @@ std::unique_ptr<IOverlay> makeOverlay(
   } else if (overlayType == Overlay::OverlayType::TreeSynchronousOff) {
     return std::make_unique<TreeOverlay>(
         localDir, TreeOverlayStore::SynchronousMode::Off);
+  } else if (overlayType == Overlay::OverlayType::TreeBuffered) {
+    XLOG(DBG4) << "Buffered tree overlay being used";
+    return std::make_unique<BufferedTreeOverlay>(localDir, config);
   }
 #ifdef _WIN32
   if (overlayType == Overlay::OverlayType::Legacy) {
@@ -70,26 +73,29 @@ std::shared_ptr<Overlay> Overlay::create(
     AbsolutePathPiece localDir,
     CaseSensitivity caseSensitive,
     OverlayType overlayType,
-    std::shared_ptr<StructuredLogger> logger) {
+    std::shared_ptr<StructuredLogger> logger,
+    const EdenConfig& config) {
   // This allows us to access the private constructor.
   struct MakeSharedEnabler : public Overlay {
     explicit MakeSharedEnabler(
         AbsolutePathPiece localDir,
         CaseSensitivity caseSensitive,
         OverlayType overlayType,
-        std::shared_ptr<StructuredLogger> logger)
-        : Overlay(localDir, caseSensitive, overlayType, logger) {}
+        std::shared_ptr<StructuredLogger> logger,
+        const EdenConfig& config)
+        : Overlay(localDir, caseSensitive, overlayType, logger, config) {}
   };
   return std::make_shared<MakeSharedEnabler>(
-      localDir, caseSensitive, overlayType, logger);
+      localDir, caseSensitive, overlayType, logger, config);
 }
 
 Overlay::Overlay(
     AbsolutePathPiece localDir,
     CaseSensitivity caseSensitive,
     OverlayType overlayType,
-    std::shared_ptr<StructuredLogger> logger)
-    : backingOverlay_{makeOverlay(localDir, overlayType)},
+    std::shared_ptr<StructuredLogger> logger,
+    const EdenConfig& config)
+    : backingOverlay_{makeOverlay(localDir, overlayType, config)},
       supportsSemanticOperations_{
           backingOverlay_->supportsSemanticOperations()},
       caseSensitive_{caseSensitive},
@@ -145,7 +151,8 @@ struct statfs Overlay::statFs() {
 
 folly::SemiFuture<Unit> Overlay::initialize(
     std::optional<AbsolutePath> mountPath,
-    OverlayChecker::ProgressCallback&& progressCallback) {
+    OverlayChecker::ProgressCallback&& progressCallback,
+    OverlayChecker::LookupCallback&& lookupCallback) {
   // The initOverlay() call is potentially slow, so we want to avoid
   // performing it in the current thread and blocking returning to our caller.
   //
@@ -157,9 +164,11 @@ folly::SemiFuture<Unit> Overlay::initialize(
   gcThread_ = std::thread([this,
                            mountPath = std::move(mountPath),
                            progressCallback = std::move(progressCallback),
+                           lookupCallback = std::move(lookupCallback),
                            promise = std::move(initPromise)]() mutable {
     try {
-      initOverlay(std::move(mountPath), progressCallback);
+      initOverlay(
+          std::move(mountPath), progressCallback, std::move(lookupCallback));
     } catch (std::exception& ex) {
       XLOG(ERR) << "overlay initialization failed for "
                 << backingOverlay_->getLocalDir() << ": " << ex.what();
@@ -176,8 +185,8 @@ folly::SemiFuture<Unit> Overlay::initialize(
 
 void Overlay::initOverlay(
     std::optional<AbsolutePath> mountPath,
-    FOLLY_MAYBE_UNUSED const OverlayChecker::ProgressCallback&
-        progressCallback) {
+    FOLLY_MAYBE_UNUSED const OverlayChecker::ProgressCallback& progressCallback,
+    FOLLY_MAYBE_UNUSED OverlayChecker::LookupCallback&& lookupCallback) {
   IORequest req{this};
   auto optNextInodeNumber = backingOverlay_->initOverlay(true);
   if (!optNextInodeNumber.has_value()) {
@@ -195,7 +204,9 @@ void Overlay::initOverlay(
     // TODO(zeyi): `OverlayCheck` should be associated with the specific
     // Overlay implementation. `reinterpret_cast` is a temporary workaround.
     OverlayChecker checker(
-        reinterpret_cast<FsOverlay*>(backingOverlay_.get()), std::nullopt);
+        reinterpret_cast<FsOverlay*>(backingOverlay_.get()),
+        std::nullopt,
+        std::move(lookupCallback));
     folly::stop_watch<> fsckRuntime;
     checker.scanForErrors(progressCallback);
     auto result = checker.repairErrors();
@@ -263,9 +274,6 @@ InodeNumber Overlay::allocateInodeNumber() {
   // This could be a relaxed atomic operation.  It doesn't matter on x86 but
   // might on ARM.
   auto previous = nextInodeNumber_++;
-#ifdef _WIN32
-  backingOverlay_->updateUsedInodeNumber(previous);
-#endif
   XDCHECK_NE(0u, previous) << "allocateInodeNumber called before initialize";
   return InodeNumber{previous};
 }
@@ -531,8 +539,16 @@ void Overlay::gcThread() noexcept {
 
 void Overlay::handleGCRequest(GCRequest& request) {
   IORequest req{this};
-  if (request.flush) {
-    request.flush->setValue();
+
+  if (std::holds_alternative<GCRequest::MaintenanceRequest>(
+          request.requestType)) {
+    backingOverlay_->maintenance();
+    return;
+  }
+
+  if (auto* flush =
+          std::get_if<GCRequest::FlushRequest>(&request.requestType)) {
+    flush->setValue();
     return;
   }
 
@@ -573,7 +589,7 @@ void Overlay::handleGCRequest(GCRequest& request) {
     }
   };
 
-  processDir(request.dir);
+  processDir(std::get<overlay::OverlayDir>(request.requestType));
 
   while (!queue.empty()) {
     auto ino = queue.front();
@@ -644,6 +660,6 @@ void Overlay::renameChild(
 }
 
 void Overlay::maintenance() {
-  backingOverlay_->maintenance();
+  gcQueue_.lock()->queue.emplace_back(Overlay::GCRequest::MaintenanceRequest{});
 }
 } // namespace facebook::eden

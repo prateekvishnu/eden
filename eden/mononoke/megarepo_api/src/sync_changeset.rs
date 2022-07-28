@@ -5,31 +5,47 @@
  * GNU General Public License version 2.
  */
 
-use crate::common::{
-    find_source_config, find_target_bookmark_and_value, find_target_sync_config, MegarepoOp,
-    SourceAndMovedChangesets,
-};
+use crate::common::find_source_config;
+use crate::common::find_target_bookmark_and_value;
+use crate::common::find_target_sync_config;
+use crate::common::MegarepoOp;
+use crate::common::SourceAndMovedChangesets;
 use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Result;
 use async_trait::async_trait;
-use blobrepo::{save_bonsai_changesets, BlobRepo};
+use blobrepo::save_bonsai_changesets;
+use blobrepo::BlobRepo;
 use blobstore::Loadable;
 use changesets::ChangesetsRef;
-use commit_transformation::{
-    create_directory_source_to_target_multi_mover, create_source_to_target_multi_mover,
-    rewrite_commit, upload_commits, CommitRewrittenToEmpty,
-};
+use commit_transformation::create_directory_source_to_target_multi_mover;
+use commit_transformation::create_source_to_target_multi_mover;
+use commit_transformation::rewrite_as_squashed_commit;
+use commit_transformation::rewrite_commit;
+use commit_transformation::upload_commits;
+use commit_transformation::CommitRewrittenToEmpty;
 use context::CoreContext;
-use futures::{stream, StreamExt, TryStreamExt};
-use megarepo_config::{
-    MononokeMegarepoConfigs, Source, SourceMappingRules, SourceRevision, Target,
-};
+use futures::stream;
+use futures::StreamExt;
+use futures::TryStreamExt;
+use megarepo_config::MononokeMegarepoConfigs;
+use megarepo_config::Source;
+use megarepo_config::SourceMappingRules;
+use megarepo_config::SourceRevision;
+use megarepo_config::Target;
 use megarepo_error::MegarepoError;
-use megarepo_mapping::{CommitRemappingState, MegarepoMapping, SourceName};
+use megarepo_mapping::CommitRemappingState;
+use megarepo_mapping::MegarepoMapping;
+use megarepo_mapping::SourceName;
+use mononoke_api::ChangesetContext;
 use mononoke_api::Mononoke;
 use mononoke_api::RepoContext;
-use mononoke_types::{BonsaiChangeset, ChangesetId};
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::ChangesetId;
 use mutable_renames::MutableRenames;
 use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::ops::Not;
 use std::sync::Arc;
 
 pub(crate) struct SyncChangeset<'a> {
@@ -42,8 +58,17 @@ pub(crate) struct SyncChangeset<'a> {
 #[async_trait]
 impl<'a> MegarepoOp for SyncChangeset<'a> {
     fn mononoke(&self) -> &Arc<Mononoke> {
-        &self.mononoke
+        self.mononoke
     }
+}
+
+pub enum MergeMode {
+    Squashed {
+        side_commits: Vec<ChangesetContext>,
+    },
+    ExtraMoveCommits {
+        side_parents_move_commits: Vec<SourceAndMovedChangesets>,
+    },
 }
 
 const MERGE_COMMIT_MOVES_CONCURRENCY: usize = 10;
@@ -71,12 +96,12 @@ impl<'a> SyncChangeset<'a> {
         target: &Target,
         target_location: ChangesetId,
     ) -> Result<ChangesetId, MegarepoError> {
-        let target_repo = self.find_repo_by_id(&ctx, target.repo_id).await?;
+        let target_repo = self.find_repo_by_id(ctx, target.repo_id).await?;
 
         // Now we need to find the target config version that was used to create the latest
         // target commit. This config version will be used to sync the new changeset
         let (_, actual_target_location) =
-            find_target_bookmark_and_value(&ctx, &target_repo, &target).await?;
+            find_target_bookmark_and_value(ctx, &target_repo, target).await?;
 
         if target_location != actual_target_location {
             // Check if previous call was successful and return result if so
@@ -92,69 +117,110 @@ impl<'a> SyncChangeset<'a> {
         }
 
         let (commit_remapping_state, target_config) = find_target_sync_config(
-            &ctx,
+            ctx,
             target_repo.blob_repo(),
             target_location,
-            &target,
-            &self.megarepo_configs,
+            target,
+            self.megarepo_configs,
         )
         .await?;
 
         // Given the SyncTargetConfig, let's find config for the source
         // we are going to sync from
-        let source_config = find_source_config(&source_name, &target_config)?;
+        let source_config = find_source_config(source_name, &target_config)?;
 
         // Find source repo and changeset that we need to sync
-        let source_repo = self.find_repo_by_id(&ctx, source_config.repo_id).await?;
+        let source_repo = self.find_repo_by_id(ctx, source_config.repo_id).await?;
         let source_cs = source_cs_id
-            .load(&ctx, source_repo.blob_repo().blobstore())
+            .load(ctx, source_repo.blob_repo().blobstore())
             .await?;
 
         validate_can_sync_changeset(
-            &ctx,
-            &target,
+            ctx,
+            target,
             &source_cs,
             &commit_remapping_state,
             &source_repo,
-            &source_config,
+            source_config,
         )
         .await?;
 
         // In case of merge commits we need to add move commits on top of the
-        // merged-in commits.
-        let side_parents_move_commits = self
-            .create_move_commits(
-                &ctx,
-                &target,
-                &source_cs,
-                &commit_remapping_state,
-                &source_repo,
-                &source_name,
-                &source_config,
-            )
-            .await?;
+        // merged-in commits or squash side-branch.
+        let merge_mode = match &source_config.merge_mode {
+            Some(megarepo_config::MergeMode::squashed(sq)) => {
+                let (is_squashable, side_commits) = self
+                    .is_commit_squashable(
+                        ctx,
+                        target,
+                        &source_cs,
+                        &commit_remapping_state,
+                        source_name,
+                        &source_repo,
+                        sq.squash_limit
+                            .try_into()
+                            .context("couldn't convert squash commits limit")?,
+                    )
+                    .await?;
+                if is_squashable {
+                    MergeMode::Squashed { side_commits }
+                } else {
+                    MergeMode::ExtraMoveCommits {
+                        side_parents_move_commits: self
+                            .create_move_commits(
+                                ctx,
+                                target,
+                                &source_cs,
+                                &commit_remapping_state,
+                                &source_repo,
+                                source_name,
+                                source_config,
+                            )
+                            .await?,
+                    }
+                }
+            }
+            None | Some(megarepo_config::MergeMode::with_move_commit(_)) => {
+                MergeMode::ExtraMoveCommits {
+                    side_parents_move_commits: self
+                        .create_move_commits(
+                            ctx,
+                            target,
+                            &source_cs,
+                            &commit_remapping_state,
+                            &source_repo,
+                            source_name,
+                            source_config,
+                        )
+                        .await?,
+                }
+            }
+            Some(megarepo_config::MergeMode::UnknownField(_)) => {
+                return Err(anyhow!("Unknown MergeMode").into());
+            }
+        };
 
         // Finally create a commit in the target and update the mapping.
         let source_cs_id = source_cs.get_changeset_id();
         let new_target_cs_id = sync_changeset_to_target(
-            &ctx,
+            ctx,
             &source_config.mapping,
-            &source_name,
+            source_name,
             source_repo.blob_repo(),
             source_cs,
             target_repo.blob_repo(),
             target_location,
-            &target,
+            target,
             commit_remapping_state,
-            &side_parents_move_commits,
+            merge_mode,
         )
         .await?;
 
         self.target_megarepo_mapping
             .insert_source_target_cs_mapping(
-                &ctx,
+                ctx,
                 source_name,
-                &target,
+                target,
                 source_cs_id,
                 new_target_cs_id,
                 &target_config.version,
@@ -173,6 +239,94 @@ impl<'a> SyncChangeset<'a> {
         Ok(new_target_cs_id)
     }
 
+    async fn is_commit_squashable(
+        &self,
+        ctx: &CoreContext,
+        target: &Target,
+        source_cs: &BonsaiChangeset,
+        commit_remapping_state: &CommitRemappingState,
+        source_name: &SourceName,
+        source_repo: &RepoContext,
+        limit: u64,
+    ) -> Result<(bool, Vec<ChangesetContext>)> {
+        if limit == 0 {
+            return Ok((false, vec![]));
+        }
+
+        let latest_synced_cs_id =
+            find_latest_synced_cs_id(commit_remapping_state, source_name, target)?;
+        let side_parents: VecDeque<_> =
+            stream::iter(source_cs.parents().filter(|p| *p != latest_synced_cs_id))
+                .map(|p| async move {
+                    source_repo
+                        .changeset(p)
+                        .await?
+                        .ok_or_else(|| anyhow!("commit specifier not found {}", p))
+                })
+                .buffered(100)
+                .try_collect()
+                .await?;
+        let author = match side_parents.front() {
+            Some(p) => p.author().await?,
+            None => {
+                return Ok((false, vec![]));
+            }
+        };
+        let res = stream::try_unfold(
+            (0, side_parents),
+            |(local_limit, mut queue): (u64, VecDeque<ChangesetContext>)| {
+                let author = author.clone();
+                async move {
+                    if let Some(cs) = queue.pop_front() {
+                        let is_commit_synced = self
+                            .target_megarepo_mapping
+                            .get_reverse_mapping_entry(ctx, target, cs.id())
+                            .await?
+                            .is_empty()
+                            .not();
+                        // if commit is in the target's mapping,
+                        // then we should not check further
+                        if is_commit_synced {
+                            return anyhow::Ok(Some(((true, cs), (local_limit, queue))));
+                        }
+                        // if we traversed more than a limit commits
+                        if local_limit >= limit {
+                            // We reached out maximum and commit is not in the targets mapping
+                            // return false indicating that branch isn't squashable
+                            return anyhow::Ok(Some(((false, cs), (local_limit, queue))));
+                        }
+                        // if author is different branch isn't squashable
+                        if author != cs.author().await? {
+                            return anyhow::Ok(Some(((false, cs), (local_limit, queue))));
+                        }
+                        // still need to check parents
+                        let parents: Result<VecDeque<_>> =
+                            stream::iter(cs.parents().await?.into_iter())
+                                .map(|p| async move {
+                                    source_repo
+                                        .changeset(p)
+                                        .await?
+                                        .ok_or_else(|| anyhow!("commit specifier not found {}", p))
+                                })
+                                .buffered(100)
+                                .try_collect()
+                                .await;
+                        queue.extend(parents?);
+                        anyhow::Ok(Some(((true, cs), (local_limit + 1, queue))))
+                    } else {
+                        anyhow::Ok(None)
+                    }
+                }
+            },
+        )
+        .try_collect::<Vec<_>>()
+        .await?;
+        let (maybe_squashable, mut side_commits): (Vec<_>, Vec<_>) = res.into_iter().unzip();
+        let is_squashable = maybe_squashable.into_iter().all(|x| x);
+        side_commits.pop();
+        Ok((is_squashable, side_commits))
+    }
+
     // Creates move commits on top of the merge parents in the source that
     // hasn't already been synced to targets (all but one). These move commits
     // put all source files into a correct places in a target so the file
@@ -188,7 +342,7 @@ impl<'a> SyncChangeset<'a> {
         source: &Source,
     ) -> Result<Vec<SourceAndMovedChangesets>, MegarepoError> {
         let latest_synced_cs_id =
-            find_latest_synced_cs_id(commit_remapping_state, &source_name, target)?;
+            find_latest_synced_cs_id(commit_remapping_state, source_name, target)?;
 
         // All parents except the one that's already synced to the target
         let side_parents = source_cs.parents().filter(|p| *p != latest_synced_cs_id);
@@ -205,7 +359,7 @@ impl<'a> SyncChangeset<'a> {
                     &mover,
                     &directory_mover,
                     Default::default(),
-                    &source_name,
+                    source_name,
                 )
             })
             .buffer_unordered(MERGE_COMMIT_MOVES_CONCURRENCY)
@@ -306,7 +460,6 @@ async fn validate_can_sync_changeset(
         SourceRevision::bookmark(_bookmark) => {
             /* If the source is following a git repo branch we can't verify much as the bookmark
             doesn't have to exist in the megarepo */
-            ()
         }
         SourceRevision::UnknownField(_) => {
             return Err(MegarepoError::internal(anyhow!(
@@ -316,7 +469,7 @@ async fn validate_can_sync_changeset(
     };
 
     let latest_synced_cs_id = find_latest_synced_cs_id(
-        &commit_remapping_state,
+        commit_remapping_state,
         &SourceName::new(&source.source_name),
         target,
     )?;
@@ -343,7 +496,7 @@ async fn sync_changeset_to_target(
     target_cs_id: ChangesetId,
     target: &Target,
     mut state: CommitRemappingState,
-    side_parents_move_commits: &[SourceAndMovedChangesets],
+    merge_mode: MergeMode,
 ) -> Result<ChangesetId, MegarepoError> {
     let mover =
         create_source_to_target_multi_mover(mapping.clone()).map_err(MegarepoError::internal)?;
@@ -351,35 +504,75 @@ async fn sync_changeset_to_target(
     let source_cs_id = source_cs.get_changeset_id();
     // Create a new commit using a mover
     let source_cs_mut = source_cs.into_mut();
-    let mut remapped_parents = HashMap::new();
     let latest_synced_cs_id = find_latest_synced_cs_id(&state, source, target)?;
 
-    remapped_parents.insert(latest_synced_cs_id, target_cs_id);
-    for css in side_parents_move_commits.iter() {
-        remapped_parents.insert(css.source, css.moved.get_changeset_id());
-    }
+    let mut rewritten_commit = match merge_mode {
+        MergeMode::ExtraMoveCommits {
+            side_parents_move_commits,
+        } => {
+            let mut remapped_parents = HashMap::new();
 
-    let mut rewritten_commit = rewrite_commit(
-        &ctx,
-        source_cs_mut,
-        &remapped_parents,
-        mover,
-        source_repo.clone(),
-        // In case of octopus merges only first two parent get preserved during
-        // hg derivation. This ensures that mainline is within those two so is
-        // represented in the commit graph and the sync is a fast-forward move.
-        Some(target_cs_id),
-        CommitRewrittenToEmpty::Discard,
-    )
-    .await
-    .map_err(MegarepoError::internal)?
-    .ok_or_else(|| {
-        MegarepoError::internal(anyhow!(
-            "failed to rewrite commit {}, target: {:?}",
-            source_cs_id,
-            target
-        ))
-    })?;
+            remapped_parents.insert(latest_synced_cs_id, target_cs_id);
+            for css in side_parents_move_commits.iter() {
+                remapped_parents.insert(css.source, css.moved.get_changeset_id());
+            }
+            rewrite_commit(
+                ctx, // this is already a reference
+                source_cs_mut,
+                &remapped_parents,
+                mover,
+                source_repo.clone(), // this doesn't need to be clone
+                // In case of octopus merges only first two parent get preserved during
+                // hg derivation. This ensures that mainline is within those two so is
+                // represented in the commit graph and the sync is a fast-forward move.
+                Some(target_cs_id),
+                CommitRewrittenToEmpty::Discard,
+            )
+            .await
+            .map_err(MegarepoError::internal)?
+            .ok_or_else(|| {
+                MegarepoError::internal(anyhow!(
+                    "failed to rewrite commit {}, target: {:?}",
+                    source_cs_id,
+                    target
+                ))
+            })
+        }
+        MergeMode::Squashed { side_commits } => {
+            let side_commits_info = stream::iter(side_commits.into_iter())
+                .map(|cs_ctx| async move {
+                    let hash = match cs_ctx.git_sha1().await? {
+                        None => format!("HG hash: {}", cs_ctx.id()),
+                        Some(hash) => format!("Git hash: {}", hash),
+                    };
+                    let author_date = cs_ctx.author_date().await?;
+                    let message = cs_ctx.message().await?;
+                    let title = message.trim_start().lines().next().unwrap_or("");
+                    Ok::<_, MegarepoError>(format!(" * {}\t{}\t{}", hash, author_date, title))
+                })
+                .buffer_unordered(100)
+                .try_collect()
+                .await?;
+            rewrite_as_squashed_commit(
+                ctx,
+                source_repo,
+                source_cs_id,
+                (latest_synced_cs_id, target_cs_id),
+                source_cs_mut,
+                mover,
+                side_commits_info,
+            )
+            .await
+            .map_err(MegarepoError::internal)?
+            .ok_or_else(|| {
+                MegarepoError::internal(anyhow!(
+                    "failed to rewrite as squashed commit {}, target: {:?}",
+                    source_cs_id,
+                    target
+                ))
+            })
+        }
+    }?;
 
     state.set_source_changeset(source.clone(), source_cs_id);
     state
@@ -388,7 +581,7 @@ async fn sync_changeset_to_target(
 
     let rewritten_commit = rewritten_commit.freeze().map_err(MegarepoError::internal)?;
     let target_cs_id = rewritten_commit.get_changeset_id();
-    upload_commits(&ctx, vec![rewritten_commit], source_repo, target_repo)
+    upload_commits(ctx, vec![rewritten_commit], source_repo, target_repo)
         .await
         .map_err(MegarepoError::internal)?;
 
@@ -400,8 +593,7 @@ fn find_latest_synced_cs_id(
     source_name: &SourceName,
     target: &Target,
 ) -> Result<ChangesetId, MegarepoError> {
-    let maybe_latest_synced_cs_id =
-        commit_remapping_state.get_latest_synced_changeset(&source_name);
+    let maybe_latest_synced_cs_id = commit_remapping_state.get_latest_synced_changeset(source_name);
     if let Some(latest_synced_cs_id) = maybe_latest_synced_cs_id {
         Ok(latest_synced_cs_id.clone())
     } else {
@@ -416,13 +608,18 @@ fn find_latest_synced_cs_id(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::megarepo_test_utils::{MegarepoTest, SyncTargetConfigBuilder};
+    use crate::megarepo_test_utils::MegarepoTest;
+    use crate::megarepo_test_utils::SyncTargetConfigBuilder;
     use anyhow::Error;
     use fbinit::FacebookInit;
     use maplit::hashmap;
     use megarepo_mapping::REMAPPING_STATE_FILE;
-    use mononoke_types::{FileChange, MPath};
-    use tests_utils::{bookmark, list_working_copy_utf8, resolve_cs_id, CreateCommitContext};
+    use mononoke_types::FileChange;
+    use mononoke_types::MPath;
+    use tests_utils::bookmark;
+    use tests_utils::list_working_copy_utf8;
+    use tests_utils::resolve_cs_id;
+    use tests_utils::CreateCommitContext;
 
     #[fbinit::test]
     async fn test_sync_changeset_simple(fb: FacebookInit) -> Result<(), Error> {
@@ -873,6 +1070,110 @@ mod test {
 
         assert_eq!(res1, res2);
 
+        Ok(())
+    }
+
+    #[fbinit::test]
+    async fn test_sync_changeset_squash_commit(fb: FacebookInit) -> Result<(), Error> {
+        let ctx = CoreContext::test_mock(fb);
+        let mut test = MegarepoTest::new(&ctx).await?;
+        let target: Target = test.target("target".to_string());
+
+        let source_name = SourceName::new("source_1");
+        let version = "version_1".to_string();
+        SyncTargetConfigBuilder::new(test.repo_id(), target.clone(), version.clone())
+            .source_builder(source_name.clone())
+            .set_prefix_bookmark_to_source_name()
+            .merge_mode(megarepo_config::MergeMode::squashed(
+                megarepo_config::Squashed { squash_limit: 3 },
+            ))
+            .build_source()?
+            .build(&mut test.configs_storage);
+
+        println!("Create initial source commit and bookmark");
+        let init_source_cs_id = CreateCommitContext::new_root(&ctx, &test.blobrepo)
+            .add_file("file", "content")
+            .commit()
+            .await?;
+
+        bookmark(&ctx, &test.blobrepo, source_name.to_string())
+            .set_to(init_source_cs_id)
+            .await?;
+
+        let latest_target_cs_id = test
+            .prepare_initial_commit_in_target(&ctx, &version, &target)
+            .await?;
+
+        let configs_storage: Arc<dyn MononokeMegarepoConfigs> = Arc::new(test.configs_storage);
+        let sync_changeset = SyncChangeset::new(
+            &configs_storage,
+            &test.mononoke,
+            &test.megarepo_mapping,
+            &test.mutable_renames,
+        );
+
+        let main_line = CreateCommitContext::new(&ctx, &test.blobrepo, vec![init_source_cs_id])
+            .add_file("file_in_mainline", "mainline1")
+            .commit()
+            .await?;
+
+        bookmark(&ctx, &test.blobrepo, source_name.to_string())
+            .set_to(main_line)
+            .await?;
+        let main_line_target = sync_changeset
+            .sync(&ctx, main_line, &source_name, &target, latest_target_cs_id)
+            .await?;
+
+        let side_branch_1 = CreateCommitContext::new(&ctx, &test.blobrepo, vec![init_source_cs_id])
+            .add_file("file", "totallydifferentcontent")
+            .add_file("file_in_sidebranch_1", "sidebranch1")
+            .commit()
+            .await?;
+
+        let side_branch_2 = CreateCommitContext::new(&ctx, &test.blobrepo, vec![side_branch_1])
+            .add_file("file", "amended")
+            .add_file("file_in_sidebranch_2", "sidebranch2")
+            .commit()
+            .await?;
+
+        let merge = CreateCommitContext::new(&ctx, &test.blobrepo, vec![side_branch_2, main_line])
+            .add_file("file", "mergeresolution")
+            .commit()
+            .await?;
+        println!("Syncing merge");
+        bookmark(&ctx, &test.blobrepo, source_name.to_string())
+            .set_to(merge)
+            .await?;
+        let merge_target = sync_changeset
+            .sync(&ctx, merge, &source_name, &target, main_line_target)
+            .await?;
+
+        let _mcs = merge.load(&ctx, test.blobrepo.blobstore()).await?;
+
+        // Find source repo and changeset that we need to sync
+        let target_repo = sync_changeset.find_repo_by_id(&ctx, target.repo_id).await?;
+        let merge_cs = merge_target
+            .load(&ctx, target_repo.blob_repo().blobstore())
+            .await?;
+
+        let parents: Vec<_> = merge_cs.parents().collect();
+
+        let mut wc = list_working_copy_utf8(&ctx, &test.blobrepo, merge_target).await?;
+
+        // Remove file with commit remapping state because it's never present in source
+        wc.remove(&MPath::new(REMAPPING_STATE_FILE)?);
+
+        assert_eq!(parents.len(), 1);
+
+        assert_eq!(
+            wc,
+            hashmap! {
+                MPath::new("source_1/file")? => "mergeresolution".to_string(),
+                MPath::new("source_1/file_in_sidebranch_1")? => "sidebranch1".to_string(),
+                MPath::new("source_1/file_in_sidebranch_2")? => "sidebranch2".to_string(),
+                MPath::new("source_1/file_in_mainline")? => "mainline1".to_string(),
+            }
+        );
         Ok(())
     }
 }

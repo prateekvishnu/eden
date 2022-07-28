@@ -5,17 +5,33 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 #[cfg(fbcode_build)]
-use clientinfo::{ClientInfo, CLIENT_INFO_HEADER};
-use fbinit::FacebookInit;
-use futures::future::{BoxFuture, FutureExt};
+use clientinfo::ClientInfo;
+#[cfg(fbcode_build)]
+use clientinfo::CLIENT_INFO_HEADER;
+use futures::future::BoxFuture;
+use futures::future::FutureExt;
 use gotham_ext::socket_data::TlsSocketData;
-use http::{HeaderMap, HeaderValue, Method, Request, Response, Uri};
-use hyper::{service::Service, Body};
+use http::HeaderMap;
+use http::HeaderValue;
+use http::Method;
+use http::Request;
+use http::Response;
+use http::Uri;
+use hyper::service::Service;
+use hyper::Body;
 use metadata::Metadata;
-use sha1::{Digest, Sha1};
-use slog::{debug, error, trace, Logger};
+use session_id::generate_session_id;
+use sha1::Digest;
+use sha1::Sha1;
+use slog::debug;
+use slog::error;
+use slog::trace;
+use slog::Logger;
 use std::io::Cursor;
 use std::marker::PhantomData;
 use std::str::FromStr;
@@ -23,9 +39,14 @@ use std::sync::atomic::Ordering;
 use std::task;
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
-use tunables::{force_update_tunables, tunables};
+use tunables::force_update_tunables;
+use tunables::tunables;
 
-use crate::connection_acceptor::{self, AcceptedConnection, Acceptor, FramedConn, MononokeStream};
+use crate::connection_acceptor;
+use crate::connection_acceptor::AcceptedConnection;
+use crate::connection_acceptor::Acceptor;
+use crate::connection_acceptor::FramedConn;
+use crate::connection_acceptor::MononokeStream;
 
 use qps::Qps;
 
@@ -201,14 +222,10 @@ where
             .header(http::header::UPGRADE, "websocket")
             .header(HEADER_WEBSOCKET_ACCEPT, websocket_key);
 
-        let metadata = h2m::try_convert_headers_to_metadata(
-            self.conn.pending.acceptor.fb.clone(),
-            self.conn.is_trusted,
-            req.headers(),
-        )
-        .await
-        .context("Invalid metadata")
-        .map_err(HttpError::BadRequest)?;
+        let metadata = h2m::try_convert_headers_to_metadata(&self.conn, req.headers())
+            .await
+            .context("Invalid metadata")
+            .map_err(HttpError::BadRequest)?;
 
         let zstd_level: i32 = tunables::tunables()
             .get_zstd_compression_level()
@@ -225,7 +242,6 @@ where
             None => Ok(None),
         }
         .map_err(HttpError::BadRequest)?;
-        let debug = req.headers().get(HEADER_CLIENT_DEBUG).is_some();
 
         match compression {
             Some(zstd_level) => {
@@ -274,7 +290,7 @@ where
 
             let framed = FramedConn::setup(rx, tx, compression)?;
 
-            connection_acceptor::handle_wireproto(this.conn, framed, reponame, metadata, debug)
+            connection_acceptor::handle_wireproto(this.conn, framed, reponame, metadata)
                 .await
                 .context("Failed to handle_wireproto")?;
 
@@ -311,7 +327,7 @@ where
 
         if path == "/drop_bookmarks_cache" {
             for handler in self.acceptor().repo_handlers.values() {
-                handler.repo.blobrepo().bookmarks().drop_caches();
+                handler.repo.blob_repo().bookmarks().drop_caches();
             }
 
             return Ok(ok);
@@ -403,7 +419,7 @@ where
             let res = this
                 .handle(req)
                 .await
-                .and_then(|mut res| {
+                .map(|mut res| {
                     match HeaderValue::from_str(this.conn.pending.acceptor.server_hostname.as_str())
                     {
                         Ok(header) => {
@@ -418,7 +434,7 @@ where
                             );
                         }
                     };
-                    Ok(res)
+                    res
                 })
                 .or_else(|e| {
                     let res = e.http_response();
@@ -451,10 +467,10 @@ fn calculate_websocket_accept(headers: &HeaderMap<HeaderValue>) -> String {
     // no Proxygen in between, this header will be missing and the result
     // ignored.
     if let Some(header) = headers.get(HEADER_WEBSOCKET_KEY) {
-        sha1.input(header.as_ref());
+        sha1.update(header.as_ref());
     }
-    sha1.input(WEBSOCKET_MAGIC_KEY.as_bytes());
-    let hash: [u8; 20] = sha1.result().into();
+    sha1.update(WEBSOCKET_MAGIC_KEY.as_bytes());
+    let hash: [u8; 20] = sha1.finalize().into();
     base64::encode(&hash)
 }
 
@@ -463,11 +479,18 @@ mod h2m {
     use super::*;
 
     pub async fn try_convert_headers_to_metadata(
-        _fb: FacebookInit,
-        _is_trusted: bool,
-        _headers: &HeaderMap<HeaderValue>,
-    ) -> Result<Option<Metadata>> {
-        Ok(None)
+        conn: &AcceptedConnection,
+        headers: &HeaderMap<HeaderValue>,
+    ) -> Result<Metadata> {
+        let debug = headers.contains_key(HEADER_CLIENT_DEBUG);
+
+        Ok(Metadata::new(
+            Some(&generate_session_id().to_string()),
+            (*conn.identities).clone(),
+            debug,
+            Some(conn.pending.addr.ip()),
+        )
+        .await)
     }
 }
 
@@ -478,7 +501,6 @@ mod h2m {
     use cats::try_get_cats_idents;
     use percent_encoding::percent_decode;
     use permission_checker::MononokeIdentity;
-    use session_id::generate_session_id;
     use std::net::IpAddr;
 
     const HEADER_ENCODED_CLIENT_IDENTITY: &str = "x-fb-validated-client-encoded-identity";
@@ -505,7 +527,7 @@ mod h2m {
         let client_info: Option<ClientInfo> = headers
             .get(CLIENT_INFO_HEADER)
             .and_then(|h| h.to_str().ok())
-            .and_then(|ci| serde_json::from_str(&ci).ok());
+            .and_then(|ci| serde_json::from_str(ci).ok());
 
         if let Some(client_info) = client_info {
             metadata.add_client_info(client_info);
@@ -514,82 +536,65 @@ mod h2m {
         Ok(())
     }
 
+    /// Used only for wireproto handling.
     pub async fn try_convert_headers_to_metadata(
-        fb: FacebookInit,
-        is_trusted: bool,
+        conn: &AcceptedConnection,
         headers: &HeaderMap<HeaderValue>,
-    ) -> Result<Option<Metadata>> {
+    ) -> Result<Metadata> {
+        let debug = headers.contains_key(HEADER_CLIENT_DEBUG);
+        let internal_identity = &conn.pending.acceptor.common_config.internal_identity;
+        let is_trusted = conn.is_trusted;
+
         // CATs are verifiable - we know that only the signer could have
         // generated them. We extract the signer's identity. The connecting
         // party doesn't have to be trusted.
-        if let Some(identities) = try_get_cats_idents(fb, headers)? {
-            // If connecting party is trusted it might be proxygen and it might
-            // send a legit client ip. Try to get it.
-            let ip_addr = match headers.get(HEADER_CLIENT_IP) {
-                Some(client_address) if is_trusted => Some(
-                    client_address
-                        .to_str()?
-                        .parse::<IpAddr>()
-                        .context("Invalid IP Address")?,
-                ),
-                _ => None,
-            };
+        //
+        // This correctly returns error if cats are present but are invalid.
+        let cats_identities =
+            try_get_cats_idents(conn.pending.acceptor.fb.clone(), headers, internal_identity)?;
 
-            let mut metadata = Metadata::new(
-                Some(&generate_session_id().to_string()),
-                false,
-                identities,
-                headers.contains_key(HEADER_CLIENT_DEBUG),
-                ip_addr,
-            )
-            .await;
+        if is_trusted {
+            if let (Some(encoded_identities), Some(client_address)) = (
+                headers.get(HEADER_ENCODED_CLIENT_IDENTITY),
+                headers.get(HEADER_CLIENT_IP),
+            ) {
+                let json_identities = percent_decode(encoded_identities.as_ref())
+                    .decode_utf8()
+                    .context("Invalid encoded identities")?;
 
-            // if it turns out the client is trusted, we might include some
-            // additional info.
-            if is_trusted {
+                let mut identities = MononokeIdentity::try_from_json_encoded(&json_identities)
+                    .context("Invalid identities")?;
+                let ip_addr = client_address
+                    .to_str()?
+                    .parse::<IpAddr>()
+                    .context("Invalid IP Address")?;
+
+                identities.extend(cats_identities.unwrap_or_default().into_iter());
+
+                let mut metadata = Metadata::new(
+                    Some(&generate_session_id().to_string()),
+                    identities,
+                    debug,
+                    Some(ip_addr),
+                )
+                .await;
+
                 metadata_populate_trusted(&mut metadata, headers)?;
+
+                return Ok(metadata);
             }
-
-            return Ok(Some(metadata));
         }
 
-        if !is_trusted {
-            return Ok(None);
-        }
+        let mut identities = cats_identities.unwrap_or_default();
+        identities.extend(conn.identities.iter().cloned());
 
-        if let (Some(encoded_identities), Some(client_address)) = (
-            headers.get(HEADER_ENCODED_CLIENT_IDENTITY),
-            headers.get(HEADER_CLIENT_IP),
-        ) {
-            let json_identities = percent_decode(encoded_identities.as_ref())
-                .decode_utf8()
-                .context("Invalid encoded identities")?;
-            let identities = MononokeIdentity::try_from_json_encoded(&json_identities)
-                .context("Invalid identities")?;
-            let ip_addr = client_address
-                .to_str()?
-                .parse::<IpAddr>()
-                .context("Invalid IP Address")?;
-
-            // In the case of HTTP proxied/trusted requests we only have the
-            // guarantee that we can trust the forwarded credentials. Beyond
-            // this point we can't trust anything else, ACL checks have not
-            // been performed, so set 'is_trusted' to 'false' here to enforce
-            // further checks.
-            let mut metadata = Metadata::new(
-                Some(&generate_session_id().to_string()),
-                false,
-                identities,
-                headers.contains_key(HEADER_CLIENT_DEBUG),
-                Some(ip_addr),
-            )
-            .await;
-
-            metadata_populate_trusted(&mut metadata, headers)?;
-
-            Ok(Some(metadata))
-        } else {
-            Ok(None)
-        }
+        // Generic fallback
+        Ok(Metadata::new(
+            Some(&generate_session_id().to_string()),
+            identities,
+            debug,
+            Some(conn.pending.addr.ip()),
+        )
+        .await)
     }
 }

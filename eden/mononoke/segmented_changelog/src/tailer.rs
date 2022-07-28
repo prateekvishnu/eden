@@ -8,41 +8,62 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Error, Result};
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use fbinit::FacebookInit;
-use futures::stream::{self, Stream, StreamExt, TryStreamExt};
+use futures::stream;
+use futures::stream::Stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use futures_stats::TimedFutureExt;
-use slog::{debug, error, info};
-use sql_ext::facebook::{MyAdmin, MysqlOptions};
-use sql_ext::replication::{NoReplicaLagMonitor, ReplicaLagMonitor};
+use slog::debug;
+use slog::error;
+use slog::info;
+use sql_ext::facebook::MyAdmin;
+use sql_ext::facebook::MysqlOptions;
+use sql_ext::replication::NoReplicaLagMonitor;
+use sql_ext::replication::ReplicaLagMonitor;
 
 use stats::prelude::*;
 
 use blobrepo::BlobRepo;
 use blobstore::Blobstore;
-use blobstore_factory::{make_metadata_sql_factory, ReadOnlyStorage};
+use blobstore_factory::make_metadata_sql_factory;
+use blobstore_factory::ReadOnlyStorage;
 use bonsai_hg_mapping::BonsaiHgMapping;
 use bonsai_hg_mapping::BonsaiHgMappingArc;
 use bookmarks::Bookmarks;
-use bulkops::{Direction, PublicChangesetBulkFetch};
-use changeset_fetcher::{ChangesetFetcher, PrefetchedChangesetsFetcher};
-use changesets::{ChangesetEntry, ChangesetsArc};
+use bulkops::Direction;
+use bulkops::PublicChangesetBulkFetch;
+use changeset_fetcher::ChangesetFetcher;
+use changeset_fetcher::PrefetchedChangesetsFetcher;
+use changesets::ChangesetEntry;
+use changesets::ChangesetsArc;
 use context::CoreContext;
 use metaconfig_types::MetadataDatabaseConfig;
-use mononoke_types::{Generation, RepositoryId};
+use mononoke_types::Generation;
+use mononoke_types::RepositoryId;
 use phases::PhasesArc;
 use tunables::tunables;
 
 use crate::dag::ops::DagAddHeads;
 use crate::dag::DagAlgorithm;
 use crate::iddag::IdDagSaveStore;
-use crate::idmap::{cs_id_from_vertex_name, CacheHandlers, IdMapFactory};
+use crate::idmap::cs_id_from_vertex_name;
+use crate::idmap::CacheHandlers;
+use crate::idmap::IdMapFactory;
 use crate::owned::OwnedSegmentedChangelog;
 use crate::parents::FetchParents;
-use crate::types::{IdMapVersion, SegmentedChangelogVersion};
-use crate::update::{server_namedag, vertexlist_from_seedheads, SeedHead};
+use crate::types::IdMapVersion;
+use crate::types::SegmentedChangelogVersion;
+use crate::update::server_namedag;
+use crate::update::vertexlist_from_seedheads;
+use crate::update::SeedHead;
 use crate::version_store::SegmentedChangelogVersionStore;
-use crate::{CloneHints, InProcessIdDag, SegmentedChangelogSqlConnections};
+use crate::CloneHints;
+use crate::InProcessIdDag;
+use crate::SegmentedChangelogSqlConnections;
 
 define_stats! {
     prefix = "mononoke.segmented_changelog.tailer.update";
@@ -195,7 +216,7 @@ impl SegmentedChangelogTailer {
             STATS::count.add_value(1);
             STATS::count_per_repo.add_value(1, (self.repo_id.id(),));
 
-            let (stats, update_result) = self.once(&ctx, false).timed().await;
+            let (stats, update_result) = self.once(ctx, false).timed().await;
 
             STATS::duration_ms.add_value(stats.completion_time.as_millis() as i64);
             STATS::duration_ms_per_repo.add_value(
@@ -239,7 +260,7 @@ impl SegmentedChangelogTailer {
         );
 
         let (seeding, idmap_version, iddag) = {
-            let sc_version = self.sc_version_store.get(&ctx).await.with_context(|| {
+            let sc_version = self.sc_version_store.get(ctx).await.with_context(|| {
                 format!(
                     "error loading segmented changelog version for repo {}",
                     self.repo_id
@@ -257,7 +278,7 @@ impl SegmentedChangelogTailer {
                     } else {
                         let iddag = self
                             .iddag_save_store
-                            .load(&ctx, sc_version.iddag_version)
+                            .load(ctx, sc_version.iddag_version)
                             .await
                             .with_context(|| {
                                 format!("failed to load iddag for repo {}", self.repo_id)
@@ -281,7 +302,7 @@ impl SegmentedChangelogTailer {
         let mut namedag = server_namedag(ctx.clone(), iddag, idmap)?;
 
         let heads =
-            vertexlist_from_seedheads(&ctx, &self.seed_heads, self.bookmarks.as_ref()).await?;
+            vertexlist_from_seedheads(ctx, &self.seed_heads, self.bookmarks.as_ref()).await?;
 
         let head_commits: Vec<_> = namedag
             .heads(namedag.master_group().await?)
@@ -387,7 +408,7 @@ impl SegmentedChangelogTailer {
         // Save the IdDag
         let iddag_version = self
             .iddag_save_store
-            .save(&ctx, &iddag)
+            .save(ctx, &iddag)
             .await
             .with_context(|| format!("error saving iddag for repo {}", self.repo_id))?;
 
@@ -395,7 +416,7 @@ impl SegmentedChangelogTailer {
         let sc_version = SegmentedChangelogVersion::new(iddag_version, idmap_version);
         if seeding {
             self.sc_version_store
-                .set(&ctx, sc_version)
+                .set(ctx, sc_version)
                 .await
                 .with_context(|| {
                     format!(
@@ -406,7 +427,7 @@ impl SegmentedChangelogTailer {
             info!(ctx.logger(), "successfully seeded segmented changelog",);
         } else {
             self.sc_version_store
-                .update(&ctx, sc_version)
+                .update(ctx, sc_version)
                 .await
                 .with_context(|| {
                     format!(

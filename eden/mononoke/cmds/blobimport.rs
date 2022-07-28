@@ -7,29 +7,40 @@
 
 #![cfg_attr(not(fbcode_build), allow(unused_crate_dependencies))]
 
-use anyhow::{bail, format_err, Context, Error, Result};
+use anyhow::bail;
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use ascii::AsciiString;
-use blobimport_lib;
 use blobrepo::BlobRepo;
 use bonsai_globalrev_mapping::SqlBonsaiGlobalrevMappingBuilder;
-use clap_old::{Arg, ArgGroup};
-use cmdlib::{
-    args::{self, MononokeClapApp, MononokeMatches, RepoRequirement},
-    helpers::block_execute,
-};
-use context::{CoreContext, SessionContainer};
+use clap_old::Arg;
+use clap_old::ArgGroup;
+use cmdlib::args;
+use cmdlib::args::MononokeClapApp;
+use cmdlib::args::MononokeMatches;
+use cmdlib::args::RepoRequirement;
+use cmdlib::helpers::block_execute;
+use context::CoreContext;
+use context::SessionContainer;
 use derived_data_filenodes::FilenodesOnlyPublic;
 use derived_data_manager::BonsaiDerivable;
 use derived_data_utils::POSSIBLE_DERIVED_TYPES;
 use failure_ext::SlogKVError;
 use fbinit::FacebookInit;
-use futures::future::{try_join, TryFutureExt};
+use futures::future::try_join;
+use futures::future::TryFutureExt;
 #[cfg(fbcode_build)]
 use mercurial_revlog::revlog::RevIdx;
-use mercurial_types::{HgChangesetId, HgNodeHash};
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgNodeHash;
 use mononoke_types::ChangesetId;
 use mutable_counters::MutableCountersRef;
-use slog::{error, info, warn, Logger};
+use slog::error;
+use slog::info;
+use slog::warn;
+use slog::Logger;
 use std::collections::HashMap;
 use std::fs::read;
 use std::path::Path;
@@ -145,11 +156,11 @@ fn parse_fixed_parent_order<P: AsRef<Path>>(
     let content = read(p)?;
     let mut res = HashMap::new();
 
-    for line in String::from_utf8(content).map_err(Error::from)?.split("\n") {
+    for line in String::from_utf8(content).map_err(Error::from)?.split('\n') {
         if line.is_empty() {
             continue;
         }
-        let mut iter = line.split(" ").map(HgChangesetId::from_str).fuse();
+        let mut iter = line.split(' ').map(HgChangesetId::from_str).fuse();
         let maybe_hg_cs_id = iter.next();
         let hg_cs_id = match maybe_hg_cs_id {
             Some(hg_cs_id) => hg_cs_id?,
@@ -178,7 +189,7 @@ fn parse_fixed_parent_order<P: AsRef<Path>>(
             }
             (None, Some(_)) => unreachable!(),
         };
-        if let Some(_) = iter.next() {
+        if iter.next().is_some() {
             bail!("got 3 parents, but mercurial supports at most 2!");
         }
 
@@ -193,11 +204,10 @@ fn parse_fixed_parent_order<P: AsRef<Path>>(
 mod facebook {
     use super::*;
 
-    use manifold_client::{
-        cpp_client::{ClientOptionsBuilder, ManifoldCppClient},
-        write::WriteRequestOptionsBuilder,
-        ManifoldClient,
-    };
+    use manifold_client::cpp_client::ClientOptionsBuilder;
+    use manifold_client::cpp_client::ManifoldCppClient;
+    use manifold_client::write::WriteRequestOptionsBuilder;
+    use manifold_client::ManifoldClient;
 
     pub async fn update_manifold_key(
         fb: FacebookInit,
@@ -326,7 +336,7 @@ async fn run_blobimport<'a>(
     let concurrent_lfs_imports = args::get_usize(matches, "concurrent-lfs-imports", 10);
 
     let fixed_parent_order = if let Some(path) = matches.value_of("fix-parent-order") {
-        parse_fixed_parent_order(&logger, path)
+        parse_fixed_parent_order(logger, path)
             .context("while parsing file with fixed parent order")?
     } else {
         HashMap::new()
@@ -334,8 +344,7 @@ async fn run_blobimport<'a>(
 
     let mut derived_data_types = matches
         .values_of(ARG_DERIVED_DATA_TYPE)
-        .map(|v| v.map(|d| d.to_string()).collect())
-        .unwrap_or(vec![]);
+        .map_or(vec![], |v| v.map(|d| d.to_string()).collect());
 
     let excluded_derived_data_types = matches
         .values_of(ARG_EXCLUDE_DERIVED_DATA_TYPE)
@@ -368,9 +377,9 @@ async fn run_blobimport<'a>(
         args::open_sql::<SqlSyncedCommitMapping>(fb, config_store, matches)?;
 
     let blobrepo: BlobRepo = if matches.is_present("no-create") {
-        args::open_repo_unredacted(fb, &ctx.logger(), matches).await?
+        args::open_repo_unredacted(fb, ctx.logger(), matches).await?
     } else {
-        args::create_repo_unredacted(fb, &ctx.logger(), matches).await?
+        args::create_repo_unredacted(fb, ctx.logger(), matches).await?
     };
 
     let origin_repo =
@@ -381,7 +390,7 @@ async fn run_blobimport<'a>(
                 BACKUP_FROM_REPO_ID,
                 BACKUP_FROM_REPO_NAME,
             )?;
-            Some(args::open_repo_with_repo_id(fb, &logger, repo_id, matches).await?)
+            Some(args::open_repo_with_repo_id(fb, logger, repo_id, matches).await?)
         } else {
             None
         };
@@ -447,7 +456,7 @@ async fn run_blobimport<'a>(
                 }
 
                 maybe_update_highest_imported_generation_number(
-                    &ctx,
+                    ctx,
                     &blobrepo,
                     latest_imported_cs_id,
                 )
@@ -492,7 +501,7 @@ async fn maybe_update_highest_imported_generation_number(
     let (maybe_highest_imported_gen_num, new_gen_num) =
         try_join(maybe_highest_imported_gen_num, new_gen_num).await?;
 
-    let new_gen_num = new_gen_num.ok_or(format_err!("generation number is not set"))?;
+    let new_gen_num = new_gen_num.ok_or_else(|| format_err!("generation number is not set"))?;
     let new_gen_num = match maybe_highest_imported_gen_num {
         Some(highest_imported_gen_num) => {
             if new_gen_num.value() as i64 > highest_imported_gen_num {

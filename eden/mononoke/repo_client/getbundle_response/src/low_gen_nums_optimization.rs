@@ -5,20 +5,25 @@
  * GNU General Public License version 2.
  */
 
-use crate::{call_difference_of_union_of_ancestors_revset, Params};
-use anyhow::{anyhow, Error, Result};
+use crate::call_difference_of_union_of_ancestors_revset;
+use crate::Params;
+use anyhow::anyhow;
+use anyhow::Error;
+use anyhow::Result;
 use changeset_fetcher::ArcChangesetFetcher;
-use context::{CoreContext, PerfCounterType};
-use futures::{
-    future::{try_join_all, TryFutureExt},
-    stream::{self, StreamExt, TryStreamExt},
-};
-use mononoke_types::{ChangesetId, Generation};
+use context::CoreContext;
+use context::PerfCounterType;
+use futures::future::try_join_all;
+use futures::future::TryFutureExt;
+use futures::stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use mononoke_types::ChangesetId;
+use mononoke_types::Generation;
 use reachabilityindex::LeastCommonAncestorsHint;
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
 use tunables::tunables;
 use uniqueheap::UniqueHeap;
 
@@ -140,7 +145,7 @@ pub(crate) async fn compute_partial_getbundle(
     let new_excludes: HashMap<_, _> = HashMap::from_iter(excludes);
 
     if let Some((cs_id, gen_num)) = maybe_max_head {
-        if !new_excludes.contains_key(&cs_id) && gen_num.value() > gen_num_threshold {
+        if !new_excludes.contains_key(cs_id) && gen_num.value() > gen_num_threshold {
             queue.push((*gen_num, *cs_id));
         }
     }
@@ -255,10 +260,10 @@ pub(crate) async fn low_gen_num_optimization(
     };
 
     let nodes_to_send_second_part = call_difference_of_union_of_ancestors_revset(
-        &ctx,
-        &changeset_fetcher,
+        ctx,
+        changeset_fetcher,
         high_gens_params,
-        &lca_hint,
+        lca_hint,
         None,
     )
     .await?
@@ -301,10 +306,10 @@ async fn process_low_gen_params(
         .map(Ok)
         .map_ok(|low_gens_params| {
             call_difference_of_union_of_ancestors_revset(
-                &ctx,
-                &changeset_fetcher,
+                ctx,
+                changeset_fetcher,
                 low_gens_params,
-                &lca_hint,
+                lca_hint,
                 Some(limit),
             )
         })
@@ -403,16 +408,23 @@ mod test {
     use super::*;
     use blobrepo::BlobRepo;
     use fbinit::FacebookInit;
-    use futures::{compat::Stream01CompatExt, FutureExt};
+    use futures::compat::Stream01CompatExt;
+    use futures::FutureExt;
     use futures_01_ext::StreamExt as OldStreamExt;
     use futures_old::stream as old_stream;
-    use maplit::{btreemap, hashmap};
-    use mononoke_types_mocks::changesetid::{FOURS_CSID, ONES_CSID, THREES_CSID, TWOS_CSID};
+    use maplit::btreemap;
+    use maplit::hashmap;
+    use mononoke_types_mocks::changesetid::FOURS_CSID;
+    use mononoke_types_mocks::changesetid::ONES_CSID;
+    use mononoke_types_mocks::changesetid::THREES_CSID;
+    use mononoke_types_mocks::changesetid::TWOS_CSID;
     use revset::add_generations_by_bonsai;
     use skiplist::SkiplistIndex;
     use std::collections::BTreeMap;
-    use tests_utils::{drawdag::create_from_dag, CreateCommitContext};
-    use tunables::{with_tunables_async, MononokeTunables};
+    use tests_utils::drawdag::create_from_dag;
+    use tests_utils::CreateCommitContext;
+    use tunables::with_tunables_async;
+    use tunables::MononokeTunables;
 
     #[fbinit::test]
     fn test_split_heads_excludes(fb: FacebookInit) -> Result<(), Error> {
@@ -933,7 +945,7 @@ mod test {
         excludes: &[String],
         low_gen_num_checker: &LowGenNumChecker,
     ) -> Result<(PartialGetBundle, Params), Error> {
-        let params = generate_params(&ctx, &repo, &commit_map, &heads, &excludes).await?;
+        let params = generate_params(ctx, repo, commit_map, heads, excludes).await?;
 
         let tunables = MononokeTunables::default();
         tunables.update_ints(&values);
@@ -941,7 +953,7 @@ mod test {
             tunables,
             async {
                 let res = compute_partial_getbundle(
-                    &ctx,
+                    ctx,
                     &repo.get_changeset_fetcher(),
                     params.heads.clone(),
                     params.excludes.clone(),

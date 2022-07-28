@@ -7,18 +7,27 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{bail, Context, Error, Result};
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use fbthrift::compact_protocol;
-use quickcheck::{Arbitrary, Gen};
+use quickcheck::Arbitrary;
+use quickcheck::Gen;
 use sorted_vector_map::SortedVectorMap;
 
-use crate::blob::{Blob, BlobstoreValue, ChangesetBlob};
+use crate::blob::Blob;
+use crate::blob::BlobstoreValue;
+use crate::blob::ChangesetBlob;
 use crate::datetime::DateTime;
 use crate::errors::ErrorKind;
-use crate::file_change::{BasicFileChange, FileChange};
-use crate::path::{self, MPath};
+use crate::file_change::BasicFileChange;
+use crate::file_change::FileChange;
+use crate::path;
+use crate::path::MPath;
 use crate::thrift;
-use crate::typed_hash::{ChangesetId, ChangesetIdContext};
+use crate::typed_hash::ChangesetId;
+use crate::typed_hash::ChangesetIdContext;
 
 /// A struct callers can use to build up a `BonsaiChangeset`.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -188,9 +197,9 @@ impl BonsaiChangeset {
             Ok(BonsaiChangeset { inner, id })
         };
 
-        Ok(catch_block().with_context(|| {
+        catch_block().with_context(|| {
             ErrorKind::InvalidThrift("BonsaiChangeset".into(), "Invalid changeset".into())
-        })?)
+        })
     }
 
     /// Get the parents for this changeset. The order of parents is significant.
@@ -244,10 +253,7 @@ impl BonsaiChangeset {
 
     /// Get the committer date (time and timezone) for this changeset.
     pub fn committer_date(&self) -> Option<&DateTime> {
-        match self.inner.committer_date {
-            Some(ref dt) => Some(dt),
-            None => None,
-        }
+        self.inner.committer_date.as_ref()
     }
 
     /// Get the commit message.

@@ -1,17 +1,17 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This software may be used and distributed according to the terms of the
- * GNU General Public License version 2.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
-use std::fs::{self};
+use std::fs;
+use std::io;
 use std::io::BufRead;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::io::Write;
-use std::io::{self};
 use std::path::Path;
 
 use crate::errors::IoResultExt;
@@ -28,8 +28,8 @@ use crate::log::PRIMARY_START_OFFSET;
 use crate::repair::OpenOptionsOutput;
 use crate::repair::OpenOptionsRepair;
 use crate::repair::RepairMessage;
+use crate::utils;
 use crate::utils::mmap_path;
-use crate::utils::{self};
 
 // Repair
 impl OpenOptions {

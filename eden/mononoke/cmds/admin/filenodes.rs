@@ -5,25 +5,37 @@
  * GNU General Public License version 2.
  */
 
-use clap_old::{App, Arg, ArgMatches, SubCommand};
+use clap_old::App;
+use clap_old::Arg;
+use clap_old::ArgMatches;
+use clap_old::SubCommand;
 use cmdlib::args;
 
-use anyhow::{anyhow, format_err, Error};
+use anyhow::anyhow;
+use anyhow::format_err;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use blobrepo_hg::BlobRepoHg;
 use blobstore::Loadable;
 use cloned::cloned;
-use cmdlib::{args::MononokeMatches, helpers};
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers;
 use context::CoreContext;
 use fbinit::FacebookInit;
 use filenodes::FilenodeInfo;
-use futures::{future::try_join_all, TryStreamExt};
+use futures::future::try_join_all;
+use futures::TryStreamExt;
 use futures_stats::TimedFutureExt;
-use manifest::{Entry, ManifestOps};
+use manifest::Entry;
+use manifest::ManifestOps;
 use mercurial_derived_data::DeriveHgChangeset;
-use mercurial_types::{HgFileEnvelope, HgFileNodeId, MPath};
+use mercurial_types::HgFileEnvelope;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::MPath;
 use mononoke_types::RepoPath;
-use slog::{debug, info, Logger};
+use slog::debug;
+use slog::info;
+use slog::Logger;
 
 use crate::common::get_file_nodes;
 use crate::error::SubcommandError;
@@ -203,7 +215,7 @@ pub async fn subcommand_filenodes<'a>(
     sub_m: &'a ArgMatches<'_>,
 ) -> Result<(), SubcommandError> {
     let ctx = CoreContext::new_with_logger(fb, logger.clone());
-    let repo = args::open_repo(fb, &ctx.logger(), &matches).await?;
+    let repo = args::open_repo(fb, ctx.logger(), matches).await?;
     let log_envelope = sub_m.is_present(ARG_ENVELOPE);
 
     match sub_m.subcommand() {
@@ -224,8 +236,8 @@ pub async fn subcommand_filenodes<'a>(
         (COMMAND_ID, Some(matches)) => {
             let path = matches.value_of(ARG_PATH).unwrap();
             let path = match path.chars().last() {
-                Some('/') => extract_path(&path).map(RepoPath::DirectoryPath),
-                Some(_) => extract_path(&path).map(RepoPath::FilePath),
+                Some('/') => extract_path(path).map(RepoPath::DirectoryPath),
+                Some(_) => extract_path(path).map(RepoPath::FilePath),
                 None => Ok(RepoPath::RootPath),
             }?;
 
@@ -301,16 +313,16 @@ pub async fn subcommand_filenodes<'a>(
                 }
             };
 
-            let filenodes = repo.get_filenodes();
-            let (stats, res) = filenodes
+            let (stats, res) = repo
+                .filenodes()
                 .get_all_filenodes_maybe_stale(&ctx, &path, None)
                 .timed()
                 .await;
 
             debug!(ctx.logger(), "took {:?}", stats.completion_time);
             let maybe_filenodes = res?.do_not_handle_disabled_filenodes()?;
-            let filenodes =
-                maybe_filenodes.ok_or(anyhow!("unexpected failure: history is too long?"))?;
+            let filenodes = maybe_filenodes
+                .ok_or_else(|| anyhow!("unexpected failure: history is too long?"))?;
             for filenode in filenodes {
                 log_filenode(ctx.logger(), &path, &filenode, None);
             }

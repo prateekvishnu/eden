@@ -11,18 +11,26 @@ use anyhow::Error;
 use assert_matches::assert_matches;
 use blobrepo::BlobRepo;
 use bytes::Bytes;
-use chrono::{FixedOffset, TimeZone};
+use chrono::FixedOffset;
+use chrono::TimeZone;
 use derived_data_utils::derived_data_utils;
 use fbinit::FacebookInit;
+use fixtures::Linear;
+use fixtures::ManyFilesDirs;
 use fixtures::TestRepoFixture;
-use fixtures::{Linear, ManyFilesDirs};
 use futures::try_join;
 use std::str::FromStr;
 
-use crate::{
-    ChangesetContext, ChangesetId, CoreContext, CreateChange, CreateChangeFile, FileType, Mononoke,
-    MononokeError, MononokePath, RepoDraftContext,
-};
+use crate::ChangesetContext;
+use crate::ChangesetId;
+use crate::CoreContext;
+use crate::CreateChange;
+use crate::CreateChangeFile;
+use crate::FileType;
+use crate::Mononoke;
+use crate::MononokeError;
+use crate::MononokePath;
+use crate::RepoContext;
 
 #[fbinit::test]
 async fn test_create_commit(fb: FacebookInit) -> Result<(), Error> {
@@ -45,7 +53,7 @@ async fn create_commit(fb: FacebookInit, derived_data_to_derive: &str) -> Result
         .repo(ctx.clone(), "test")
         .await?
         .expect("repo exists")
-        .draft()
+        .build()
         .await?;
     let expected_hash = "68c9120f387cf1c3b7e4c2e30cdbd5b953f27a732cfe9f42f335f0091ece3c6c";
     let parent_hash = "7785606eb1f26ff5722c831de402350cf97052dc44bc175da6ac0d715a3dbbf6";
@@ -182,11 +190,11 @@ async fn create_commit_bad_changes(fb: FacebookInit) -> Result<(), Error> {
         .repo(ctx, "test")
         .await?
         .expect("repo exists")
-        .draft()
+        .build()
         .await?;
 
     async fn create_changeset(
-        repo: &RepoDraftContext,
+        repo: &RepoContext,
         changes: BTreeMap<MononokePath, CreateChange>,
     ) -> Result<ChangesetContext, MononokeError> {
         let parent_hash = "b0d1bf77898839595ee0f0cba673dd6e3be9dadaaa78bc6dd2dea97ca6bee77e";
@@ -314,11 +322,11 @@ async fn test_create_merge_commit(fb: FacebookInit) -> Result<(), Error> {
         .repo(ctx.clone(), "test")
         .await?
         .expect("repo exists")
-        .draft()
+        .build()
         .await?;
 
     async fn create_changeset(
-        repo: &RepoDraftContext,
+        repo: &RepoContext,
         changes: BTreeMap<MononokePath, CreateChange>,
         parents: Vec<ChangesetId>,
     ) -> Result<ChangesetContext, MononokeError> {
@@ -414,11 +422,11 @@ async fn test_merge_commit_parent_file_conflict(fb: FacebookInit) -> Result<(), 
         .repo(ctx.clone(), "test")
         .await?
         .expect("repo exists")
-        .draft()
+        .build()
         .await?;
 
     async fn create_changeset(
-        repo: &RepoDraftContext,
+        repo: &RepoContext,
         changes: BTreeMap<MononokePath, CreateChange>,
         parents: Vec<ChangesetId>,
     ) -> Result<ChangesetContext, MononokeError> {
@@ -523,11 +531,11 @@ async fn test_merge_commit_parent_tree_file_conflict(fb: FacebookInit) -> Result
         .repo(ctx.clone(), "test")
         .await?
         .expect("repo exists")
-        .draft()
+        .build()
         .await?;
 
     async fn create_changeset(
-        repo: &RepoDraftContext,
+        repo: &RepoContext,
         changes: BTreeMap<MononokePath, CreateChange>,
         parents: Vec<ChangesetId>,
     ) -> Result<ChangesetContext, MononokeError> {

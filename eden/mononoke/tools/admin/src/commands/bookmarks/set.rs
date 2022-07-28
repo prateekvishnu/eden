@@ -7,9 +7,13 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use bookmarks::{BookmarkName, BookmarkUpdateReason, BookmarksRef};
-use bookmarks_movement::{check_bookmark_sync_config, BookmarkKind};
+use anyhow::Context;
+use anyhow::Result;
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
+use bookmarks::BookmarksRef;
+use bookmarks_movement::check_bookmark_sync_config;
+use bookmarks_movement::BookmarkKind;
 use clap::Args;
 use context::CoreContext;
 
@@ -75,19 +79,11 @@ pub async fn set(ctx: &CoreContext, repo: &Repo, set_args: BookmarksSetArgs) -> 
         Some(old_value) => {
             println!(
                 "Updating {} bookmark {} from {} to {}",
-                kind.to_string(),
-                set_args.name,
-                old_value,
-                target
+                kind, set_args.name, old_value, target
             );
         }
         None => {
-            println!(
-                "Creating {} bookmark {} at {}",
-                kind.to_string(),
-                set_args.name,
-                target
-            );
+            println!("Creating {} bookmark {} at {}", kind, set_args.name, target);
         }
     }
 
@@ -113,16 +109,10 @@ pub async fn set(ctx: &CoreContext, repo: &Repo, set_args: BookmarksSetArgs) -> 
                 target,
                 old_value,
                 BookmarkUpdateReason::ManualMove,
-                None,
             )?;
         }
         (None, BookmarkKind::Publishing | BookmarkKind::PullDefaultPublishing) => {
-            transaction.create(
-                &set_args.name,
-                target,
-                BookmarkUpdateReason::ManualMove,
-                None,
-            )?;
+            transaction.create(&set_args.name, target, BookmarkUpdateReason::ManualMove)?;
         }
         (Some(old_value), BookmarkKind::Scratch) => {
             transaction.update_scratch(&set_args.name, target, old_value)?;

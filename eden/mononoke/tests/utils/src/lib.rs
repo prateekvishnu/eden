@@ -5,33 +5,50 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Error};
+use anyhow::format_err;
+use anyhow::Error;
 use blobstore::Storable;
+use bonsai_hg_mapping::BonsaiHgMapping;
 use bonsai_hg_mapping::BonsaiHgMappingRef;
-use bookmarks::{BookmarkName, BookmarkUpdateReason, BookmarksRef};
-use bytes::{Bytes, BytesMut};
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
+use bookmarks::Bookmarks;
+use bookmarks::BookmarksRef;
+use bytes::Bytes;
+use bytes::BytesMut;
+use changeset_fetcher::ChangesetFetcher;
+use changeset_fetcher::ChangesetFetcherArc;
+use changesets::Changesets;
 use changesets::ChangesetsRef;
 use changesets_creation::save_changesets;
 use context::CoreContext;
-use filestore::{self, FetchKey, FilestoreConfigRef, StoreRequest};
+use filestore::FetchKey;
+use filestore::FilestoreConfig;
+use filestore::FilestoreConfigRef;
+use filestore::StoreRequest;
 use fsnodes::RootFsnodeId;
-use futures::{
-    future,
-    stream::{self, TryStreamExt},
-};
+use futures::future;
+use futures::stream;
+use futures::stream::TryStreamExt;
 use manifest::ManifestOps;
 use maplit::btreemap;
 use mercurial_types::HgChangesetId;
-use mononoke_types::{
-    BlobstoreValue, BonsaiChangesetMut, ChangesetId, DateTime, FileChange, FileContents, FileType,
-    MPath,
-};
-use repo_blobstore::{RepoBlobstoreArc, RepoBlobstoreRef};
+use mononoke_types::BlobstoreValue;
+use mononoke_types::BonsaiChangesetMut;
+use mononoke_types::ChangesetId;
+use mononoke_types::DateTime;
+use mononoke_types::FileChange;
+use mononoke_types::FileContents;
+use mononoke_types::FileType;
+use mononoke_types::MPath;
+use repo_blobstore::RepoBlobstore;
+use repo_blobstore::RepoBlobstoreArc;
+use repo_blobstore::RepoBlobstoreRef;
+use repo_derived_data::RepoDerivedData;
 use repo_derived_data::RepoDerivedDataRef;
-use std::{
-    collections::{BTreeMap, HashMap},
-    str::FromStr,
-};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::str::FromStr;
 use trait_alias::trait_alias;
 
 pub mod drawdag;
@@ -40,9 +57,41 @@ pub mod drawdag;
 pub trait Repo = BonsaiHgMappingRef
     + BookmarksRef
     + ChangesetsRef
+    + ChangesetFetcherArc
     + FilestoreConfigRef
     + RepoBlobstoreArc
-    + RepoDerivedDataRef;
+    + RepoDerivedDataRef
+    + Send
+    + Sync;
+
+#[facet::container]
+#[derive(Clone)]
+/// This BasicTestRepo provides enough functionality for the methods in tests_utils to
+/// be used. Please don't add new facets to this type, instead create your own test repo type
+/// for your tests. You can list out all of the facets individually, or embed BasicTestRepo in your
+/// new struct and use delegate to make its facets accessible.
+pub struct BasicTestRepo {
+    #[facet]
+    pub repo_blobstore: RepoBlobstore,
+
+    #[facet]
+    pub changesets: dyn Changesets,
+
+    #[facet]
+    pub changeset_fetcher: dyn ChangesetFetcher,
+
+    #[facet]
+    pub bonsai_hg_mapping: dyn BonsaiHgMapping,
+
+    #[facet]
+    pub bookmarks: dyn Bookmarks,
+
+    #[facet]
+    pub filestore_config: FilestoreConfig,
+
+    #[facet]
+    pub repo_derived_data: RepoDerivedData,
+}
 
 pub async fn list_working_copy_utf8(
     ctx: &CoreContext,
@@ -409,7 +458,7 @@ impl<R: Repo> UpdateBookmarkContext<R> {
 
         let cs_id = resolve_cs_id(&self.ctx, &self.repo, cs_ident).await?;
         let mut book_txn = self.repo.bookmarks().create_transaction(self.ctx);
-        book_txn.force_set(&bookmark, cs_id, BookmarkUpdateReason::TestMove, None)?;
+        book_txn.force_set(&bookmark, cs_id, BookmarkUpdateReason::TestMove)?;
         book_txn.commit().await?;
         Ok(bookmark)
     }
@@ -426,7 +475,7 @@ impl<R: Repo> UpdateBookmarkContext<R> {
 
         let cs_id = resolve_cs_id(&self.ctx, &self.repo, cs_ident).await?;
         let mut book_txn = self.repo.bookmarks().create_transaction(self.ctx);
-        book_txn.create_publishing(&bookmark, cs_id, BookmarkUpdateReason::TestMove, None)?;
+        book_txn.create_publishing(&bookmark, cs_id, BookmarkUpdateReason::TestMove)?;
         book_txn.commit().await?;
         Ok(bookmark)
     }
@@ -443,7 +492,7 @@ impl<R: Repo> UpdateBookmarkContext<R> {
 
         let cs_id = resolve_cs_id(&self.ctx, &self.repo, cs_ident).await?;
         let mut book_txn = self.repo.bookmarks().create_transaction(self.ctx);
-        book_txn.create(&bookmark, cs_id, BookmarkUpdateReason::TestMove, None)?;
+        book_txn.create(&bookmark, cs_id, BookmarkUpdateReason::TestMove)?;
         book_txn.commit().await?;
         Ok(bookmark)
     }
@@ -473,7 +522,7 @@ impl<R: Repo> UpdateBookmarkContext<R> {
         };
 
         let mut book_txn = self.repo.bookmarks().create_transaction(self.ctx);
-        book_txn.force_delete(&bookmark, BookmarkUpdateReason::TestMove, None)?;
+        book_txn.force_delete(&bookmark, BookmarkUpdateReason::TestMove)?;
         book_txn.commit().await?;
         Ok(())
     }

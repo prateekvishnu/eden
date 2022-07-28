@@ -1034,7 +1034,12 @@ def _wraprepo(ui, repo):
                 if result is not None:
                     return result
 
-            result = computesparsematcher(self, revs, rawconfig=rawconfig)
+            result = computesparsematcher(
+                self,
+                revs,
+                rawconfig=rawconfig,
+                nocatchall=kwargs.get("nocatchall", False),
+            )
 
             if kwargs.get("includetemp", True):
                 tempincludes = self.gettemporaryincludes()
@@ -1141,7 +1146,9 @@ def _wraprepo(ui, repo):
     repo.__class__ = SparseRepo
 
 
-def computesparsematcher(repo, revs, rawconfig=None, debugversion=None):
+def computesparsematcher(
+    repo, revs, rawconfig=None, debugversion=None, nocatchall=False
+):
     matchers = []
     isalways = False
 
@@ -1152,6 +1159,7 @@ def computesparsematcher(repo, revs, rawconfig=None, debugversion=None):
                 rev,
                 rawconfig=rawconfig,
                 debugversion=debugversion,
+                nocatchall=nocatchall,
             )
 
             matchrules = config.mainrules
@@ -1199,7 +1207,7 @@ def computesparsematcher(repo, revs, rawconfig=None, debugversion=None):
         return matchmod.union(matchers, repo.root, "")
 
 
-def getsparsepatterns(repo, rev, rawconfig=None, debugversion=None):
+def getsparsepatterns(repo, rev, rawconfig=None, debugversion=None, nocatchall=False):
     """Produce the full sparse config for a revision as a SparseConfig
 
     This includes all patterns from included profiles, transitively.
@@ -1281,7 +1289,7 @@ def getsparsepatterns(repo, rev, rawconfig=None, debugversion=None):
 
     # If all rules (excluding the default '.hg*') are exclude rules, add
     # an initial "**" to provide the default include of everything.
-    if not includes and onlyv1:
+    if not includes and onlyv1 and not nocatchall:
         rules.insert(0, "**")
         ruleorigins.append("sparse.py")
 
@@ -1422,7 +1430,7 @@ def readsparseprofile(repo, rev, name, profileconfigs):
             if profile is not None:
                 for (i, rule) in enumerate(profile.rules):
                     rules.append(rule)
-                    ruleorigins.append(profile.ruleorigin(i))
+                    ruleorigins.append("{} -> {}".format(name, profile.ruleorigin(i)))
                 for subprofile in profile.profiles:
                     profiles.add(subprofile)
         elif kind == "include":
@@ -1590,7 +1598,12 @@ def _discover(ui, repo, rev=None):
             repo.root,
             repo.getcwd(),
             patterns=["path:" + profile_directory],
-            exclude=["relglob:README.*", "relglob:README"],
+            exclude=[
+                "relglob:README.*",
+                "relglob:README",
+                "relglob:.*",
+                "relglob:*.py",
+            ],
         )
         available.update(mf.matches(matcher))
 
@@ -1631,17 +1644,6 @@ def _profilesizeinfo(ui, repo, *config, **kwargs):
     this.
 
     """
-    try:
-        cache = extensions.find("simplecache")
-        cacheget = functools.partial(
-            cache.cacheget, serializer=cache.jsonserializer, ui=ui
-        )
-        cacheset = functools.partial(
-            cache.cacheset, serializer=cache.jsonserializer, ui=ui
-        )
-    except KeyError:
-        cacheget = cacheset = lambda *args: None
-
     collectsize = kwargs.get("collectsize", False)
 
     results = {}
@@ -2158,13 +2160,23 @@ def debugsparseexplainmatch(ui, repo, *args, **opts):
     if "eden" in repo.requirements:
         _wraprepo(ui, repo)
 
+    repo.ui.setconfig("sparse", "warnfullcheckout", None)
+
     ctx = repo["."]
 
     config = None
     profile = opts.get("sparse_profile")
     if profile:
+        if not repo.wvfs.isfile(profile):
+            raise error.Abort(_("no such profile %s") % (profile))
+
         raw = "%%include %s" % profile
-        config = readsparseconfig(repo, raw=raw, filename=profile)
+        config = readsparseconfig(repo, raw=raw, filename="<cli>")
+    elif not repo.localvfs.exists("sparse"):
+        # If there is no implicit sparse config (e.g. non-sparse or
+        # EdenFS working copies), the user must specify a sparse
+        # profile.
+        raise error.Abort(_("--sparse-profile is required"))
 
     m = scmutil.match(ctx, pats=args, opts=opts, default="path")
     files = m.files()
@@ -2176,7 +2188,7 @@ def debugsparseexplainmatch(ui, repo, *args, **opts):
     for f in files:
         explanation = matcher.explain(f)
         if not explanation:
-            ui.write(_("{}: excluded by default".format(f)))
+            ui.write(_("{}: excluded by default\n".format(f)))
         else:
             if "\n" in explanation:
                 ui.write(_("%s:\n  %s\n") % (f, explanation.replace("\n", "\n  ")))
@@ -2334,11 +2346,13 @@ def _listprofiles(ui, repo, *pats, **opts):
     ui.pager("sparse list")
     with ui.formatter("sparse", opts) as fm:
         fm.plain("Available Profiles:\n\n")
+
         load_matcher = lambda p: repo.sparsematch(
-            rev=rev,
+            rev,
             config=readsparseconfig(
                 repo, getrawprofile(repo, p, rev), filename=p, warn=False
             ),
+            nocatchall=True,
         )
 
         predicate = _build_profile_filter(filters, load_matcher)

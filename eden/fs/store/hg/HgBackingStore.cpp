@@ -42,6 +42,7 @@
 #include "eden/fs/telemetry/StructuredLogger.h"
 #include "eden/fs/utils/Bug.h"
 #include "eden/fs/utils/EnumValue.h"
+#include "eden/fs/utils/Throw.h"
 #include "eden/fs/utils/UnboundedQueueExecutor.h"
 
 using folly::Future;
@@ -105,10 +106,12 @@ class HgImporterThreadFactory : public folly::ThreadFactory {
     return delegate_.newThread([this, func = std::move(func)]() mutable {
       threadLocalImporter.reset(new HgImporterManager(repository_, stats_));
       SCOPE_EXIT {
-        // TODO(xavierd): On Windows, the ThreadLocalPtr doesn't appear to
-        // release its resources when the thread dies, so let's do it manually
-        // here.
-        threadLocalImporter.reset();
+        if (folly::kIsWindows) {
+          // TODO(T125334969): On Windows, the ThreadLocalPtr doesn't appear to
+          // release its resources when the thread dies, so let's do it
+          // manually here.
+          threadLocalImporter.reset();
+        }
       };
       func();
     });
@@ -213,7 +216,7 @@ SemiFuture<unique_ptr<Tree>> HgBackingStore::getRootTree(const RootId& rootId) {
   ObjectId commitId = hashFromRootId(rootId);
 
   return localStore_
-      ->getImmediateFuture(KeySpace::HgCommitToTreeFamily, commitId.getBytes())
+      ->getImmediateFuture(KeySpace::HgCommitToTreeFamily, commitId)
       .thenValue(
           [this, commitId](
               StoreResult result) -> folly::SemiFuture<unique_ptr<Tree>> {
@@ -377,11 +380,11 @@ struct ManifestEntry {
     auto namePiece = StringPiece{*start, folly::to_unsigned(nameend - *start)};
 
     if (nameend + kNodeHexLen + 1 >= end) {
-      throw std::domain_error(fmt::format(
+      throwf<std::domain_error>(
           FMT_STRING(
               "invalid manifest entry for {}: 40-bytes hash is too short: only {}-bytes available"),
           namePiece,
-          nameend - end));
+          nameend - end);
     }
 
     auto node = Hash20(StringPiece{nameend + 1, kNodeHexLen});
@@ -493,7 +496,7 @@ folly::Future<folly::Unit> HgBackingStore::importTreeManifestForRoot(
     const Hash20& manifestId) {
   auto commitId = hashFromRootId(rootId);
   return localStore_
-      ->getImmediateFuture(KeySpace::HgCommitToTreeFamily, commitId.getBytes())
+      ->getImmediateFuture(KeySpace::HgCommitToTreeFamily, commitId)
       .semi()
       .via(&folly::QueuedImmediateExecutor::instance())
       .thenValue(

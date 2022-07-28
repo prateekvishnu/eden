@@ -12,12 +12,10 @@
 
 from __future__ import absolute_import
 
-import contextlib
 import copy
 import errno
 import os
 import socket
-import sys
 import time
 import warnings
 
@@ -168,7 +166,7 @@ def trylock(ui, vfs, lockname, timeout, warntimeout=None, *args, **kwargs):
         ui=ui,
         warnattemptidx=warningidx,
         debugattemptidx=debugidx,
-        **kwargs
+        **kwargs,
     )
 
     if l.delay:

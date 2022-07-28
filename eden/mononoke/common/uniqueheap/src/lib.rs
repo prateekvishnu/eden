@@ -5,7 +5,8 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::BinaryHeap;
+use std::collections::HashSet;
 use std::hash::Hash;
 
 #[derive(Clone, Debug)]
@@ -31,7 +32,7 @@ where
     pub fn push(&mut self, val: T) {
         if !self.unique_vals.contains(&val) {
             self.unique_vals.insert(val.clone());
-            self.sorted_vals.push(val.clone());
+            self.sorted_vals.push(val);
         }
     }
 

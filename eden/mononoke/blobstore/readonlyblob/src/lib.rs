@@ -7,9 +7,12 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use blobstore::{
-    Blobstore, BlobstoreGetData, BlobstoreIsPresent, BlobstorePutOps, OverwriteStatus, PutBehaviour,
-};
+use blobstore::Blobstore;
+use blobstore::BlobstoreGetData;
+use blobstore::BlobstoreIsPresent;
+use blobstore::BlobstorePutOps;
+use blobstore::OverwriteStatus;
+use blobstore::PutBehaviour;
 use context::CoreContext;
 use mononoke_types::BlobstoreBytes;
 mod errors;
@@ -109,7 +112,7 @@ mod test {
                 BlobstoreBytes::from_bytes("test foobar"),
             )
             .await;
-        assert!(!r.is_ok());
+        assert!(r.is_err());
         let base_present = base
             .is_present(ctx, key)
             .await
@@ -133,7 +136,7 @@ mod test {
                 BlobstoreBytes::from_bytes("test foobar"),
             )
             .await;
-        assert!(!r.is_ok());
+        assert!(r.is_err());
         let base_present = base
             .is_present(ctx, key)
             .await

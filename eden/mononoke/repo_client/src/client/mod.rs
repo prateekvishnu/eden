@@ -7,84 +7,149 @@
 
 use crate::errors::ErrorKind;
 
-use unbundle::{
-    run_hooks, run_post_resolve_action, BundleResolverError, CrossRepoPushSource, PushRedirector,
-    PushRedirectorArgs,
-};
+use unbundle::run_hooks;
+use unbundle::run_post_resolve_action;
+use unbundle::BundleResolverError;
+use unbundle::CrossRepoPushSource;
+use unbundle::PushRedirector;
+use unbundle::PushRedirectorArgs;
 
-use anyhow::{format_err, Context, Error, Result};
-use blobrepo::{AsBlobRepo, BlobRepo};
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
+use blobrepo::AsBlobRepo;
+use blobrepo::BlobRepo;
 use blobrepo_hg::BlobRepoHg;
 use blobstore::Loadable;
-use bookmarks::{Bookmark, BookmarkName, BookmarkPrefix};
+use bookmarks::Bookmark;
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkPrefix;
 use bookmarks_types::BookmarkKind;
 use bytes::Bytes;
-use bytes_old::{BufMut as BufMutOld, Bytes as BytesOld, BytesMut as BytesMutOld};
+use bytes_old::BufMut as BufMutOld;
+use bytes_old::Bytes as BytesOld;
+use bytes_old::BytesMut as BytesMutOld;
 use cloned::cloned;
-use context::{CoreContext, LoggingContainer, PerfCounterType, PerfCounters, SessionContainer};
+use context::CoreContext;
+use context::LoggingContainer;
+use context::PerfCounterType;
+use context::PerfCounters;
+use context::SessionContainer;
 use filenodes::FilenodeResult;
-use futures::{
-    channel::oneshot::{self, Sender},
-    compat::{Future01CompatExt, Stream01CompatExt},
-    future::{self, FutureExt, TryFutureExt},
-    stream::{self, FuturesUnordered, StreamExt, TryStreamExt},
-};
-use futures_01_ext::{
-    try_boxstream, BoxFuture, BoxStream, FutureExt as OldFutureExt, StreamExt as OldStreamExt,
-};
+use futures::channel::oneshot;
+use futures::channel::oneshot::Sender;
+use futures::compat::Future01CompatExt;
+use futures::compat::Stream01CompatExt;
+use futures::future;
+use futures::future::FutureExt;
+use futures::future::TryFutureExt;
+use futures::stream;
+use futures::stream::FuturesUnordered;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use futures_01_ext::try_boxstream;
+use futures_01_ext::BoxFuture;
+use futures_01_ext::BoxStream;
+use futures_01_ext::FutureExt as OldFutureExt;
+use futures_01_ext::StreamExt as OldStreamExt;
 use futures_ext::stream::FbTryStreamExt;
-use futures_ext::{BufferedParams, FbFutureExt, FbStreamExt, FbTryFutureExt};
+use futures_ext::BufferedParams;
+use futures_ext::FbFutureExt;
+use futures_ext::FbStreamExt;
+use futures_ext::FbTryFutureExt;
+use futures_old::future as future_old;
 use futures_old::future::ok;
-use futures_old::{
-    future as future_old, stream as stream_old, try_ready, Async, Future, IntoFuture, Poll, Stream,
-};
-use futures_stats::{TimedFutureExt, TimedStreamExt};
-use getbundle_response::{
-    create_getbundle_response, DraftsInBundlesPolicy, PhasesPart, SessionLfsParams,
-};
-use hgproto::{GetbundleArgs, GettreepackArgs, HgCommandRes, HgCommands};
+use futures_old::stream as stream_old;
+use futures_old::try_ready;
+use futures_old::Async;
+use futures_old::Future;
+use futures_old::IntoFuture;
+use futures_old::Poll;
+use futures_old::Stream;
+use futures_stats::TimedFutureExt;
+use futures_stats::TimedStreamExt;
+use getbundle_response::create_getbundle_response;
+use getbundle_response::DraftsInBundlesPolicy;
+use getbundle_response::PhasesPart;
+use getbundle_response::SessionLfsParams;
+use hgproto::GetbundleArgs;
+use hgproto::GettreepackArgs;
+use hgproto::HgCommandRes;
+use hgproto::HgCommands;
 use hostname::get_hostname;
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use manifest::{Diff, Entry, ManifestOps};
+use manifest::Diff;
+use manifest::Entry;
+use manifest::ManifestOps;
 use maplit::hashmap;
-use mercurial_bundles::{create_bundle_stream, parts, wirepack, Bundle2Item};
+use mercurial_bundles::create_bundle_stream;
+use mercurial_bundles::parts;
+use mercurial_bundles::wirepack;
+use mercurial_bundles::Bundle2Item;
 use mercurial_derived_data::DeriveHgChangeset;
-use mercurial_revlog::{self, RevlogChangeset};
-use mercurial_types::{
-    blobs::HgBlobChangeset, calculate_hg_node_id, convert_parents_to_remotefilelog_format,
-    fetch_manifest_envelope, percent_encode, Delta, HgChangesetId, HgChangesetIdPrefix,
-    HgChangesetIdsResolvedFromPrefix, HgFileNodeId, HgManifestId, HgNodeHash, HgParents, MPath,
-    RepoPath, NULL_CSID, NULL_HASH,
-};
+use mercurial_revlog::RevlogChangeset;
+use mercurial_types::blobs::HgBlobChangeset;
+use mercurial_types::calculate_hg_node_id;
+use mercurial_types::convert_parents_to_remotefilelog_format;
+use mercurial_types::fetch_manifest_envelope;
+use mercurial_types::percent_encode;
+use mercurial_types::Delta;
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgChangesetIdPrefix;
+use mercurial_types::HgChangesetIdsResolvedFromPrefix;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::HgManifestId;
+use mercurial_types::HgNodeHash;
+use mercurial_types::HgParents;
+use mercurial_types::MPath;
+use mercurial_types::RepoPath;
+use mercurial_types::NULL_CSID;
+use mercurial_types::NULL_HASH;
 use metaconfig_types::RepoClientKnobs;
-use mononoke_repo::{MononokeRepo, SqlStreamingCloneConfig};
-use mononoke_types::{hash::GitSha1, ChangesetId};
+use metaconfig_types::RepoConfigRef;
+use mononoke_api::Repo;
+use mononoke_types::hash::GitSha1;
+use mononoke_types::ChangesetId;
 use nonzero_ext::nonzero;
 use phases::PhasesArc;
-use rand::{self, Rng};
+use rand::Rng;
 use rate_limiting::Metric;
+use reachabilityindex::LeastCommonAncestorsHint;
 use regex::Regex;
-use remotefilelog::{
-    create_getpack_v1_blob, create_getpack_v2_blob, get_unordered_file_history_for_multiple_nodes,
-    GetpackBlobInfo,
-};
+use remotefilelog::create_getpack_v1_blob;
+use remotefilelog::create_getpack_v2_blob;
+use remotefilelog::get_unordered_file_history_for_multiple_nodes;
+use remotefilelog::GetpackBlobInfo;
+use repo_identity::RepoIdentityRef;
 use revisionstore_types::Metadata;
 use serde::Deserialize;
-use serde_json::{self, json};
-use slog::{debug, error, info, o};
+use serde_json::json;
+use skiplist::SkiplistIndexArc;
+use slog::debug;
+use slog::error;
+use slog::info;
+use slog::o;
 use stats::prelude::*;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::hash_map::DefaultHasher;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt::Write;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::mem;
 use std::num::NonZeroU64;
 use std::str::FromStr;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
-use std::time::{Duration, Instant};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 use streaming_clone::RevlogStreamingChunks;
+use streaming_clone::StreamingCloneArc;
 use time_ext::DurationExt;
 use tunables::tunables;
 
@@ -93,10 +158,11 @@ mod monitor;
 mod session_bookmarks_cache;
 mod tests;
 
-use logging::{
-    debug_format_manifest, debug_format_path, log_getpack_params_verbose,
-    log_gettreepack_params_verbose, CommandLogger,
-};
+use logging::debug_format_manifest;
+use logging::debug_format_path;
+use logging::log_getpack_params_verbose;
+use logging::log_gettreepack_params_verbose;
+use logging::CommandLogger;
 use monitor::Monitor;
 use session_bookmarks_cache::SessionBookmarkCache;
 
@@ -381,14 +447,12 @@ impl UndesiredPathLogger {
 
 #[derive(Clone)]
 pub struct RepoClient {
-    repo: MononokeRepo,
+    repo: Arc<Repo>,
     // The session for this repo access.
     session: SessionContainer,
     // A base logging container. This will be combined with the Session container for each command
     // to produce a CoreContext.
     logging: LoggingContainer,
-    // Whether to save raw bundle2 content into the blobstore
-    preserve_raw_bundle2: bool,
     // There is a race condition in bookmarks handling in Mercurial, which needs protocol-level
     // fixes. See `test-bookmark-race.t` for a reproducer; the issue is that between discovery
     // and bookmark handling (listkeys), we can get new commits and a bookmark change.
@@ -408,10 +472,9 @@ pub struct RepoClient {
 
 impl RepoClient {
     pub fn new(
-        repo: MononokeRepo,
+        repo: Arc<Repo>,
         session: SessionContainer,
         logging: LoggingContainer,
-        preserve_raw_bundle2: bool,
         maybe_push_redirector_args: Option<PushRedirectorArgs>,
         knobs: RepoClientKnobs,
         maybe_backup_repo_source: Option<BlobRepo>,
@@ -422,7 +485,6 @@ impl RepoClient {
             repo,
             session,
             logging,
-            preserve_raw_bundle2,
             session_bookmarks_cache,
             maybe_push_redirector_args,
             force_lfs: Arc::new(AtomicBool::new(false)),
@@ -524,8 +586,8 @@ impl RepoClient {
 
     fn create_bundle(&self, ctx: CoreContext, args: GetbundleArgs) -> BoxStream<BytesOld, Error> {
         let lfs_params = self.lfs_params();
-        let blobrepo = self.repo.blobrepo().clone();
-        let reponame = self.repo.reponame().clone();
+        let blobrepo = self.repo.blob_repo().clone();
+        let reponame = self.repo.inner_repo().repo_identity().name().to_string();
         let mut bundle2_parts = vec![];
 
         let GetbundleArgs {
@@ -551,9 +613,15 @@ impl RepoClient {
             }
         }
         let pull_default_bookmarks = self.get_pull_default_bookmarks_maybe_stale(ctx.clone());
-        let lca_hint = self.repo.lca_hint().clone();
+        let lca_hint: Arc<dyn LeastCommonAncestorsHint> =
+            self.repo.inner_repo().skiplist_index_arc();
 
-        let drafts_in_bundles_policy = if self.repo.infinitepush().hydrate_getbundle_response
+        let drafts_in_bundles_policy = if self
+            .repo
+            .inner_repo()
+            .repo_config()
+            .infinitepush
+            .hydrate_getbundle_response
             && !self.unhydrated_commits_requested()
         {
             DraftsInBundlesPolicy::WithTreesAndFiles
@@ -590,7 +658,7 @@ impl RepoClient {
             // (note: just calling &b"bookmarks"[..] doesn't work because https://fburl.com/0p0sq6kp)
             if listkeys.contains(&b"bookmarks".to_vec()) {
                 let items = pull_default_bookmarks
-                    .map(|bookmarks| stream_old::iter_ok(bookmarks))
+                    .map(stream_old::iter_ok)
                     .flatten_stream();
                 bundle2_parts.push(parts::listkey_part("bookmarks", items)?);
             }
@@ -612,16 +680,16 @@ impl RepoClient {
         let validate_hash = ((rand::random::<usize>() % 100) as i64) < hash_validation_percentage;
 
         let undesired_path_logger =
-            try_boxstream!(UndesiredPathLogger::new(ctx.clone(), self.repo.blobrepo()));
+            try_boxstream!(UndesiredPathLogger::new(ctx.clone(), self.repo.blob_repo()));
 
-        let changed_entries = gettreepack_entries(ctx.clone(), self.repo.blobrepo(), params)
+        let changed_entries = gettreepack_entries(ctx.clone(), self.repo.blob_repo(), params)
             .filter({
                 let mut used_hashes = HashSet::new();
                 move |(hg_mf_id, _)| used_hashes.insert(hg_mf_id.clone())
             })
             .map({
                 cloned!(ctx);
-                let blobrepo = self.repo.blobrepo().clone();
+                let blobrepo = self.repo.blob_repo().clone();
                 move |(hg_mf_id, path)| {
                     undesired_path_logger.maybe_log_tree(path.as_ref());
 
@@ -665,12 +733,12 @@ impl RepoClient {
         let allow_short_getpack_history = self.knobs.allow_short_getpack_history;
         self.command_stream(name, UNSAMPLED, |ctx, command_logger| {
             let undesired_path_logger =
-                try_boxstream!(UndesiredPathLogger::new(ctx.clone(), self.repo.blobrepo()));
+                try_boxstream!(UndesiredPathLogger::new(ctx.clone(), self.repo.blob_repo()));
             let undesired_path_logger = Arc::new(undesired_path_logger);
             // We buffer all parameters in memory so that we can log them.
             // That shouldn't be a problem because requests are quite small
             let getpack_params = Arc::new(Mutex::new(vec![]));
-            let repo = self.repo.blobrepo().clone();
+            let repo = self.repo.blob_repo().clone();
 
             let lfs_params = self.lfs_params();
 
@@ -911,10 +979,33 @@ impl RepoClient {
 
     fn lfs_params(&self) -> SessionLfsParams {
         if self.force_lfs.load(Ordering::Relaxed) {
-            self.repo.force_lfs_if_threshold_set()
+            SessionLfsParams {
+                threshold: self.repo.inner_repo().repo_config().lfs.threshold,
+            }
         } else {
-            self.repo
-                .lfs_params(self.session.metadata().client_hostname().as_deref())
+            let client_hostname = self.session.metadata().client_hostname();
+            let percentage = self.repo.inner_repo().repo_config().lfs.rollout_percentage;
+
+            let allowed = match client_hostname {
+                Some(client_hostname) => {
+                    let mut hasher = DefaultHasher::new();
+                    client_hostname.hash(&mut hasher);
+                    hasher.finish() % 100 < percentage.into()
+                }
+                None => {
+                    // Randomize in case source hostname is not set to avoid
+                    // sudden jumps in traffic
+                    rand::thread_rng().gen_ratio(percentage, 100)
+                }
+            };
+
+            if allowed {
+                SessionLfsParams {
+                    threshold: self.repo.inner_repo().repo_config().lfs.threshold,
+                }
+            } else {
+                SessionLfsParams { threshold: None }
+            }
         }
     }
 
@@ -942,7 +1033,7 @@ impl RepoClient {
 
         let live_commit_sync_config = self.repo.live_commit_sync_config();
 
-        let repo_id = self.repo.blobrepo().get_repoid();
+        let repo_id = self.repo.blob_repo().get_repoid();
         let redirect = match action {
             InfinitePush(_) => live_commit_sync_config.push_redirector_enabled_for_draft(repo_id),
             Push(_) | PushRebase(_) | BookmarkOnlyPushRebase(_) => {
@@ -982,7 +1073,7 @@ impl RepoClient {
         Fut: future::Future<Output = Result<Vec<bool>, Error>> + Send + 'static,
     {
         self.command_future(command, UNSAMPLED, |ctx, mut command_logger| {
-            let blobrepo = self.repo.blobrepo().clone();
+            let blobrepo = self.repo.blob_repo().clone();
 
             let nodes_len = nodes.len();
             ctx.perf_counters()
@@ -1070,7 +1161,7 @@ impl HgCommands for RepoClient {
     ) -> HgCommandRes<Vec<Vec<HgChangesetId>>> {
         struct ParentStream<CS> {
             ctx: CoreContext,
-            repo: MononokeRepo,
+            repo: Arc<Repo>,
             n: HgChangesetId,
             bottom: HgChangesetId,
             wait_cs: Option<CS>,
@@ -1079,7 +1170,7 @@ impl HgCommands for RepoClient {
         impl<CS> ParentStream<CS> {
             fn new(
                 ctx: CoreContext,
-                repo: &MononokeRepo,
+                repo: &Arc<Repo>,
                 top: HgChangesetId,
                 bottom: HgChangesetId,
             ) -> Self {
@@ -1106,7 +1197,7 @@ impl HgCommands for RepoClient {
                     Some(
                         {
                             cloned!(self.n, self.ctx, self.repo);
-                            async move { n.load(&ctx, repo.blobrepo().blobstore()).await }
+                            async move { n.load(&ctx, repo.blob_repo().blobstore()).await }
                         }
                         .boxed()
                         .compat()
@@ -1278,7 +1369,7 @@ impl HgCommands for RepoClient {
 
         let maybe_git_lookup = parse_git_lookup(&key);
         self.command_future(ops::LOOKUP, UNSAMPLED, |ctx, command_logger| {
-            let repo = self.repo.blobrepo().clone();
+            let repo = self.repo.blob_repo().clone();
 
             // Resolves changeset or set of suggestions from the key (full hex hash or a prefix) if exist.
             // Note: `get_many_hg_by_prefix` works for the full hex hashes well but
@@ -1410,7 +1501,7 @@ impl HgCommands for RepoClient {
 
     // @wireprotocommand('known', 'nodes *'), but the '*' is ignored
     fn known(&self, nodes: Vec<HgChangesetId>) -> HgCommandRes<Vec<bool>> {
-        let phases_hint = self.repo.blobrepo().phases_arc();
+        let phases_hint = self.repo.inner_repo().phases_arc();
         self.known_impl(
             nodes,
             ops::KNOWN,
@@ -1463,7 +1554,7 @@ impl HgCommands for RepoClient {
     fn getbundle(&self, args: GetbundleArgs) -> BoxStream<BytesOld, Error> {
         self.command_stream(ops::GETBUNDLE, UNSAMPLED, |ctx, command_logger| {
             let s = self
-                .create_bundle(ctx.clone(), args)
+                .create_bundle(ctx, args)
                 .compat()
                 .whole_stream_timeout(getbundle_timeout())
                 .yield_periodically()
@@ -1546,13 +1637,13 @@ impl HgCommands for RepoClient {
         }
 
         self.command_future(ops::LISTKEYSPATTERNS, UNSAMPLED, |ctx, command_logger| {
-            let max = self.repo.list_keys_patterns_max();
+            let max = self.repo.inner_repo().repo_config().list_keys_patterns_max;
             let session_bookmarks_cache = self.session_bookmarks_cache.clone();
 
             let queries = patterns.into_iter().map(move |pattern| {
                 cloned!(ctx, session_bookmarks_cache);
                 async move {
-                    if pattern.ends_with("*") {
+                    if pattern.ends_with('*') {
                         // prefix match
                         let prefix = BookmarkPrefix::new(&pattern[..pattern.len() - 1])?;
 
@@ -1607,14 +1698,13 @@ impl HgCommands for RepoClient {
         &self,
         _heads: Vec<String>,
         stream: BoxStream<Bundle2Item<'static>, Error>,
-        maybe_full_content: Option<Arc<Mutex<BytesOld>>>,
         respondlightly: Option<bool>,
         maybereplaydata: Option<String>,
     ) -> HgCommandRes<BytesOld> {
-        let reponame = self.repo.reponame().clone();
+        let reponame = self.repo.inner_repo().repo_identity().name().to_string();
         cloned!(self.session_bookmarks_cache, self as repoclient);
 
-        let hook_manager = self.repo.hook_manager();
+        let hook_manager = self.repo.hook_manager().clone();
 
         // Kill the saved set of bookmarks here - the unbundle may change them, and the next
         // command in sequence will need to fetch a new set
@@ -1627,14 +1717,13 @@ impl HgCommands for RepoClient {
             .command_future(ops::UNBUNDLE, UNSAMPLED, move |ctx, command_logger| {
                 async move {
                     let repo = client.repo.inner_repo();
-                    let bookmark_attrs = client.repo.bookmark_attrs();
-                    let lca_hint = client.repo.lca_hint().clone();
-                    let infinitepush_params = client.repo.infinitepush().clone();
+                    let lca_hint: Arc<dyn LeastCommonAncestorsHint> = repo.skiplist_index_arc();
+                    let infinitepush_params = repo.repo_config().infinitepush.clone();
                     let infinitepush_writes_allowed = infinitepush_params.allow_writes;
-                    let pushrebase_params = client.repo.pushrebase_params().clone();
-                    let push_params = client.repo.push_params().clone();
+                    let pushrebase_params = repo.repo_config().pushrebase.clone();
+                    let push_params = repo.repo_config().push.clone();
                     let pure_push_allowed = push_params.pure_push_allowed;
-                    let reponame = client.repo.reponame().clone();
+                    let reponame = repo.repo_identity().name().to_string();
                     let maybe_backup_repo_source = client.maybe_backup_repo_source.clone();
 
                     let pushrebase_flags = pushrebase_params.flags.clone();
@@ -1643,7 +1732,6 @@ impl HgCommands for RepoClient {
                         repo.as_blob_repo(),
                         infinitepush_writes_allowed,
                         stream.compat().boxed(),
-                        maybe_full_content,
                         pure_push_allowed,
                         pushrebase_flags,
                         maybe_backup_repo_source,
@@ -1672,10 +1760,12 @@ impl HgCommands for RepoClient {
                                 let ctx = ctx.with_mutated_scuba(|mut sample| {
                                     sample.add(
                                         "target_repo_name",
-                                        push_redirector.repo.reponame().as_ref(),
+                                        push_redirector.repo.inner_repo().repo_identity().name(),
                                     );
-                                    sample
-                                        .add("target_repo_id", push_redirector.repo.repoid().id());
+                                    sample.add(
+                                        "target_repo_id",
+                                        push_redirector.repo.inner_repo().repo_identity().id().id(),
+                                    );
                                     sample
                                 });
                                 ctx.scuba()
@@ -1686,17 +1776,14 @@ impl HgCommands for RepoClient {
                                     .await?
                             }
                             None => {
-                                let readonly_fetcher = client.repo.readonly_fetcher();
                                 run_post_resolve_action(
                                     &ctx,
                                     repo,
-                                    &bookmark_attrs,
                                     &lca_hint,
                                     &infinitepush_params,
                                     &pushrebase_params,
                                     &push_params,
                                     hook_manager.as_ref(),
-                                    readonly_fetcher,
                                     action,
                                     CrossRepoPushSource::NativeToThisRepo,
                                 )
@@ -1863,24 +1950,13 @@ impl HgCommands for RepoClient {
     // @wireprotocommand('stream_out_shallow')
     fn stream_out_shallow(&self, tag: Option<String>) -> BoxStream<BytesOld, Error> {
         self.command_stream(ops::STREAMOUTSHALLOW, UNSAMPLED, |ctx, command_logger| {
-            let streaming_clone = self.repo.streaming_clone().clone();
+            let streaming_clone = self.repo.inner_repo().streaming_clone_arc();
 
             let stream = {
                 cloned!(ctx);
                 async move {
-                    let SqlStreamingCloneConfig {
-                        blobstore,
-                        fetcher,
-                        repoid,
-                    } = streaming_clone;
-
-                    let changelog = fetcher
-                        .fetch_changelog(
-                            ctx.clone(),
-                            repoid,
-                            tag.as_ref().map(|s| s.as_str()),
-                            blobstore.clone(),
-                        )
+                    let changelog = streaming_clone
+                        .fetch_changelog(ctx.clone(), tag.as_deref())
                         .await?;
 
                     let data_blobs = changelog
@@ -2038,7 +2114,7 @@ impl HgCommands for RepoClient {
     fn getcommitdata(&self, nodes: Vec<HgChangesetId>) -> BoxStream<BytesOld, Error> {
         self.command_stream(ops::GETCOMMITDATA, UNSAMPLED, |ctx, mut command_logger| {
             let args = json!(nodes);
-            let blobrepo = self.repo.blobrepo().clone();
+            let blobrepo = self.repo.blob_repo().clone();
             ctx.scuba()
                 .clone()
                 .add("getcommitdata_nodes", nodes.len())
@@ -2092,11 +2168,6 @@ impl HgCommands for RepoClient {
                 move || s,
             )
         })
-    }
-
-    // whether raw bundle2 contents should be preverved in the blobstore
-    fn should_preserve_raw_bundle2(&self) -> bool {
-        self.preserve_raw_bundle2
     }
 }
 
@@ -2172,7 +2243,7 @@ pub fn gettreepack_entries(
     stream_old::iter_ok::<_, Error>(
         mfnodes
             .into_iter()
-            .filter(move |node| !basemfnodes.contains(&node))
+            .filter(move |node| !basemfnodes.contains(node))
             .map(move |mfnode| {
                 let cur_basemfnode = basemfnode.unwrap_or(HgManifestId::new(NULL_HASH));
                 // `basemfnode`s are used to reduce the data we send the client by having us prune
@@ -2344,7 +2415,7 @@ fn validate_manifest_content(
     path: &RepoPath,
     parents: &HgParents,
 ) -> Result<(), Error> {
-    let expected = calculate_hg_node_id(&content, &parents);
+    let expected = calculate_hg_node_id(content, parents);
 
     // Do not do verification for a root node because it might be broken
     // because of migration to tree manifest.
@@ -2606,7 +2677,7 @@ async fn maybe_validate_pushed_bonsais(
             .collect::<HashMap<_, _>>();
 
         for (hg_cs_id, bcs_id) in chunk {
-            match actual_entries.get(&hg_cs_id) {
+            match actual_entries.get(hg_cs_id) {
                 Some(actual_bcs_id) => {
                     if actual_bcs_id != bcs_id {
                         return Err(format_err!(

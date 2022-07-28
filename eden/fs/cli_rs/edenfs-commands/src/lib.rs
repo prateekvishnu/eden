@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use anyhow::Context;
 use async_trait::async_trait;
 use clap::Parser;
-use tracing::{event, Level};
+use tracing::event;
+use tracing::Level;
 
 use edenfs_client::EdenFsInstance;
 use edenfs_error::Result;
@@ -23,6 +24,8 @@ mod gc;
 mod list;
 mod minitop;
 mod pid;
+mod prefetch_profile;
+mod redirect;
 mod status;
 mod top;
 mod uptime;
@@ -87,6 +90,10 @@ pub enum TopLevelSubcommand {
     Minitop(crate::minitop::MinitopCmd),
     Du(crate::du::DiskUsageCmd),
     List(crate::list::ListCmd),
+    #[clap(subcommand, alias = "pp")]
+    PrefetchProfile(crate::prefetch_profile::PrefetchCmd),
+    // #[clap(subcommand, alias = "redir")]
+    // Redirect(crate::redirect::RedirectCmd),
 }
 
 #[async_trait]
@@ -104,6 +111,8 @@ impl Subcommand for TopLevelSubcommand {
             Minitop(cmd) => cmd,
             Du(cmd) => cmd,
             List(cmd) => cmd,
+            PrefetchProfile(cmd) => cmd,
+            // Redirect(cmd) => cmd,
         };
         sc.run(instance).await
     }

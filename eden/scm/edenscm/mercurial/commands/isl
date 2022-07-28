@@ -1,0 +1,47 @@
+#!/usr/bin/env dotslash
+
+// @generated SignedSource<<8b86620468d7cc69ed1766730043a0d6>>
+// MSDK schedule URL: https://our.intern.facebook.com/intern/msdk/bump/?action=view&schedule_fbid=413790530659489
+// sandcastle build trigger URL: https://our.intern.facebook.com/intern/sandcastle/job/36028797753114419/
+
+{
+    "name": "isl",
+    "oncall": "oncall+eden_oss@xmail.facebook.com",
+    "build_info": {
+        "config_script": "xplat/scm/oss-smartlog/release/dotslash_build.spec",
+        "commit_repo": "fbsource",
+        "commit_hash": "8b7279373ff7dfdc2471309c71b1811790d96d2a",
+        "commit_date": "2022-07-26 08:04:02 PDT",
+        "commit_timestamp": 1658847842,
+        "msdk_package_fbid": "1438440656670151"
+    },
+    "signatures": {
+        "msdk": "<<crypto.managed_sdk.mac:AeUu3N9UAN4EbjMHtCIKFZOi6dZhkjJipHrpldPzyYQZIrqP>>"
+    },
+    "platforms": {
+        "linux": {
+            "scheme": "everstore",
+            "handle": "GDEApxEG1sYH6KkBAIwzy6mx8pJ8blMqAAAA",
+            "extract": {
+                "path": "isl",
+                "decompress": "tar.gz"
+            }
+        },
+        "macos": {
+            "scheme": "everstore",
+            "handle": "GDEApxEG1sYH6KkBAIwzy6mx8pJ8blMqAAAA",
+            "extract": {
+                "path": "isl",
+                "decompress": "tar.gz"
+            }
+        },
+        "windows": {
+            "scheme": "everstore",
+            "handle": "GDEApxEG1sYH6KkBAIwzy6mx8pJ8blMqAAAA",
+            "extract": {
+                "path": "isl.bat",
+                "decompress": "tar.gz"
+            }
+        }
+    }
+}

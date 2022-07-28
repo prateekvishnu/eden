@@ -9,6 +9,7 @@ mononoke_app::subcommands! {
     mod blobstore;
     mod blobstore_unlink;
     mod bookmarks;
+    mod changelog;
     mod commit;
     mod convert;
     mod fetch;
@@ -21,4 +22,5 @@ mononoke_app::subcommands! {
     mod skiplist;
     mod ephemeral_store;
     mod dump_changesets;
+    mod async_requests;
 }

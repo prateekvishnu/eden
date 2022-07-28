@@ -29,7 +29,6 @@ from . import (
     branchmap,
     bundle2,
     changegroup,
-    changelog,
     changelog2,
     color,
     connectionpool,
@@ -37,8 +36,7 @@ from . import (
     dirstate,
     dirstateguard,
     discovery,
-    eagerpeer,
-    edenapi,
+    eagerepo,
     edenfs,
     encoding,
     error as errormod,
@@ -54,15 +52,12 @@ from . import (
     mergeutil,
     mutation,
     namespaces,
-    obsolete,
     pathutil,
     peer,
     phases,
-    progress,
     pushkey,
     pycompat,
     repository,
-    revlog,
     revset,
     revsetlang,
     scmutil,
@@ -70,14 +65,12 @@ from . import (
     store,
     transaction,
     treestate,
-    txnutil,
-    uiconfig,
     util,
     vfs as vfsmod,
     visibility,
 )
 from .i18n import _, _n
-from .node import bin, hex, nullhex, nullid, short
+from .node import bin, hex, nullhex, nullid
 from .pycompat import range
 
 
@@ -367,6 +360,9 @@ class localrepository(object):
         # commit graph is truncated for emergency use-case. The first commit
         # has wrong parents.
         "emergencychangelog",
+        # backed by Rust eagerepo::EagerRepo. Mainly used in tests or
+        # fully local repos.
+        eagerepo.EAGEREPO_REQUIREMENT,
     }
     openerreqs = {"revlogv1", "generaldelta", "treemanifest"}
 
@@ -408,7 +404,7 @@ class localrepository(object):
 
     def __init__(self, baseui, path, create=False):
         if create and baseui.configbool("init", "use-rust"):
-            bindings.repo.repo.initialize(path, baseui._rcfg._rcfg)
+            bindings.repo.repo.initialize(path, baseui._rcfg)
             create = False
         self._containscount = 0
         self.requirements = set()
@@ -471,7 +467,7 @@ class localrepository(object):
         self.ui.reloadconfigs(self.root)
 
         # Setting the inner Rust repo should only be done when the filesystem actually exists
-        self._rsrepo = bindings.repo.repo(self.root, self.ui._rcfg._rcfg)
+        self._rsrepo = bindings.repo.repo(self.root, self.ui._rcfg)
 
         self._loadextensions()
 
@@ -826,8 +822,10 @@ class localrepository(object):
             # through transaction, which does not silent errors.
             try:
                 self.changelog.inner.flushcommitdata()
-            except Exception:
-                pass
+            except Exception as e:
+                self.ui.log(
+                    "features", feature="cannot-flush-commitdata", message=str(e)
+                )
 
     def _loadextensions(self):
         extensions.loadall(self.ui)
@@ -924,6 +922,7 @@ class localrepository(object):
                 )
             yield bin(hgids[0])
 
+    @util.timefunction("pull", 0, "ui")
     def pull(
         self, source="default", bookmarknames=(), headnodes=(), headnames=(), quiet=True
     ):
@@ -1086,7 +1085,7 @@ class localrepository(object):
                 heads.add(node)
 
             fastpathheads = set()
-            fastpathcommits, fastpathsegments = 0, 0
+            fastpathcommits, fastpathsegments, fastpathfallbacks = 0, 0, 0
             for (old, new) in fastpath:
                 try:
                     fastpulldata = self.edenapi.pullfastforwardmaster(old, new)
@@ -1095,6 +1094,7 @@ class localrepository(object):
                         _("failed to get fast pull data (%s), using fallback path\n")
                         % (e,)
                     )
+                    fastpathfallbacks += 1
                     continue
                 vertexopts = {
                     "reserve_size": 0,
@@ -1120,6 +1120,7 @@ class localrepository(object):
                     fastpathcommits += commits
                     fastpathsegments += segments
                 except errormod.NeedSlowPathError as e:
+                    fastpathfallbacks += 1
                     tracing.warn(
                         "cannot use pull fast path: %s\n" % e, target="pull::fastpath"
                     )
@@ -1132,6 +1133,7 @@ class localrepository(object):
                 slowpathheads=len(pullheads),
                 fastpathcommits=fastpathcommits,
                 fastpathsegments=fastpathsegments,
+                fastpathfallbacks=fastpathfallbacks,
             )
 
             # Filter out heads that exist in the repo.
@@ -1216,41 +1218,12 @@ class localrepository(object):
 
     @storecache("00changelog.i", "visibleheads", "remotenames")
     def changelog(self):
-        def loadchangelog(self):
-            # Remove left-over ".tmp" files created by Rust revlogindex,
-            # or by the truncation logic on 00changelog.i.
-            names = [
-                n
-                for n in self.svfs.listdir("")
-                if n.startswith(".tmp") or n.startswith("00changelog.i-")
-            ]
-            now = time.time()
-            deleted = 0
-            for name in names:
-                # svfs might escape "." to "~2e". Bypass that using
-                # os.path.join.
-                path = os.path.join(self.svfs.join(""), name)
-                try:
-                    # Avoid deleting files that are being written.
-                    # If we do delete files written by revlogindex, it's
-                    # okay because revlogindex won't error out.
-                    if now - os.stat(path).st_mtime > 10:
-                        util.unlink(path)
-                        deleted += 1
-                except (OSError, IOError):
-                    pass
-            # Log it so we know when to get rid of this bandaid fix.
-            if deleted:
-                self.ui.log("features", feature="remove-svfs-dottmp")
-
-            return _openchangelog(self)
-
         # Trigger loading of the metalog, before loading changelog.
         # This avoids potential races such as metalog refers to
         # unknown commits.
         self.metalog()
 
-        cl = loadchangelog(self)
+        cl = _openchangelog(self)
 
         return cl
 
@@ -1618,6 +1591,8 @@ class localrepository(object):
             f = f[1:]
         if git.isgitstore(self):
             return git.gitfilelog(self)
+        elif eagerepo.iseagerepo(self):
+            return eagerepo.eagerfilelog(self, f)
         return filelog.filelog(self.svfs, f)
 
     def changectx(self, changeid):
@@ -2990,7 +2965,6 @@ class localrepository(object):
         # them by "hg hide".
         publicnodes, _draftnodes = _remotenodes(self)
         cl = self.changelog
-        torev = cl.nodemap.get
         if includepublic:
             nodes += publicnodes
         if includedraft:
@@ -3160,14 +3134,12 @@ class localrepository(object):
         """
         # Migration of visibility, and treestate were moved to __init__ so they
         # run for users not running 'pull'.
-        pass
 
     def automigratefinish(self):
         """perform potentially expensive in-place migrations
 
         Called at the end of pull if pull.automigrate is true
         """
-        pass
 
     @property
     def smallcommitmetadata(self):

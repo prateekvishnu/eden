@@ -7,105 +7,97 @@
 
 //! Arguments for Commit IDs and Commit Identity Schemes
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroU64;
 
-use anyhow::{bail, format_err, Error};
-use clap::{App, Arg, ArgGroup, ArgMatches};
-use faster_hex::{hex_decode, hex_string};
-use futures_util::future::{try_join_all, FutureExt};
-use futures_util::stream::{FuturesOrdered, TryStreamExt};
+use anyhow::format_err;
+use anyhow::Error;
+use clap::Arg;
+use clap::ArgGroup;
+use clap::ArgMatches;
+use clap::Args;
+use faster_hex::hex_decode;
+use faster_hex::hex_string;
+use futures::future::try_join_all;
+use futures::future::FutureExt;
+use futures::stream::FuturesOrdered;
+use futures::stream::TryStreamExt;
 use source_control::types as thrift;
 
 use crate::connection::Connection;
 
-pub(crate) const ARG_SCHEMES: &str = "SCHEMES";
-pub(crate) const ARG_COMMIT_ID: &str = "COMMIT_ID";
-pub(crate) const ARG_BOOKMARK: &str = "BOOKMARK";
-pub(crate) const ARG_HG_COMMIT_ID: &str = "HG_COMMIT_ID";
-pub(crate) const ARG_BONSAI_ID: &str = "BONSAI_ID";
-pub(crate) const ARG_GIT_SHA1: &str = "GIT_SHA1";
-pub(crate) const ARG_GLOBALREV: &str = "GLOBALREV";
-pub(crate) const ARG_SVNREV: &str = "SVNREV";
-pub(crate) const ARG_BUBBLE_ID: &str = "BUBBLE_ID";
-pub(crate) const ARG_SNAPSHOT_ID: &str = "SNAPSHOT_ID";
+pub(crate) const ARG_COMMIT_ID: &str = "commit-id";
+pub(crate) const ARG_BOOKMARK: &str = "bookmark";
+pub(crate) const ARG_HG_COMMIT_ID: &str = "hg-commit-id";
+pub(crate) const ARG_BONSAI_ID: &str = "bonsai-id";
+pub(crate) const ARG_GIT_SHA1: &str = "git-sha1";
+pub(crate) const ARG_GLOBALREV: &str = "globalrev";
+pub(crate) const ARG_SVNREV: &str = "svnrev";
+pub(crate) const ARG_BUBBLE_ID: &str = "bubble-id";
+pub(crate) const ARG_SNAPSHOT_ID: &str = "snapshot-id";
 
-pub(crate) const ARG_GROUP_COMMIT_ID: &str = "GROUP_COMMIT_ID";
-
-/// Add arguments to specify a set of commit identity schemes.
-pub(crate) fn add_scheme_args<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
-    app.arg(
-        Arg::with_name(ARG_SCHEMES)
-            .short("S")
-            .long("schemes")
-            .takes_value(true)
-            .possible_values(&["bonsai", "hg", "git", "globalrev", "svnrev"])
-            .multiple(true)
-            .use_delimiter(true)
-            .number_of_values(1)
-            .help("Commit identity schemes to display")
-            .default_value("hg"),
-    )
+#[derive(
+    strum_macros::EnumString,
+    strum_macros::Display,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash
+)]
+#[strum(serialize_all = "kebab-case")]
+pub(crate) enum Scheme {
+    Bonsai,
+    Hg,
+    Git,
+    Globalrev,
+    Svnrev,
 }
 
-/// Get the schemes specified as a set of scheme names.
-pub(crate) fn get_schemes(matches: &ArgMatches) -> HashSet<String> {
-    matches
-        .values_of(ARG_SCHEMES)
-        .expect("schemes required")
-        .map(|s| s.to_owned())
-        .collect()
+impl Scheme {
+    pub(crate) fn into_thrift(self) -> thrift::CommitIdentityScheme {
+        match self {
+            Self::Hg => thrift::CommitIdentityScheme::HG,
+            Self::Bonsai => thrift::CommitIdentityScheme::BONSAI,
+            Self::Git => thrift::CommitIdentityScheme::GIT,
+            Self::Globalrev => thrift::CommitIdentityScheme::GLOBALREV,
+            Self::Svnrev => thrift::CommitIdentityScheme::SVNREV,
+        }
+    }
 }
 
-/// Get the schemes specified as a set of thrift schemes.
-pub(crate) fn get_request_schemes(matches: &ArgMatches) -> BTreeSet<thrift::CommitIdentityScheme> {
-    matches
-        .values_of(ARG_SCHEMES)
-        .expect("schemes required")
-        .filter_map(|scheme| match scheme {
-            "hg" => Some(thrift::CommitIdentityScheme::HG),
-            "bonsai" => Some(thrift::CommitIdentityScheme::BONSAI),
-            "git" => Some(thrift::CommitIdentityScheme::GIT),
-            "globalrev" => Some(thrift::CommitIdentityScheme::GLOBALREV),
-            "svnrev" => Some(thrift::CommitIdentityScheme::SVNREV),
-            _ => None,
-        })
-        .collect()
+#[derive(Args, Clone)]
+pub(crate) struct SchemeArgs {
+    #[clap(long, short('S'), default_value = "hg", value_delimiter = ',')]
+    /// Commit identity schemes to display
+    schemes: Vec<Scheme>,
 }
 
-/// Map commit IDs to the scheme name and string representation of the commit ID.
-pub(crate) fn map_commit_ids<'a>(
-    ids: impl Iterator<Item = &'a thrift::CommitId>,
-) -> BTreeMap<String, String> {
-    ids.filter_map(map_commit_id).collect()
-}
+impl SchemeArgs {
+    pub(crate) fn into_request_schemes(self) -> BTreeSet<thrift::CommitIdentityScheme> {
+        self.schemes.into_iter().map(Scheme::into_thrift).collect()
+    }
 
-/// Map a commit ID to its scheme name and string representation.
-pub(crate) fn map_commit_id(id: &thrift::CommitId) -> Option<(String, String)> {
-    match id {
-        thrift::CommitId::bonsai(hash) => Some((String::from("bonsai"), hex_string(hash))),
-        thrift::CommitId::hg(hash) => Some((String::from("hg"), hex_string(hash))),
-        thrift::CommitId::git(hash) => Some((String::from("git"), hex_string(hash))),
-        thrift::CommitId::globalrev(rev) => Some((String::from("globalrev"), rev.to_string())),
-        thrift::CommitId::svnrev(rev) => Some((String::from("svnrev"), rev.to_string())),
-        _ => None,
+    pub(crate) fn scheme_string_set(&self) -> HashSet<String> {
+        self.schemes.iter().map(ToString::to_string).collect()
     }
 }
 
 /// Add arguments for specifying commit_ids.
 ///
 /// The user can specify commit_ids by bookmark, hg commit ID, bonsai changeset ID, or
-/// a generic "commit_id", for which we will ry to work out which kind of identifier
+/// a generic "commit_id", for which we will try to work out which kind of identifier
 /// the user has provided.
-fn add_commit_id_args_impl<'a, 'b>(
-    app: App<'a, 'b>,
+fn add_commit_id_args_impl(
+    cmd: clap::Command<'_>,
     required: bool,
     multiple: bool,
-) -> App<'a, 'b> {
-    app.arg(
+) -> clap::Command<'_> {
+    cmd.arg(
         Arg::with_name(ARG_COMMIT_ID)
-            .short("i")
+            .short('i')
             .long("commit-id")
             .takes_value(true)
             .multiple(multiple)
@@ -114,7 +106,7 @@ fn add_commit_id_args_impl<'a, 'b>(
     )
     .arg(
         Arg::with_name(ARG_BOOKMARK)
-            .short("B")
+            .short('B')
             .long("bookmark")
             .takes_value(true)
             .multiple(multiple)
@@ -178,7 +170,7 @@ fn add_commit_id_args_impl<'a, 'b>(
             .help("Bubble id on which to check the bonsai commits"),
     )
     .group(
-        ArgGroup::with_name(ARG_GROUP_COMMIT_ID)
+        ArgGroup::with_name("commit")
             .args(&[
                 ARG_COMMIT_ID,
                 ARG_BOOKMARK,
@@ -194,70 +186,13 @@ fn add_commit_id_args_impl<'a, 'b>(
     )
 }
 
-/// Add arguments for specifying a single commit ID
-pub(crate) fn add_commit_id_args<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
-    add_commit_id_args_impl(app, true, false)
-}
-
-/// Add arguments for specifying an optional single commit ID
-pub(crate) fn add_optional_commit_id_args<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
-    add_commit_id_args_impl(app, false, false)
-}
-
-/// Add arguments for specifying multiple commit IDs (at least one)
-pub(crate) fn add_multiple_commit_id_args<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
-    add_commit_id_args_impl(app, true, true)
-}
-
-/// A `CommitId` is any of the ways a user can specify a commit.
-pub(crate) enum CommitId {
-    /// Commit ID is of an unknown type that must be resolved.
-    Resolve(String),
-
-    /// Bonsai ID.
-    BonsaiId([u8; 32]),
-
-    /// Bonsai ID with bubble
-    EphemeralBonsai([u8; 32], Option<NonZeroU64>),
-
-    /// Hg commit ID.
-    HgId([u8; 20]),
-
-    // Git SHA-1.
-    GitSha1([u8; 20]),
-
-    // Globalrev.
-    Globalrev(u64),
-
-    // SVN revision.
-    Svnrev(u64),
-
-    /// A bookmark name.
-    Bookmark(String),
-}
-
-impl fmt::Display for CommitId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            CommitId::Resolve(id) => write!(f, "commit id '{}'", id),
-            CommitId::BonsaiId(bonsai) => write!(f, "bonsai id '{}'", hex_string(bonsai)),
-            CommitId::EphemeralBonsai(bonsai, bubble_id) => write!(
-                f,
-                "bonsai id '{}' on bubble {}",
-                hex_string(bonsai),
-                bubble_id.map_or_else(|| "unknown".to_string(), |id| id.to_string()),
-            ),
-            CommitId::HgId(id) => write!(f, "hg commit id '{}'", hex_string(id)),
-            CommitId::GitSha1(id) => write!(f, "git sha1 '{}'", hex_string(id)),
-            CommitId::Globalrev(rev) => write!(f, "globalrev '{}'", rev),
-            CommitId::Svnrev(rev) => write!(f, "svn revision '{}'", rev),
-            CommitId::Bookmark(bookmark) => write!(f, "bookmark '{}'", bookmark),
-        }
-    }
+fn get_commit_ids(matches: &ArgMatches) -> Result<Vec<CommitId>, clap::Error> {
+    get_commit_ids_impl(matches)
+        .map_err(|err| clap::Error::raw(clap::error::ErrorKind::ValueValidation, err))
 }
 
 /// Get the commit ids specified by the user.  They are returned in the order specified.
-pub(crate) fn get_commit_ids(matches: &ArgMatches<'_>) -> Result<Vec<CommitId>, Error> {
+fn get_commit_ids_impl(matches: &ArgMatches) -> Result<Vec<CommitId>, Error> {
     let bubble_id = matches
         .value_of(ARG_BUBBLE_ID)
         .map(|id| id.parse::<NonZeroU64>())
@@ -341,27 +276,182 @@ pub(crate) fn get_commit_ids(matches: &ArgMatches<'_>) -> Result<Vec<CommitId>, 
         .collect())
 }
 
-/// Get a single commit ID specified by the user.
-pub(crate) fn get_commit_id(matches: &ArgMatches<'_>) -> Result<CommitId, Error> {
-    let commit_ids = get_commit_ids(matches)?;
-    if commit_ids.len() != 1 {
-        bail!("expected 1 commit_id (got {})", commit_ids.len())
-    }
-    Ok(commit_ids.into_iter().next().expect("commit id expected"))
+// Unfortunately we can't use clap derive API here directly because we care about
+// the order of arguments, but we still implement proper clap traits so that it
+// can be used in conjunction with derive API in other parts of the code.
+#[derive(Clone)]
+pub(crate) struct CommitIdArgs {
+    commit_id: CommitId,
 }
 
-/// Gets a single bookmark name specified by the user
-pub(crate) fn get_bookmark_name(matches: &ArgMatches<'_>) -> Result<String, Error> {
-    let commit_ids = get_commit_ids(matches)?;
-    if commit_ids.len() != 1 {
-        bail!("expected 1 bookmark name (got multiple commits ids)",)
+impl CommitIdArgs {
+    pub fn into_commit_id(self) -> CommitId {
+        self.commit_id
     }
-    let commit_id = commit_ids.into_iter().next().expect("commit id expected");
-    let bookmark_name = match commit_id {
-        CommitId::Bookmark(bookmark_name) => bookmark_name,
-        _ => bail!("expected bookmark name (got {})", commit_id,),
-    };
-    Ok(bookmark_name)
+}
+
+impl clap::FromArgMatches for CommitIdArgs {
+    fn from_arg_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
+        let mut commit_ids = get_commit_ids(matches)?;
+        if commit_ids.len() == 1 {
+            Ok(CommitIdArgs {
+                commit_id: commit_ids.pop().unwrap(),
+            })
+        } else {
+            panic!("expected single commit id")
+        }
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &ArgMatches) -> Result<(), clap::Error> {
+        let mut commit_ids = get_commit_ids(matches)?;
+        use std::cmp::Ordering;
+        match commit_ids.len().cmp(&1) {
+            Ordering::Equal => {
+                self.commit_id = commit_ids.pop().unwrap();
+            }
+            Ordering::Less => {}
+            Ordering::Greater => panic!("expected single commit id"),
+        }
+
+        Ok(())
+    }
+}
+
+impl clap::Args for CommitIdArgs {
+    fn augment_args(cmd: clap::Command<'_>) -> clap::Command<'_> {
+        add_commit_id_args_impl(cmd, true, false)
+    }
+
+    fn augment_args_for_update(cmd: clap::Command<'_>) -> clap::Command<'_> {
+        add_commit_id_args_impl(cmd, true, false)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct OptionalCommitIdArgs {
+    commit_id: Option<CommitId>,
+}
+
+impl OptionalCommitIdArgs {
+    pub fn into_commit_id(self) -> Option<CommitId> {
+        self.commit_id
+    }
+}
+
+impl clap::FromArgMatches for OptionalCommitIdArgs {
+    fn from_arg_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
+        let commit_ids = get_commit_ids(matches)?;
+        Ok(Self {
+            commit_id: commit_ids.into_iter().next(),
+        })
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &ArgMatches) -> Result<(), clap::Error> {
+        let commit_ids = get_commit_ids(matches)?;
+        self.commit_id = commit_ids.into_iter().next();
+        Ok(())
+    }
+}
+
+impl clap::Args for OptionalCommitIdArgs {
+    fn augment_args(cmd: clap::Command<'_>) -> clap::Command<'_> {
+        add_commit_id_args_impl(cmd, false, false)
+    }
+
+    fn augment_args_for_update(cmd: clap::Command<'_>) -> clap::Command<'_> {
+        add_commit_id_args_impl(cmd, false, false)
+    }
+}
+
+#[derive(Clone)]
+/// 0 or more commit ids
+pub(crate) struct CommitIdsArgs {
+    commit_ids: Vec<CommitId>,
+}
+
+impl CommitIdsArgs {
+    pub fn into_commit_ids(self) -> Vec<CommitId> {
+        self.commit_ids
+    }
+}
+
+impl clap::FromArgMatches for CommitIdsArgs {
+    fn from_arg_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
+        let commit_ids = get_commit_ids(matches)?;
+        Ok(CommitIdsArgs { commit_ids })
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &ArgMatches) -> Result<(), clap::Error> {
+        self.commit_ids = get_commit_ids(matches)?;
+        Ok(())
+    }
+}
+
+impl clap::Args for CommitIdsArgs {
+    fn augment_args(cmd: clap::Command<'_>) -> clap::Command<'_> {
+        add_commit_id_args_impl(cmd, false, true)
+    }
+
+    fn augment_args_for_update(cmd: clap::Command<'_>) -> clap::Command<'_> {
+        add_commit_id_args_impl(cmd, false, true)
+    }
+}
+
+/// A `CommitId` is any of the ways a user can specify a commit.
+#[derive(Clone)]
+pub(crate) enum CommitId {
+    /// Commit ID is of an unknown type that must be resolved.
+    Resolve(String),
+
+    /// Bonsai ID.
+    BonsaiId([u8; 32]),
+
+    /// Bonsai ID with bubble
+    EphemeralBonsai([u8; 32], Option<NonZeroU64>),
+
+    /// Hg commit ID.
+    HgId([u8; 20]),
+
+    /// Git SHA-1.
+    GitSha1([u8; 20]),
+
+    /// Globalrev.
+    Globalrev(u64),
+
+    /// SVN revision.
+    Svnrev(u64),
+
+    /// A bookmark name.
+    Bookmark(String),
+}
+
+impl CommitId {
+    pub(crate) fn into_bookmark_name(self) -> Result<String, Error> {
+        match self {
+            Self::Bookmark(name) => Ok(name),
+            _ => anyhow::bail!("expected bookmark name (got {})", self),
+        }
+    }
+}
+
+impl fmt::Display for CommitId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            CommitId::Resolve(id) => write!(f, "commit id '{}'", id),
+            CommitId::BonsaiId(bonsai) => write!(f, "bonsai id '{}'", hex_string(bonsai)),
+            CommitId::EphemeralBonsai(bonsai, bubble_id) => write!(
+                f,
+                "bonsai id '{}' on bubble {}",
+                hex_string(bonsai),
+                bubble_id.map_or_else(|| "unknown".to_string(), |id| id.to_string()),
+            ),
+            CommitId::HgId(id) => write!(f, "hg commit id '{}'", hex_string(id)),
+            CommitId::GitSha1(id) => write!(f, "git sha1 '{}'", hex_string(id)),
+            CommitId::Globalrev(rev) => write!(f, "globalrev '{}'", rev),
+            CommitId::Svnrev(rev) => write!(f, "svn revision '{}'", rev),
+            CommitId::Bookmark(bookmark) => write!(f, "bookmark '{}'", bookmark),
+        }
+    }
 }
 
 /// Try to resolve a bookmark name to a commit ID.
@@ -377,7 +467,7 @@ async fn try_resolve_bookmark(
             .collect(),
         ..Default::default()
     };
-    let response = conn.repo_resolve_bookmark(&repo, &params).await?;
+    let response = conn.repo_resolve_bookmark(repo, &params).await?;
     Ok(response
         .ids
         .and_then(|ids| ids.get(&thrift::CommitIdentityScheme::BONSAI).cloned()))
@@ -583,7 +673,7 @@ pub(crate) async fn resolve_commit_ids(
                         let candidates: Vec<_> = try_join_all(resolvers.into_iter())
                             .await?
                             .into_iter()
-                            .filter_map(|res| res)
+                            .flatten()
                             .collect();
                         match candidates.as_slice() {
                             [] => Err(format_err!("commit not found: {}", commit_id)),
@@ -619,6 +709,25 @@ pub(crate) async fn resolve_commit_id(
     repo: &thrift::RepoSpecifier,
     commit_id: &CommitId,
 ) -> Result<thrift::CommitId, Error> {
-    let commit_ids = resolve_commit_ids(&conn, &repo, Some(commit_id).into_iter()).await?;
+    let commit_ids = resolve_commit_ids(conn, repo, Some(commit_id).into_iter()).await?;
     Ok(commit_ids.into_iter().next().expect("commit id expected"))
+}
+
+/// Map commit IDs to the scheme name and string representation of the commit ID.
+pub(crate) fn map_commit_ids<'a>(
+    ids: impl Iterator<Item = &'a thrift::CommitId>,
+) -> BTreeMap<String, String> {
+    ids.filter_map(map_commit_id).collect()
+}
+
+/// Map a commit ID to its scheme name and string representation.
+pub(crate) fn map_commit_id(id: &thrift::CommitId) -> Option<(String, String)> {
+    match id {
+        thrift::CommitId::bonsai(hash) => Some((String::from("bonsai"), hex_string(hash))),
+        thrift::CommitId::hg(hash) => Some((String::from("hg"), hex_string(hash))),
+        thrift::CommitId::git(hash) => Some((String::from("git"), hex_string(hash))),
+        thrift::CommitId::globalrev(rev) => Some((String::from("globalrev"), rev.to_string())),
+        thrift::CommitId::svnrev(rev) => Some((String::from("svnrev"), rev.to_string())),
+        _ => None,
+    }
 }

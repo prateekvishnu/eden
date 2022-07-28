@@ -5,25 +5,46 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Error};
-use bookmarks::{BookmarkName, Freshness};
+use anyhow::bail;
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
+use async_trait::async_trait;
+use bookmarks::BookmarkName;
+use bookmarks::Freshness;
 use cached_config::ConfigStore;
-use cmdlib::{args, helpers, monitoring};
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers;
+use cmdlib::monitoring;
 use cmdlib_x_repo::create_commit_syncers_from_matches;
-use context::{CoreContext, SessionContainer};
-use cross_repo_sync::{
-    validation::{self, BookmarkDiff},
-    CommitSyncOutcome, CommitSyncer, Syncers,
-};
+use context::CoreContext;
+use context::SessionContainer;
+use cross_repo_sync::validation;
+use cross_repo_sync::validation::BookmarkDiff;
+use cross_repo_sync::CommitSyncOutcome;
+use cross_repo_sync::CommitSyncer;
+use cross_repo_sync::Syncers;
+use executor_lib::BackgroundProcessExecutor;
+use executor_lib::RepoShardedProcess;
+use executor_lib::RepoShardedProcessExecutor;
 use fbinit::FacebookInit;
-use futures::{future, TryStreamExt};
+use futures::future;
+use futures::TryStreamExt;
 use live_commit_sync_config::CONFIGERATOR_PUSHREDIRECT_ENABLE;
 use mononoke_types::ChangesetId;
+use once_cell::sync::OnceCell;
 use pushredirect_enable::types::MononokePushRedirectEnable;
 use scuba_ext::MononokeScubaSampleBuilder;
-use slog::{error, info, Logger};
+use slog::error;
+use slog::info;
+use slog::Logger;
 use stats::prelude::*;
-use std::{sync::Arc, time::Duration};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
+use synced_commit_mapping::SqlSyncedCommitMapping;
 use synced_commit_mapping::SyncedCommitMapping;
 
 define_stats! {
@@ -34,36 +55,216 @@ define_stats! {
     ),
 }
 
-#[fbinit::main]
-fn main(fb: FacebookInit) -> Result<(), Error> {
-    let app_name = "Tool to validate that small and large repo bookmarks are in sync";
-    let app = args::MononokeAppBuilder::new(app_name)
-        .with_source_and_target_repos()
-        .with_fb303_args()
-        .build();
-    let matches = app.get_matches(fb)?;
-    let logger = matches.logger();
-    let runtime = matches.runtime();
-    let ctx = create_core_context(fb, logger.clone());
-    let config_store = matches.config_store();
-    let source_repo_id = args::get_source_repo_id(config_store, &matches)?;
+const SM_SERVICE_SCOPE: &str = "global";
+const SM_CLEANUP_TIMEOUT_SECS: u64 = 120;
+const APP_NAME: &str = "megarepo_bookmarks_validator";
 
-    // Backsyncer works in large -> small direction, however
-    // for bookmarks vaidator it's simpler to have commits syncer in small -> large direction
-    // Hence here we are creating a reverse syncer
-    let syncers = runtime.block_on(create_commit_syncers_from_matches(&ctx, &matches))?;
-    if syncers.large_to_small.get_large_repo().get_repoid() != source_repo_id {
-        return Err(format_err!("Source repo must be a large repo!"));
+/// Struct representing the Bookmark Validate BP.
+pub struct BookmarkValidateProcess {
+    matches: Arc<MononokeMatches<'static>>,
+    fb: FacebookInit,
+}
+
+impl BookmarkValidateProcess {
+    fn new(fb: FacebookInit) -> anyhow::Result<Self> {
+        let app_name = "Tool to validate that small and large repo bookmarks are in sync";
+        let app = args::MononokeAppBuilder::new(app_name)
+            .with_source_and_target_repos()
+            .with_dynamic_repos()
+            .with_fb303_args()
+            .build();
+        let matches = Arc::new(app.get_matches(fb)?);
+        Ok(Self { matches, fb })
+    }
+}
+
+#[async_trait]
+impl RepoShardedProcess for BookmarkValidateProcess {
+    async fn setup(
+        &self,
+        repo_names_pair: &str,
+    ) -> anyhow::Result<Arc<dyn RepoShardedProcessExecutor>> {
+        // Since for bookmark validator, two repos (i.e. source and target)
+        // are required, the input would be of the form:
+        // source_repo_TO_target_repo (e.g. fbsource_TO_aros)
+        let repo_pair: Vec<_> = repo_names_pair.split("_TO_").collect();
+        if repo_pair.len() != 2 {
+            error!(
+                self.matches.logger(),
+                "Repo names provided in incorrect format: {}", repo_names_pair
+            );
+            bail!(
+                "Repo names provided in incorrect format: {}",
+                repo_names_pair
+            )
+        }
+        let (source_repo_name, target_repo_name) = (repo_pair[0], repo_pair[1]);
+        info!(
+            self.matches.logger(),
+            "Setting up bookmark validate command from repo {} to repo {}",
+            source_repo_name,
+            target_repo_name,
+        );
+        let ctx = create_core_context(self.fb, self.matches.logger().clone())
+            .clone_with_repo_name(repo_names_pair);
+        let config_store = self.matches.config_store().clone();
+        let source_repo_id =
+            args::resolve_repo_by_name(&config_store, &self.matches, source_repo_name)?.id;
+        let target_repo_id =
+            args::resolve_repo_by_name(&config_store, &self.matches, target_repo_name)?.id;
+
+        let syncers = create_commit_syncers_from_matches(
+            &ctx,
+            &self.matches,
+            Some((source_repo_id, target_repo_id)),
+        )
+        .await?;
+        if syncers.large_to_small.get_large_repo().get_repoid() != source_repo_id {
+            bail!(
+                "Source repo must be a large repo!. Source repo: {}, Target repo: {}",
+                &source_repo_name,
+                &target_repo_name
+            )
+        }
+        let executor = BookmarkValidateProcessExecutor::new(
+            syncers,
+            ctx,
+            config_store,
+            source_repo_name.to_string(),
+            target_repo_name.to_string(),
+        );
+        info!(
+            self.matches.logger(),
+            "Completed bookmark validate command setup from repo {} to repo {}",
+            source_repo_name,
+            target_repo_name,
+        );
+        Ok(Arc::new(executor))
+    }
+}
+
+/// Struct representing the execution of the Bookmark Validate
+/// BP over the context of a provided repos.
+pub struct BookmarkValidateProcessExecutor {
+    syncers: Syncers<SqlSyncedCommitMapping>,
+    ctx: CoreContext,
+    config_store: ConfigStore,
+    cancellation_requested: Arc<AtomicBool>,
+    source_repo_name: String,
+    target_repo_name: String,
+}
+
+impl BookmarkValidateProcessExecutor {
+    fn new(
+        syncers: Syncers<SqlSyncedCommitMapping>,
+        ctx: CoreContext,
+        config_store: ConfigStore,
+        source_repo_name: String,
+        target_repo_name: String,
+    ) -> Self {
+        Self {
+            syncers,
+            ctx,
+            config_store,
+            source_repo_name,
+            target_repo_name,
+            cancellation_requested: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+#[async_trait]
+impl RepoShardedProcessExecutor for BookmarkValidateProcessExecutor {
+    async fn execute(&self) -> anyhow::Result<()> {
+        info!(
+            self.ctx.logger(),
+            "Initiating bookmark validate command execution for repo pair {}-{}",
+            &self.source_repo_name,
+            &self.target_repo_name,
+        );
+        loop_forever(
+            self.ctx.clone(),
+            self.syncers.clone(),
+            &self.config_store,
+            Arc::clone(&self.cancellation_requested),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "Error during bookmark validate command execution for repo pair {}-{}",
+                &self.source_repo_name, &self.target_repo_name,
+            )
+        })?;
+        info!(
+            self.ctx.logger(),
+            "Finished bookmark validate command execution for repo pair {}-{}",
+            &self.source_repo_name,
+            self.target_repo_name
+        );
+        Ok(())
     }
 
-    helpers::block_execute(
-        loop_forever(ctx, syncers, config_store),
-        fb,
-        "megarepo_bookmarks_validator",
-        &logger,
-        &matches,
-        monitoring::AliveService,
-    )
+    async fn stop(&self) -> anyhow::Result<()> {
+        info!(
+            self.ctx.logger(),
+            "Terminating bookmark validate command execution for repo pair {}-{}",
+            &self.source_repo_name,
+            self.target_repo_name,
+        );
+        self.cancellation_requested.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+#[fbinit::main]
+fn main(fb: FacebookInit) -> Result<(), Error> {
+    let process = BookmarkValidateProcess::new(fb)?;
+    match process.matches.value_of("sharded-service-name") {
+        Some(service_name) => {
+            // The service name needs to be 'static to satisfy SM contract
+            static SM_SERVICE_NAME: OnceCell<String> = OnceCell::new();
+            let logger = process.matches.logger().clone();
+            let matches = Arc::clone(&process.matches);
+            let mut executor = BackgroundProcessExecutor::new(
+                process.fb,
+                process.matches.runtime().clone(),
+                &logger,
+                SM_SERVICE_NAME.get_or_init(|| service_name.to_string()),
+                SM_SERVICE_SCOPE,
+                SM_CLEANUP_TIMEOUT_SECS,
+                Arc::new(process),
+            )?;
+            helpers::block_execute(
+                executor.block_and_execute(&logger),
+                fb,
+                &std::env::var("TW_JOB_NAME").unwrap_or_else(|_| APP_NAME.to_string()),
+                matches.logger(),
+                &matches,
+                cmdlib::monitoring::AliveService,
+            )
+        }
+        None => {
+            let logger = process.matches.logger().clone();
+            let matches = process.matches.clone();
+            let runtime = matches.runtime();
+            let ctx = create_core_context(fb, logger.clone());
+            let config_store = matches.config_store();
+            let source_repo_id = args::get_source_repo_id(config_store, &matches)?;
+            let syncers =
+                runtime.block_on(create_commit_syncers_from_matches(&ctx, &matches, None))?;
+            if syncers.large_to_small.get_large_repo().get_repoid() != source_repo_id {
+                return Err(format_err!("Source repo must be a large repo!"));
+            }
+            helpers::block_execute(
+                loop_forever(ctx, syncers, config_store, Arc::new(AtomicBool::new(false))),
+                fb,
+                APP_NAME,
+                &logger,
+                &matches,
+                monitoring::AliveService,
+            )
+        }
+    }
 }
 
 fn create_core_context(fb: FacebookInit, logger: Logger) -> CoreContext {
@@ -76,6 +277,7 @@ async fn loop_forever<M: SyncedCommitMapping + Clone + 'static>(
     ctx: CoreContext,
     syncers: Syncers<M>,
     config_store: &ConfigStore,
+    cancellation_requested: Arc<AtomicBool>,
 ) -> Result<(), Error> {
     let large_repo_name = syncers.large_to_small.get_large_repo().name();
     let small_repo_name = syncers.large_to_small.get_small_repo().name();
@@ -86,6 +288,14 @@ async fn loop_forever<M: SyncedCommitMapping + Clone + 'static>(
         config_store.get_config_handle(CONFIGERATOR_PUSHREDIRECT_ENABLE.to_string())?;
 
     loop {
+        // Before initiating every iteration, check if cancellation has been requested.
+        if cancellation_requested.load(Ordering::Relaxed) {
+            info!(
+                ctx.logger(),
+                "bookmark validation stopping due to cancellation request"
+            );
+            return Ok(());
+        }
         let config: Arc<MononokePushRedirectEnable> = config_handle.get();
 
         let enabled = config
@@ -93,8 +303,7 @@ async fn loop_forever<M: SyncedCommitMapping + Clone + 'static>(
             .get(&(small_repo_id.id() as i64))
             // We only care about public pushes because draft pushes are not in the bookmark
             // update log at all.
-            .map(|enables| enables.public_push)
-            .unwrap_or(false);
+            .map_or(false, |enables| enables.public_push);
 
         if enabled {
             let res = validate(&ctx, &syncers, large_repo_name, small_repo_name).await;
@@ -150,7 +359,7 @@ async fn validate<M: SyncedCommitMapping + Clone + 'static>(
     small_repo_name: &str,
 ) -> Result<(), ValidationError> {
     let commit_syncer = &syncers.small_to_large;
-    let diffs = validation::find_bookmark_diff(ctx.clone(), &commit_syncer).await?;
+    let diffs = validation::find_bookmark_diff(ctx.clone(), commit_syncer).await?;
 
     info!(ctx.logger(), "got {} bookmark diffs", diffs.len());
     for diff in diffs {
@@ -181,8 +390,8 @@ async fn validate<M: SyncedCommitMapping + Clone + 'static>(
         let max_log_records: u32 = 100;
         let max_delay_secs: u32 = 300;
         let in_history = check_large_bookmark_history(
-            &ctx,
-            &syncers,
+            ctx,
+            syncers,
             &large_bookmark,
             &large_cs_id,
             &small_cs_id,
@@ -259,7 +468,7 @@ async fn check_large_bookmark_history<M: SyncedCommitMapping + Clone + 'static>(
                     let res: Result<_, Error> = match book_val {
                         Some(large_cs_id) => {
                             let maybe_remapped_cs_id =
-                                remap(&ctx, &large_to_small, &large_cs_id).await?;
+                                remap(ctx, large_to_small, large_cs_id).await?;
                             Ok(maybe_remapped_cs_id
                                 .map(|remapped_cs_id| (Some(remapped_cs_id), timestamp)))
                         }
@@ -270,13 +479,14 @@ async fn check_large_bookmark_history<M: SyncedCommitMapping + Clone + 'static>(
 
         let remapped_log_entries = future::try_join_all(remapped_log_entries).await?;
 
-        let maybe_log_entry = remapped_log_entries.into_iter().filter_map(|x| x).find(
-            |(maybe_remapped_cs_id, timestamp)| {
+        let maybe_log_entry = remapped_log_entries
+            .into_iter()
+            .filter_map(std::convert::identity)
+            .find(|(maybe_remapped_cs_id, timestamp)| {
                 // Delay is measured from the latest entry in the large repo bookmark update log
                 let delay = latest_timestamp.timestamp_seconds() - timestamp.timestamp_seconds();
                 (maybe_remapped_cs_id == maybe_small_cs_id) && (delay < max_delay_secs as i64)
-            },
-        );
+            });
 
         if maybe_log_entry.is_some() {
             return Ok(true);
@@ -321,10 +531,13 @@ async fn remap<M: SyncedCommitMapping + Clone + 'static>(
 mod tests {
     use super::*;
 
-    use cross_repo_sync::{CandidateSelectionHint, CommitSyncContext};
+    use cross_repo_sync::CandidateSelectionHint;
+    use cross_repo_sync::CommitSyncContext;
     use cross_repo_sync_test_utils::init_small_large_repo;
     use mononoke_types::DateTime;
-    use tests_utils::{bookmark, resolve_cs_id, CreateCommitContext};
+    use tests_utils::bookmark;
+    use tests_utils::resolve_cs_id;
+    use tests_utils::CreateCommitContext;
 
     #[fbinit::test]
     async fn test_simple_check_large_bookmark_history(fb: FacebookInit) -> Result<(), Error> {

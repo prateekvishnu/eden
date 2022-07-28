@@ -7,76 +7,49 @@
 
 //! Diff two commits
 
-use anyhow::{bail, Error};
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
-use futures::stream;
-use futures_util::stream::StreamExt;
+use anyhow::bail;
+use anyhow::Result;
 use maplit::btreeset;
+use serde::Serialize;
 use source_control as thrift;
 use std::collections::BTreeSet;
 use std::io::Write;
 
-use crate::args::commit_id::{add_multiple_commit_id_args, get_commit_ids, resolve_commit_ids};
-use crate::args::path::{add_optional_multiple_path_args, get_paths};
-use crate::args::repo::{add_repo_args, get_repo_specifier};
-use crate::connection::Connection;
+use crate::args::commit_id::resolve_commit_ids;
+use crate::args::commit_id::CommitIdsArgs;
+use crate::args::repo::RepoArgs;
 use crate::lib::diff::diff_files;
-use crate::render::{Render, RenderStream};
-use serde_derive::Serialize;
+use crate::render::Render;
+use crate::ScscApp;
 
-pub(super) const NAME: &str = "diff";
-
-const ARG_SKIP_COPY_INFO: &str = "skip-copies-renames";
-const ARG_PATHS_ONLY: &str = "paths-only";
-const ARG_PLACEHOLDERS_ONLY: &str = "placeholders-only";
-const ARG_ORDERED: &str = "ORDERED";
-const ARG_AFTER: &str = "AFTER";
-const ARG_LIMIT: &str = "LIMIT";
-
-const ARG_LIMIT_DEFAULT: &str = "100";
-
-pub(super) fn make_subcommand<'a, 'b>() -> App<'a, 'b> {
-    let cmd = SubCommand::with_name(NAME)
-        .about("Diff files between two commits")
-        .setting(AppSettings::ColoredHelp);
-    let cmd = add_repo_args(cmd);
-    let cmd = add_multiple_commit_id_args(cmd);
-    let cmd = add_optional_multiple_path_args(cmd);
-    cmd.arg(
-        Arg::with_name(ARG_SKIP_COPY_INFO)
-            .long(ARG_SKIP_COPY_INFO)
-            .help("Show copies/moves as adds/deletes."),
-    )
-    .arg(
-        Arg::with_name(ARG_PATHS_ONLY)
-            .long(ARG_PATHS_ONLY)
-            .help("Only list differing paths instead of printing the diff."),
-    )
-    .arg(
-        Arg::with_name(ARG_PLACEHOLDERS_ONLY)
-            .long(ARG_PLACEHOLDERS_ONLY)
-            .conflicts_with(ARG_PATHS_ONLY)
-            .help("Instead of generating a real diff let's generate a placeholder diff that just says that file differs"),
-    )
-    .arg(
-        Arg::with_name(ARG_ORDERED)
-            .long("ordered")
-            .short("O")
-            .help("Generate diff in repository order")
-        )
-    .arg(
-        Arg::with_name(ARG_AFTER)
-            .long("after")
-            .takes_value(true)
-            .help("Generate ordered diff after a given path")
-        )
-    .arg(
-        Arg::with_name(ARG_LIMIT)
-            .long("limit")
-            .short("l")
-            .default_value(ARG_LIMIT_DEFAULT)
-            .help("Generate ordered diff for at most LIMIT files")
-        )
+#[derive(clap::Parser)]
+/// Diff files between two commits
+pub(super) struct CommandArgs {
+    #[clap(flatten)]
+    repo_args: RepoArgs,
+    #[clap(flatten)]
+    commit_ids_args: CommitIdsArgs,
+    #[clap(long, short)]
+    /// Paths to diff.
+    path: Option<Vec<String>>,
+    #[clap(long)]
+    /// Show copies/moves as adds/deletes.
+    skip_copies_renames: bool,
+    #[clap(long)]
+    /// Only list differing paths instead of printing the diff.
+    paths_only: bool,
+    #[clap(long, conflicts_with = "paths-only")]
+    /// Instead of generating a real diff let's generate a placeholder diff that just says that file differs.
+    placeholders_only: bool,
+    #[clap(long, short = 'O')]
+    /// Generate diff in repository order.
+    ordered: bool,
+    #[clap(long, requires = "ordered")]
+    /// Generate ordered diff after a given path.
+    after: Option<String>,
+    #[clap(long, short, default_value_t = 100, requires = "ordered")]
+    /// Generate ordered diff for at most LIMIT files.
+    limit: usize,
 }
 
 #[derive(Serialize)]
@@ -85,7 +58,9 @@ struct PathsOnlyOutput {
 }
 
 impl Render for PathsOnlyOutput {
-    fn render(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    type Args = CommandArgs;
+
+    fn render(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         for file in &self.files {
             match (file.base_file.as_ref(), file.other_file.as_ref()) {
                 // The letters as in git-status
@@ -109,22 +84,19 @@ impl Render for PathsOnlyOutput {
         Ok(())
     }
 
-    fn render_json(&self, _matches: &ArgMatches, w: &mut dyn Write) -> Result<(), Error> {
+    fn render_json(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
         Ok(serde_json::to_writer(w, self)?)
     }
 }
 
-pub(super) async fn run(
-    matches: &ArgMatches<'_>,
-    connection: Connection,
-) -> Result<RenderStream, Error> {
-    let repo = get_repo_specifier(matches).expect("repository is required");
-    let commit_ids = get_commit_ids(matches)?;
-    if commit_ids.len() > 2 || commit_ids.len() < 1 {
+pub(super) async fn run(app: ScscApp, args: CommandArgs) -> Result<()> {
+    let repo = args.repo_args.clone().into_repo_specifier();
+    let commit_ids = args.commit_ids_args.clone().into_commit_ids();
+    if commit_ids.len() > 2 || commit_ids.is_empty() {
         bail!("expected 1 or 2 commit_ids (got {})", commit_ids.len())
     }
-    let paths = get_paths(matches);
-    let commit_ids = resolve_commit_ids(&connection, &repo, &commit_ids).await?;
+    let paths = args.path.clone();
+    let commit_ids = resolve_commit_ids(&app.connection, &repo, &commit_ids).await?;
     let mut identity_schemes = BTreeSet::new();
     identity_schemes.insert(thrift::CommitIdentityScheme::BONSAI);
 
@@ -141,45 +113,38 @@ pub(super) async fn run(
     } else {
         (commits.get(0), commits[1].clone())
     };
-    let ordered_params = if matches.is_present(ARG_ORDERED) {
-        let after_path = matches.value_of(ARG_AFTER).map(ToString::to_string);
-        let limit = matches
-            .value_of(ARG_LIMIT)
-            .unwrap_or(ARG_LIMIT_DEFAULT)
-            .parse::<i64>()?;
+    let ordered_params = if args.ordered {
+        let after_path = args.after.clone();
+        let limit: i64 = args.limit.try_into()?;
         Some(thrift::CommitCompareOrderedParams {
             after_path,
             limit,
             ..Default::default()
         })
     } else {
-        if matches.is_present(ARG_AFTER) {
-            bail!("--after requires --ordered");
-        }
-        // Check occurrences as limit has a default.
-        if matches.occurrences_of(ARG_LIMIT) > 0 {
-            bail!("--limit requires --ordered");
-        }
         None
     };
     let params = thrift::CommitCompareParams {
         other_commit_id: other_commit.map(|c| c.id.clone()),
-        skip_copies_renames: matches.is_present(ARG_SKIP_COPY_INFO),
+        skip_copies_renames: args.skip_copies_renames,
         identity_schemes,
         paths,
         compare_items: btreeset! {thrift::CommitCompareItem::FILES},
         ordered_params,
         ..Default::default()
     };
-    let response = connection.commit_compare(&base_commit, &params).await?;
+    let response = app.connection.commit_compare(&base_commit, &params).await?;
 
-    if matches.is_present(ARG_PATHS_ONLY) {
-        return Ok(stream::once(async move {
-            Ok(Box::new(PathsOnlyOutput {
-                files: response.diff_files,
-            }) as Box<dyn Render>)
-        })
-        .boxed());
+    if args.paths_only {
+        return app
+            .target
+            .render_one(
+                &args,
+                PathsOnlyOutput {
+                    files: response.diff_files,
+                },
+            )
+            .await;
     }
 
     let other_commit_id = match response.other_commit_ids {
@@ -193,7 +158,7 @@ pub(super) async fn run(
         }
     };
 
-    let placeholder_only = matches.is_present(ARG_PLACEHOLDERS_ONLY);
+    let placeholder_only = args.placeholders_only;
     let paths_sizes = response.diff_files.iter().map(|diff_file| {
         let pair_size = diff_file.base_file.as_ref().map_or(0, |f| f.info.file_size)
             + diff_file
@@ -213,10 +178,15 @@ pub(super) async fn run(
             pair_size,
         )
     });
-    diff_files(
-        &connection,
-        base_commit.clone(),
-        other_commit_id,
-        paths_sizes,
-    )
+    app.target
+        .render(
+            &(),
+            diff_files(
+                &app.connection,
+                base_commit.clone(),
+                other_commit_id,
+                paths_sizes,
+            ),
+        )
+        .await
 }

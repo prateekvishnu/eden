@@ -8,14 +8,26 @@
 use crate::blame::BlameRejected;
 use crate::path::MPath;
 use crate::thrift;
-use crate::typed_hash::{BlobstoreKey, ChangesetId, FileUnodeId, MononokeId};
-use anyhow::{anyhow, bail, Context, Error, Result};
+use crate::typed_hash::BlobstoreKey;
+use crate::typed_hash::ChangesetId;
+use crate::typed_hash::FileUnodeId;
+use crate::typed_hash::MononokeId;
+use anyhow::anyhow;
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use async_trait::async_trait;
 use bit_set::BitSet;
-use blobstore::{Blobstore, BlobstoreBytes, Loadable, LoadableError};
+use blobstore::Blobstore;
+use blobstore::BlobstoreBytes;
+use blobstore::Loadable;
+use blobstore::LoadableError;
 use context::CoreContext;
 use fbthrift::compact_protocol;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::str::FromStr;
 use vec_map::VecMap;
 use xdiff::diff_hunks;
@@ -1163,7 +1175,7 @@ impl<'a> Iterator for BlameLines<'a> {
         loop {
             match self.data.ranges.get(self.range_index) {
                 None => return None,
-                Some(ref range) if self.range_offset < range.length => {
+                Some(range) if self.range_offset < range.length => {
                     let line = BlameLine::new(self.data, range, self.range_offset);
                     self.range_offset += 1;
                     return Some(line);

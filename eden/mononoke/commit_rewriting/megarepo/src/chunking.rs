@@ -56,7 +56,7 @@ pub fn path_chunker_from_hint(prefix_lists: Vec<Vec<MPath>>) -> Result<Chunker<M
             match prefix_lists.iter().position(|prefix_list| {
                 prefix_list
                     .iter()
-                    .any(|prefix| MPath::is_prefix_of_opt(Some(&prefix), &mpath))
+                    .any(|prefix| MPath::is_prefix_of_opt(Some(prefix), &mpath))
             }) {
                 Some(chunk_index) => {
                     // we need to put this `mpath` into `chunk_index` position
@@ -124,7 +124,7 @@ mod test {
         )
         .unwrap();
 
-        let chunker = path_chunker_from_hint(hint.clone()).unwrap();
+        let chunker = path_chunker_from_hint(hint).unwrap();
         let mpaths: Vec<MPath> = vec!["/d/e/f", "/a", "/a/b/c", "/a/c", "/b/w/z", "/a/d"]
             .into_iter()
             .map(|p| MPath::new(p).unwrap())
@@ -162,7 +162,7 @@ mod test {
         )
         .unwrap();
 
-        let chunker = path_chunker_from_hint(hint.clone()).unwrap();
+        let chunker = path_chunker_from_hint(hint).unwrap();
         let mpaths: Vec<MPath> = vec!["/d/e/f", "/a", "/a/b/c", "/a/c", "/b/w/z", "/a/d"]
             .into_iter()
             .map(|p| MPath::new(p).unwrap())

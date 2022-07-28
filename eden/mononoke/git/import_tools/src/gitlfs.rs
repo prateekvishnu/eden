@@ -5,23 +5,33 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{format_err, Error};
+use anyhow::format_err;
+use anyhow::Error;
 use bytes::Bytes;
 use context::CoreContext;
 use core::future::Future;
 use filestore::StoreRequest;
-use futures::{stream, Stream, StreamExt, TryStreamExt};
+use futures::stream;
+use futures::Stream;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use git_hash::ObjectId;
 use http::Uri;
-use hyper::{body, client::connect::HttpConnector, Client, StatusCode};
+use hyper::body;
+use hyper::client::connect::HttpConnector;
+use hyper::Client;
+use hyper::StatusCode;
 use hyper_openssl::HttpsConnector;
 use mononoke_types::hash;
-use rand::{thread_rng, Rng};
-use slog::{error, warn};
+use rand::thread_rng;
+use rand::Rng;
+use slog::error;
+use slog::warn;
 use std::str;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tokio::time::{sleep, Duration};
+use tokio::time::sleep;
+use tokio::time::Duration;
 /// We will not try to parse any file bigger then this.
 /// Any valid gitlfs metadata file should be smaller then this.
 const MAX_METADATA_LENGTH: usize = 511;
@@ -44,7 +54,7 @@ pub struct GitImportLfsInner {
     /// Retries.
     max_attempts: u32,
     time_ms_between_attempts: u32,
-    /// Limit the amount of simultainous connections.
+    /// Limit the amount of simultaneous connections.
     conn_limit_sem: Option<Arc<Semaphore>>,
     /// Hyperium client we use to connect with
     client: Client<HttpsConnector<HttpConnector>>,
@@ -88,7 +98,7 @@ fn parse_lfs_metafile(gitblob: &[u8], gitid: ObjectId) -> Option<LfsMetaData> {
         .ok()?;
     let size = lines.next()?.strip_prefix("size ")?.parse::<u64>().ok()?;
     // As a precaution. If we have an additional line after this, then we assume its not a valid file.
-    if let Some(_) = lines.next() {
+    if lines.next().is_some() {
         return None;
     }
     Some(LfsMetaData {

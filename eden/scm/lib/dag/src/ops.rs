@@ -1,8 +1,8 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
- * This software may be used and distributed according to the terms of the
- * GNU General Public License version 2.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 //! DAG and Id operations (mostly traits)
@@ -37,6 +37,11 @@ pub trait DagAlgorithm: Send + Sync {
     /// Re-create the graph so it looks better when rendered.
     async fn beautify(&self, main_branch: Option<NameSet>) -> Result<MemNameDag> {
         default_impl::beautify(self, main_branch).await
+    }
+
+    /// Extract a sub graph containing only specified vertexes.
+    async fn subdag(&self, set: NameSet) -> Result<MemNameDag> {
+        default_impl::subdag(self, set).await
     }
 
     /// Get ordered parent vertexes.

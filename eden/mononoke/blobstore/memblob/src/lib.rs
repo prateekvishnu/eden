@@ -5,18 +5,28 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 
-use anyhow::{format_err, Result};
+use anyhow::format_err;
+use anyhow::Result;
 use async_trait::async_trait;
-use futures::future::{BoxFuture, FutureExt};
+use futures::future::BoxFuture;
+use futures::future::FutureExt;
 
-use blobstore::{
-    Blobstore, BlobstoreEnumerationData, BlobstoreGetData, BlobstoreKeyParam, BlobstoreKeySource,
-    BlobstorePutOps, BlobstoreUnlinkOps, OverwriteStatus, PutBehaviour, DEFAULT_PUT_BEHAVIOUR,
-};
+use blobstore::Blobstore;
+use blobstore::BlobstoreEnumerationData;
+use blobstore::BlobstoreGetData;
+use blobstore::BlobstoreKeyParam;
+use blobstore::BlobstoreKeySource;
+use blobstore::BlobstorePutOps;
+use blobstore::BlobstoreUnlinkOps;
+use blobstore::OverwriteStatus;
+use blobstore::PutBehaviour;
+use blobstore::DEFAULT_PUT_BEHAVIOUR;
 use context::CoreContext;
 use mononoke_types::BlobstoreBytes;
 
@@ -156,7 +166,7 @@ impl Blobstore for Memblob {
         let state = self.state.clone();
 
         let inner = state.lock().expect("lock poison");
-        Ok(inner.get(&key).map(|bytes| bytes.clone().into()))
+        Ok(inner.get(key).map(|bytes| bytes.clone().into()))
     }
 
     async fn put<'a>(

@@ -27,9 +27,7 @@ to the user.
 
 from __future__ import absolute_import
 
-import contextlib
 import datetime
-import itertools
 import re
 import time
 
@@ -38,20 +36,14 @@ from edenscm.mercurial import (
     cmdutil,
     commands,
     dagop,
-    error,
     extensions,
     graphmod,
-    mutation,
     node as nodemod,
     phases,
-    pycompat,
     registrar,
-    revlog,
     revset,
     revsetlang,
-    scmutil,
     smartset,
-    templatekw,
     templater,
     util,
 )
@@ -114,53 +106,6 @@ def shelveenabled(repo, ctx, **args):
     return "shelve" in extensions.enabled().keys()
 
 
-def sortnodes(nodes, parentfunc, masters):
-    """Topologically sorts the nodes, using the parentfunc to find
-    the parents of nodes.  Given a topological tie between children,
-    any node in masters is chosen last."""
-    nodes = set(nodes)
-    childmap = {}
-    parentmap = {}
-    roots = []
-
-    # Build a child and parent map
-    for n in nodes:
-        parents = [p for p in parentfunc(n) if p in nodes]
-        parentmap[n] = set(parents)
-        for p in parents:
-            childmap.setdefault(p, set()).add(n)
-        if not parents or (len(parents) == 1 and parents[0] == -1) and n != -1:
-            roots.append(n)
-
-    def childsortkey(x):
-        # Process children in the master line last. This makes them always
-        # appear on the left side of the dag, resulting in a nice straight
-        # master line in the ascii output. Otherwise show the oldest first, so
-        # the graph is approximately in chronological order.
-        return (x in masters, x)
-
-    # Process roots, adding children to the queue as they become roots
-    results = []
-    while roots:
-        n = roots.pop(0)
-        results.append(n)
-        if n in childmap:
-            children = list(childmap[n])
-            # reverse=True here because we insert(0) below, resulting
-            # in a reversed insertion of the children.
-            children = sorted(children, reverse=True, key=childsortkey)
-            for c in children:
-                childparents = parentmap[c]
-                childparents.remove(n)
-                if len(childparents) == 0:
-                    # insert at the beginning, that way child nodes
-                    # are likely to be output immediately after their
-                    # parents.
-                    roots.insert(0, c)
-
-    return results
-
-
 def getdag(ui, repo, revs, master, template):
 
     knownrevs = set(revs)
@@ -184,8 +129,10 @@ def getdag(ui, repo, revs, master, template):
     if simplifygrandparents:
         rootnodes = cl.tonodes(revs)
 
-    revs = smartset.baseset(revs, repo=repo)
-    revs.sort(reverse=True)
+    firstbranch = []
+    if master is not None:
+        firstbranch.append(master)
+    revs = repo.revs("sort(%ld,topo,topo.firstbranch=%ld)", revs, firstbranch)
     ctxstream = revs.prefetchbytemplate(repo, template).iterctx()
 
     # For each rev we need to show, compute it's parents in the dag.
@@ -233,36 +180,6 @@ def getdag(ui, repo, revs, master, template):
                     parents.append((graphmod.GRANDPARENT, g))
 
         results.append((ctx.rev(), "C", ctx, parents))
-
-    # Compute parent rev->parents mapping
-    lookup = {}
-    for r in results:
-        lookup[r[0]] = unzip(r[3])
-
-    def parentfunc(node):
-        return lookup.get(node, [])
-
-    # Compute the revs on the master line. We use this for sorting later.
-    masters = set()
-    queue = [master]
-    while queue:
-        m = queue.pop()
-        if m not in masters:
-            masters.add(m)
-            queue.extend(lookup.get(m, []))
-
-    # Topologically sort the noderev numbers. Note: unlike the vanilla
-    # topological sorting, we move master to the top.
-    order = sortnodes([r[0] for r in results], parentfunc, masters)
-    order = dict((e[1], e[0]) for e in enumerate(order))
-
-    # Sort the actual results based on their position in the 'order'
-    try:
-        results.sort(key=lambda x: order[x[0]], reverse=True)
-    except ValueError:  # Happened when 'order' is empty
-        ui.warn(_("smartlog encountered an error\n"), notice=_("note"))
-        ui.warn(_("(so the sorting might be wrong.\n\n)"))
-        results.reverse()
 
     # indent the top non-public stack
     if ui.configbool("smartlog", "indentnonpublic", False):
@@ -417,10 +334,10 @@ def smartlognodes(repo, headnodes, masternodes):
         repo.ui.warn(
             _("(consider running '@prog@ doctor' to hide unrelated commits)\n")
         )
-        nodes = nodes.take(limit)
+        nodes = nodes.take(limit) + headnodes
 
     # Include the ancestor of above commits to make the graph connected.
-    nodes = repo.dageval(lambda: gcaall(public() & nodes) | nodes)
+    nodes = repo.dageval(lambda: gcaall(nodes) | nodes)
 
     # Collapse long obsoleted stack - only keep their heads and roots.
     # This is incompatible with automation (namely, nuclide-core) yet.

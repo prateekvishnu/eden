@@ -5,14 +5,18 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{Context, Error, Result};
-use mercurial_types::{MPath, MPathElement};
-use metaconfig_types::{
-    CommitSyncConfig, CommitSyncDirection, DefaultSmallToLargeCommitSyncPathAction,
-    SmallRepoCommitSyncConfig,
-};
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
+use mercurial_types::MPath;
+use mercurial_types::MPathElement;
+use metaconfig_types::CommitSyncConfig;
+use metaconfig_types::CommitSyncDirection;
+use metaconfig_types::DefaultSmallToLargeCommitSyncPathAction;
+use metaconfig_types::SmallRepoCommitSyncConfig;
 use mononoke_types::RepositoryId;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -113,7 +117,7 @@ fn get_path_action<'a, I: IntoIterator<Item = &'a MPathElement>>(
         PrefixAction::RemovePrefix => {
             let elements: Vec<_> = source_path_minus_prefix.into_iter().cloned().collect();
             MPath::try_from(elements)
-                .map(|mpath| PathAction::Change(mpath))
+                .map(PathAction::Change)
                 .map_err(|_| {
                     // This case means that we are trying to sync a file
                     // and are also asked to drop the entire path of this
@@ -166,7 +170,7 @@ pub fn mover_factory(
                     candidate_action,
                 )
             })
-            .nth(0);
+            .next();
         match path_and_prefix_action {
             None => Ok(match default_action.clone() {
                 DefaultAction::PrependPrefix(prefix) => Some(prefix.join(source_path.into_iter())),
@@ -175,7 +179,7 @@ pub fn mover_factory(
             }),
             Some((result_path_action, orig_prefix_action)) => result_path_action
                 .map(|path_action| match path_action {
-                    PathAction::Change(path) => Some(path.clone()),
+                    PathAction::Change(path) => Some(path),
                     PathAction::DoNotSync => None,
                 })
                 .with_context(|| {
@@ -235,13 +239,12 @@ pub fn get_large_to_small_mover(
 
     let other_repo_right_sides: Vec<&MPath> = other_repo_configs
         .iter()
-        .map(|small_repo_config| {
+        .flat_map(|small_repo_config| {
             small_repo_config
                 .map
                 .values()
                 .filter(|v| !target_repo_right_sides.contains(v))
         })
-        .flatten()
         .collect();
 
     let other_repo_prepended_prefixes: Vec<&MPath> = other_repo_configs
@@ -313,7 +316,7 @@ pub fn get_large_to_small_mover(
         let moved_large_to_small = default_large_to_small_mover(path)?;
         match moved_large_to_small {
             Some(moved_large_to_small) => {
-                if small_to_large_mover(&moved_large_to_small)?.as_ref() == Some(&path) {
+                if small_to_large_mover(&moved_large_to_small)?.as_ref() == Some(path) {
                     Ok(Some(moved_large_to_small))
                 } else {
                     Ok(None)
@@ -392,7 +395,7 @@ mod test {
             mp("path/which/is/longest") => PrefixAction::Change(mp("longest/renamed")),
             mp("path/which/") => PrefixAction::Change(mp("middle/renamed")),
         };
-        let mover = mover_factory(hm.clone(), DefaultAction::DoNotSync).unwrap();
+        let mover = mover_factory(hm, DefaultAction::DoNotSync).unwrap();
         assert_eq!(
             mover(&mp("path/which/is/longest/1.txt")).unwrap(),
             Some(mp("longest/renamed/1.txt"))
@@ -438,7 +441,7 @@ mod test {
         assert_eq!(mover(&mp("wow")).unwrap(), Some(mp("wow")));
 
         let mover = mover_factory(
-            hm.clone(),
+            hm,
             DefaultAction::PrependPrefix(MPath::new("dude").unwrap()),
         )
         .unwrap();

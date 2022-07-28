@@ -8,20 +8,32 @@
 #![feature(never_type)]
 
 use anyhow::Error;
-use bytes::{Bytes, BytesMut};
-use mercurial_types::{
-    blobs::{filenode_lookup::FileNodeIdPointer, File, LFSContent, META_MARKER, META_SZ},
-    nodehash::{HgChangesetId, HgNodeHash},
-    FileBytes, HgFileNodeId, MPath, RepoPath, NULL_HASH,
-};
-use mercurial_types_mocks::nodehash::{self, FOURS_FNID, ONES_FNID, THREES_FNID, TWOS_FNID};
+use bytes::Bytes;
+use bytes::BytesMut;
+use mercurial_types::blobs::filenode_lookup::FileNodeIdPointer;
+use mercurial_types::blobs::File;
+use mercurial_types::blobs::LFSContent;
+use mercurial_types::blobs::META_MARKER;
+use mercurial_types::blobs::META_SZ;
+use mercurial_types::nodehash::HgChangesetId;
+use mercurial_types::nodehash::HgNodeHash;
+use mercurial_types::FileBytes;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::MPath;
+use mercurial_types::RepoPath;
+use mercurial_types::NULL_HASH;
+use mercurial_types_mocks::nodehash;
+use mercurial_types_mocks::nodehash::FOURS_FNID;
+use mercurial_types_mocks::nodehash::ONES_FNID;
+use mercurial_types_mocks::nodehash::THREES_FNID;
+use mercurial_types_mocks::nodehash::TWOS_FNID;
 use mononoke_types::hash::Sha256;
-use mononoke_types_mocks::contentid::{ONES_CTID, TWOS_CTID};
+use mononoke_types_mocks::contentid::ONES_CTID;
+use mononoke_types_mocks::contentid::TWOS_CTID;
 use quickcheck::quickcheck;
-use std::{
-    collections::{HashMap, HashSet},
-    str::FromStr,
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::str::FromStr;
 
 #[test]
 fn nodehash_option() {
@@ -320,7 +332,7 @@ fn test_get_lfs_struct_wrong_small_sha256() {
     kv.insert(b"size".as_ref(), b"17".as_ref());
     let lfs = File::get_lfs_struct(&kv);
 
-    assert_eq!(lfs.is_err(), true)
+    assert!(lfs.is_err())
 }
 
 #[test]
@@ -337,7 +349,7 @@ fn test_get_lfs_struct_wrong_size() {
     kv.insert(b"size".as_ref(), b"wrong_size_length".as_ref());
     let lfs = File::get_lfs_struct(&kv);
 
-    assert_eq!(lfs.is_err(), true)
+    assert!(lfs.is_err())
 }
 
 #[test]
@@ -349,7 +361,7 @@ fn test_get_lfs_struct_non_all_mandatory_fields() {
     );
     let lfs = File::get_lfs_struct(&kv);
 
-    assert_eq!(lfs.is_err(), true)
+    assert!(lfs.is_err())
 }
 
 #[test]

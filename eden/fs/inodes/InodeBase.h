@@ -28,6 +28,7 @@ namespace facebook::eden {
 
 class EdenMount;
 class ObjectFetchContext;
+class ObjectStore;
 class ParentInodeInfo;
 class RenameLock;
 class SharedRenameLock;
@@ -142,7 +143,7 @@ class InodeBase {
 
 #ifndef _WIN32
   // See Dispatcher::setattr
-  virtual folly::Future<struct stat> setattr(
+  virtual ImmediateFuture<struct stat> setattr(
       const DesiredMetadata& desired,
       ObjectFetchContext& fetchContext) = 0;
 
@@ -393,6 +394,18 @@ class InodeBase {
     auto loc = location_.rlock();
     return *loc;
   }
+
+  /**
+   * Returns this inode's name at this exact point in time.  Note that, unless
+   * the rename lock is held, the name can change between the call and the
+   * return value being used.  If the rename lock is held, call
+   * getLocationInfo()->name instead.
+   *
+   * Used in FileInode.cpp when getting filenames for telemetry
+   */
+  PathComponent getNameRacy() {
+    return location_.rlock()->name;
+  }
 #ifndef _WIN32
   /**
    * Acquire this inode's contents lock and return its metadata.
@@ -406,6 +419,19 @@ class InodeBase {
    */
   virtual void forceMetadataUpdate() = 0;
 
+#ifndef _WIN32
+  /**
+   * Force materialize a file or a tree and rely on the overlay as the source of
+   * the files. If the inode is a symlink and followSymlink is true, its target
+   * will be materialized if possible. If the inode is a tree, every child in
+   * this node will be recursively materialized. This function should be careful
+   * to be used and should be used by RECAS backing store only
+   */
+  FOLLY_NODISCARD virtual ImmediateFuture<folly::Unit> ensureMaterialized(
+      ObjectFetchContext& context,
+      bool followSymlink) = 0;
+#endif
+
  protected:
   /**
    * Returns current time from EdenMount's clock.
@@ -416,6 +442,14 @@ class InodeBase {
    * Convenience method to return the mount point's Clock.
    */
   const Clock& getClock() const;
+
+  /**
+   * Convenience method to return the mount point's ObjectStore.
+   *
+   * The ObjectStore is owned by the EdenMount. and is guaranteed to remain
+   * valid for at least the lifetime of the InodeBase object.
+   */
+  ObjectStore& getObjectStore() const;
 
   /**
    * Helper function to update Journal in FileInode and TreeInode.

@@ -5,7 +5,10 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 
@@ -16,26 +19,42 @@ use bookmarks::BookmarkName;
 use bytes::Bytes;
 use changeset_info::ChangesetInfo;
 use changesets::ChangesetsRef;
-use chrono::{DateTime, FixedOffset};
+use chrono::DateTime;
+use chrono::FixedOffset;
 use cloned::cloned;
-use context::{CoreContext, PerfCounterType};
-use deleted_manifest::{DeletedManifestOps, RootDeletedManifestIdCommon, RootDeletedManifestV2Id};
+use context::CoreContext;
+use context::PerfCounterType;
+use deleted_manifest::DeletedManifestOps;
+use deleted_manifest::RootDeletedManifestIdCommon;
+use deleted_manifest::RootDeletedManifestV2Id;
 use derived_data::BonsaiDerived;
 use derived_data_manager::BonsaiDerivable;
 use fsnodes::RootFsnodeId;
-use futures::future::{self, try_join, try_join_all};
-use futures::stream::{self, Stream, StreamExt, TryStreamExt};
+use futures::future;
+use futures::future::try_join;
+use futures::future::try_join_all;
+use futures::stream;
+use futures::stream::Stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use futures_lazy_shared::LazyShared;
-use hooks::{CrossRepoPushSource, HookOutcome, PushAuthoredBy};
-use manifest::{
-    Diff as ManifestDiff, Entry as ManifestEntry, ManifestOps, ManifestOrderedOps, PathOrPrefix,
-};
+use hooks::CrossRepoPushSource;
+use hooks::HookOutcome;
+use hooks::PushAuthoredBy;
+use manifest::Diff as ManifestDiff;
+use manifest::Entry as ManifestEntry;
+use manifest::ManifestOps;
+use manifest::ManifestOrderedOps;
+use manifest::PathOrPrefix;
 use maplit::hashset;
 use mercurial_types::Globalrev;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::FileChange;
 pub use mononoke_types::Generation;
-use mononoke_types::{
-    BonsaiChangeset, FileChange, MPath, MPathElement, SkeletonManifestId, Svnrev,
-};
+use mononoke_types::MPath;
+use mononoke_types::MPathElement;
+use mononoke_types::SkeletonManifestId;
+use mononoke_types::Svnrev;
 use rand;
 use reachabilityindex::ReachabilityIndex;
 use repo_blobstore::RepoBlobstoreArc;
@@ -45,14 +64,17 @@ use sorted_vector_map::SortedVectorMap;
 use tunables::tunables;
 use unodes::RootUnodeManifestId;
 
-use crate::changeset_path::{
-    ChangesetPathContentContext, ChangesetPathContext, ChangesetPathHistoryContext,
-};
+use crate::changeset_path::ChangesetPathContentContext;
+use crate::changeset_path::ChangesetPathContext;
+use crate::changeset_path::ChangesetPathHistoryContext;
 use crate::changeset_path_diff::ChangesetPathDiffContext;
 use crate::errors::MononokeError;
-use crate::path::{is_related_to, MononokePath};
+use crate::path::is_related_to;
+use crate::path::MononokePath;
 use crate::repo::RepoContext;
-use crate::specifiers::{ChangesetId, GitSha1, HgChangesetId};
+use crate::specifiers::ChangesetId;
+use crate::specifiers::GitSha1;
+use crate::specifiers::HgChangesetId;
 
 #[derive(Clone, Debug)]
 enum PathMutableHistory {
@@ -157,7 +179,7 @@ impl ChangesetContext {
 
     /// The context for this query.
     pub(crate) fn ctx(&self) -> &CoreContext {
-        &self.repo.ctx()
+        self.repo.ctx()
     }
 
     /// Adds copy information from mutable renames as an override to replace
@@ -192,16 +214,6 @@ impl ChangesetContext {
         Ok(())
     }
 
-    /// Copies the mutable renames information from another ChangesetContext
-    pub(crate) async fn copy_mutable_renames(&mut self, other: &Self) -> Result<(), MononokeError> {
-        if let Some(mutable_history) = &other.mutable_history {
-            self.add_mutable_renames(mutable_history.keys().cloned())
-                .await
-        } else {
-            Ok(())
-        }
-    }
-
     /// The `RepoContext` for this query.
     pub fn repo(&self) -> &RepoContext {
         &self.repo
@@ -225,7 +237,7 @@ impl ChangesetContext {
             .blob_repo()
             .get_hg_bonsai_mapping(self.ctx().clone(), self.id)
             .await?;
-        Ok(mapping.iter().next().map(|(hg_cs_id, _)| *hg_cs_id))
+        Ok(mapping.get(0).map(|(hg_cs_id, _)| *hg_cs_id))
     }
 
     /// The Globalrev for the changeset.
@@ -234,7 +246,7 @@ impl ChangesetContext {
             .repo()
             .blob_repo()
             .bonsai_globalrev_mapping()
-            .get_globalrev_from_bonsai(&self.ctx(), self.id)
+            .get_globalrev_from_bonsai(self.ctx(), self.id)
             .await?;
         Ok(mapping.into_iter().next())
     }
@@ -245,7 +257,7 @@ impl ChangesetContext {
             .repo()
             .blob_repo()
             .bonsai_svnrev_mapping()
-            .get_svnrev_from_bonsai(&self.ctx(), self.id)
+            .get_svnrev_from_bonsai(self.ctx(), self.id)
             .await?;
         Ok(mapping)
     }
@@ -625,10 +637,10 @@ impl ChangesetContext {
         if use_segmented_changelog {
             let segmented_changelog = self.repo().segmented_changelog();
             // If we have segmeneted changelog enabled...
-            if !segmented_changelog.disabled(&self.ctx()).await? {
+            if !segmented_changelog.disabled(self.ctx()).await? {
                 // ... and it has the answer for us ...
                 if let Some(result) = segmented_changelog
-                    .is_ancestor(&self.ctx(), self.id, other_commit)
+                    .is_ancestor(self.ctx(), self.id, other_commit)
                     .await?
                 {
                     self.ctx()
@@ -647,7 +659,7 @@ impl ChangesetContext {
             .repo()
             .skiplist_index()
             .query_reachability(
-                &self.ctx(),
+                self.ctx(),
                 &self.repo().blob_repo().get_changeset_fetcher(),
                 other_commit,
                 self.id,
@@ -674,10 +686,7 @@ impl ChangesetContext {
                 other_commit,
             )
             .await?;
-        Ok(lca
-            .iter()
-            .next()
-            .map(|id| Self::new(self.repo.clone(), *id)))
+        Ok(lca.get(0).map(|id| Self::new(self.repo.clone(), *id)))
     }
 
     pub async fn diff_unordered(
@@ -824,12 +833,12 @@ impl ChangesetContext {
             // Build the inverse copy map (from to_path to from_path),
             // which includes the manifest entry for the from_path.
             for (from_path, to_paths) in copy_path_map.iter() {
-                let mf_entry = from_path_to_mf_entry
-                    .get(from_path)
-                    .ok_or(MononokeError::from(anyhow!(
+                let mf_entry = from_path_to_mf_entry.get(from_path).ok_or_else(|| {
+                    MononokeError::from(anyhow!(
                         "internal error: cannot find {:?} in parent commit",
                         from_path
-                    )))?;
+                    ))
+                })?;
                 for to_path in to_paths {
                     inv_copy_path_map.insert(to_path, (from_path, mf_entry.clone()));
                 }
@@ -963,7 +972,8 @@ impl ChangesetContext {
                     }
                     ManifestDiff::Removed(path, entry @ ManifestEntry::Leaf(_)) => {
                         let path = MononokePath::new(path);
-                        if let Some(_) = copy_path_map.get(&path) {
+                        #[allow(clippy::if_same_then_else)]
+                        if copy_path_map.get(&path).is_some() {
                             // The file is was moved (not removed), it will be covered by a "Moved" entry.
                             None
                         } else if !diff_files || !within_restrictions(&path, &path_restrictions) {
@@ -1060,7 +1070,7 @@ impl ChangesetContext {
             .take(limit.unwrap_or(usize::MAX))
             .try_collect::<Vec<_>>()
             .await?;
-        return Ok(change_contexts);
+        Ok(change_contexts)
     }
 
     async fn find_entries(
@@ -1108,16 +1118,34 @@ impl ChangesetContext {
         prefixes: Option<Vec<MononokePath>>,
         basenames: Option<Vec<String>>,
     ) -> Result<impl Stream<Item = Result<MononokePath, MononokeError>>, MononokeError> {
-        self.find_files(prefixes, basenames, ChangesetFileOrdering::Unordered)
-            .await
+        self.find_files(
+            prefixes,
+            basenames,
+            // None for basename_suffixes
+            None,
+            ChangesetFileOrdering::Unordered,
+        )
+        .await
     }
 
+    /// Find files after applying filters on the prefix and basename.
+    /// A files is returned if the following conditions hold:
+    /// - `prefixes` is None, or there is an element of `prefixes` such that the
+    ///   element is a prefix of the file path.
+    /// - the basename of the file path is in `basenames`, or there is a suffix
+    ///   in `basename_suffixes` such that that suffix is a suffix of the
+    ///   basename of the file, or both `basenames` and `basename_suffixes` are
+    ///   None.
+    /// The order that files are returned is based on the parameter `ordering`.
+    /// To continue a paginated query, use the parameter `ordering`.
     pub async fn find_files(
         &self,
         prefixes: Option<Vec<MononokePath>>,
         basenames: Option<Vec<String>>,
+        basename_suffixes: Option<Vec<String>>,
         ordering: ChangesetFileOrdering,
     ) -> Result<impl Stream<Item = Result<MononokePath, MononokeError>>, MononokeError> {
+        // First, find the entries, and filter by file prefix.
         let entries = self.find_entries(prefixes, ordering).await?;
         let mpaths = entries.try_filter_map(|(path, entry)| async move {
             match (path, entry) {
@@ -1125,20 +1153,71 @@ impl ChangesetContext {
                 _ => Ok(None),
             }
         });
-        let mpaths = match basenames {
-            Some(basenames) => {
-                let basename_set = basenames
+
+        // Now, construct a set of basenames to include.
+        // These basenames are of type MPathElement rather than being strings.
+        let basenames_as_mpath_elements_set = match basenames {
+            Some(basenames) => Some(
+                basenames
                     .into_iter()
                     .map(|basename| MPathElement::new(basename.into()))
                     .collect::<Result<HashSet<_>, _>>()
-                    .map_err(MononokeError::from)?;
+                    .map_err(MononokeError::from)?,
+            ),
+            None => None,
+        };
+
+        // Now, filter by basename. We use "left_stream" and "right_stream" to
+        // satisfy the type checker, because filtering a stream creates a
+        // different "type". Using left and right streams creates an Either type
+        // which satisfies the type checker.
+        let mpaths = match (basenames_as_mpath_elements_set, basename_suffixes) {
+            // If basenames and suffixes are provided, include basenames in
+            // the set basenames_as_mpath_elements_set as well as basenames
+            // with a suffix in basename_suffixes.
+            (Some(basenames_as_mpath_elements_set), Some(basename_suffixes)) => mpaths
+                .try_filter(move |mpath| {
+                    let basename = mpath.basename();
+                    future::ready(
+                        basenames_as_mpath_elements_set.contains(basename)
+                            || basename_suffixes
+                                .iter()
+                                .any(|suffix| basename.has_suffix(suffix.as_bytes())),
+                    )
+                })
+                .into_stream()
+                .left_stream()
+                .left_stream(),
+            // If no suffixes are provided, only match on basenames that are
+            // in the set.
+            (Some(basenames_as_mpath_elements_set), None) => mpaths
+                .try_filter(move |mpath| {
+                    future::ready(basenames_as_mpath_elements_set.contains(mpath.basename()))
+                })
+                .into_stream()
+                .left_stream()
+                .right_stream(),
+            (None, Some(basename_suffixes)) =>
+            // If only suffixes are provided, match on basenames that have a
+            // suffix in basename_suffixes.
+            {
                 mpaths
-                    .try_filter(move |mpath| future::ready(basename_set.contains(mpath.basename())))
+                    .try_filter(move |mpath| {
+                        let basename = mpath.basename();
+                        future::ready(
+                            basename_suffixes
+                                .iter()
+                                .any(|suffix| basename.has_suffix(suffix.as_bytes())),
+                        )
+                    })
                     .into_stream()
+                    .right_stream()
                     .left_stream()
             }
-            None => mpaths.into_stream().right_stream(),
+            // Otherwise, there are no basename filters, so do not filter.
+            (None, None) => mpaths.into_stream().right_stream().right_stream(),
         };
+
         Ok(mpaths
             .map_ok(|mpath| MononokePath::new(Some(mpath)))
             .map_err(MononokeError::from))

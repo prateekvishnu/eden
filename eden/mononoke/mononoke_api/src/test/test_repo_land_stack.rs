@@ -5,20 +5,28 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
 use blobrepo::BlobRepo;
-use bookmarks::{BookmarkName, BookmarkUpdateReason, Freshness};
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateReason;
+use bookmarks::Freshness;
+use bookmarks_movement::BookmarkKindRestrictions::AnyKind;
 use context::CoreContext;
 use fbinit::FacebookInit;
 use futures::stream::TryStreamExt;
+use hooks::CrossRepoPushSource::NativeToThisRepo;
 use maplit::hashset;
 use mononoke_types::ChangesetId;
 use tests_utils::drawdag::create_from_dag;
 
-use crate::repo::{BookmarkFreshness, Repo, RepoContext};
+use crate::repo::BookmarkFreshness;
+use crate::repo::Repo;
+use crate::repo::RepoContext;
 
 async fn init_repo(ctx: &CoreContext) -> Result<(RepoContext, BTreeMap<String, ChangesetId>)> {
     let blob_repo: BlobRepo = test_repo_factory::build_empty(ctx.fb)?;
@@ -38,12 +46,11 @@ async fn init_repo(ctx: &CoreContext) -> Result<(RepoContext, BTreeMap<String, C
         &BookmarkName::new("trunk")?,
         changesets["C"],
         BookmarkUpdateReason::TestMove,
-        None,
     )?;
     txn.commit().await?;
 
     let repo = Repo::new_test(ctx.clone(), blob_repo).await?;
-    let repo_ctx = RepoContext::new(ctx.clone(), Arc::new(repo)).await?;
+    let repo_ctx = RepoContext::new_test(ctx.clone(), Arc::new(repo)).await?;
     Ok((repo_ctx, changesets))
 }
 
@@ -51,11 +58,17 @@ async fn init_repo(ctx: &CoreContext) -> Result<(RepoContext, BTreeMap<String, C
 async fn land_stack(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
     let (repo, changesets) = init_repo(&ctx).await?;
-    let repo = repo.write().await?;
 
     // Land G - it should be rewritten even though its parent is C.
     let outcome = repo
-        .land_stack("trunk", changesets["G"], changesets["C"], None)
+        .land_stack(
+            "trunk",
+            changesets["G"],
+            changesets["C"],
+            None,
+            NativeToThisRepo,
+            AnyKind,
+        )
         .await?;
     let trunk_g = repo
         .resolve_bookmark("trunk", BookmarkFreshness::MostRecent)
@@ -68,7 +81,14 @@ async fn land_stack(fb: FacebookInit) -> Result<()> {
 
     // Land D and E, both commits should get mapped
     let outcome = repo
-        .land_stack("trunk", changesets["E"], changesets["A"], None)
+        .land_stack(
+            "trunk",
+            changesets["E"],
+            changesets["A"],
+            None,
+            NativeToThisRepo,
+            AnyKind,
+        )
         .await?;
     let trunk_e = repo
         .resolve_bookmark("trunk", BookmarkFreshness::MostRecent)
@@ -88,7 +108,14 @@ async fn land_stack(fb: FacebookInit) -> Result<()> {
 
     // Land F, its parent should be the landed version of E
     let outcome = repo
-        .land_stack("trunk", changesets["F"], changesets["B"], None)
+        .land_stack(
+            "trunk",
+            changesets["F"],
+            changesets["B"],
+            None,
+            NativeToThisRepo,
+            AnyKind,
+        )
         .await?;
     let trunk_f = repo
         .resolve_bookmark("trunk", BookmarkFreshness::MostRecent)

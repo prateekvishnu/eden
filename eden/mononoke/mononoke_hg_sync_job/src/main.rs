@@ -13,48 +13,85 @@
 /// It's a special job that is used to synchronize Mononoke to Mercurial when Mononoke is a source
 /// of truth. All writes to Mononoke are replayed to Mercurial using this job. That can be used
 /// to verify Mononoke's correctness and/or use hg as a disaster recovery mechanism.
-use anyhow::{bail, format_err, Error, Result};
-use blobrepo::BlobRepo;
-use bookmarks::{BookmarkName, BookmarkUpdateLog, BookmarkUpdateLogEntry, Freshness};
+use anyhow::bail;
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
+use async_trait::async_trait;
+use bonsai_globalrev_mapping::BonsaiGlobalrevMapping;
+use bonsai_hg_mapping::BonsaiHgMapping;
+use bonsai_hg_mapping::BonsaiHgMappingRef;
+use bookmarks::BookmarkName;
+use bookmarks::BookmarkUpdateLog;
+use bookmarks::BookmarkUpdateLogEntry;
+use bookmarks::Freshness;
 use borrowed::borrowed;
 use bundle_generator::FilenodeVerifier;
-use bundle_preparer::{maybe_adjust_batch, BundlePreparer};
-use clap_old::{Arg, ArgGroup, SubCommand};
+use bundle_preparer::maybe_adjust_batch;
+use bundle_preparer::BundlePreparer;
+use changeset_fetcher::ChangesetFetcher;
+use changesets::Changesets;
+use clap_old::Arg;
+use clap_old::ArgGroup;
+use clap_old::SubCommand;
 use cloned::cloned;
-use cmdlib::{
-    args::{self, MononokeMatches},
-    helpers::block_execute,
-};
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers::block_execute;
 use context::CoreContext;
 use darkstorm_verifier::DarkstormVerifier;
 use dbbookmarks::SqlBookmarksBuilder;
+use executor_lib::BackgroundProcessExecutor;
+use executor_lib::RepoShardedProcess;
+use executor_lib::RepoShardedProcessExecutor;
 use fbinit::FacebookInit;
-use futures::{
-    future::{self, try_join, try_join3, BoxFuture, FutureExt as _, TryFutureExt},
-    pin_mut,
-    stream::{self, StreamExt, TryStreamExt},
-    Stream,
-};
-use futures_stats::{futures03::TimedFutureExt, FutureStats};
+use filestore::FilestoreConfig;
+use filestore::FilestoreConfigRef;
+use futures::future;
+use futures::future::try_join;
+use futures::future::try_join3;
+use futures::future::BoxFuture;
+use futures::future::FutureExt as _;
+use futures::future::TryFutureExt;
+use futures::pin_mut;
+use futures::stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use futures::Stream;
+use futures_stats::futures03::TimedFutureExt;
+use futures_stats::FutureStats;
 use futures_watchdog::WatchdogExt;
 use http::Uri;
 use lfs_verifier::LfsVerifier;
 use mercurial_types::HgChangesetId;
-use metaconfig_types::HgsqlName;
-use metaconfig_types::RepoReadOnly;
-use mononoke_api_types::InnerRepo;
 use mononoke_types::ChangesetId;
-use mutable_counters::{ArcMutableCounters, MutableCountersArc};
+use mononoke_types::RepositoryId;
+use mutable_counters::ArcMutableCounters;
+use mutable_counters::MutableCounters;
+use mutable_counters::MutableCountersArc;
+use once_cell::sync::OnceCell;
 use regex::Regex;
-use repo_read_write_status::{RepoReadWriteFetcher, SqlRepoReadWriteStatus};
-use retry::{retry, RetryAttemptsCount};
+use repo_blobstore::RepoBlobstore;
+use repo_blobstore::RepoBlobstoreRef;
+use repo_derived_data::RepoDerivedData;
+use repo_identity::RepoIdentity;
+use repo_lock::MutableRepoLock;
+use repo_lock::RepoLock;
+use repo_lock::RepoLockState;
+use repo_lock::SqlRepoLock;
+use retry::retry;
+use retry::RetryAttemptsCount;
 use scuba_ext::MononokeScubaSampleBuilder;
-use slog::{error, info};
-use sql_construct::{facebook::FbSqlConstruct, SqlConstruct};
-use sql_ext::facebook::MysqlOptions;
+use skiplist::SkiplistIndex;
+use slog::error;
+use slog::info;
+use sql_construct::SqlConstructFromMetadataDatabaseConfig;
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::NamedTempFile;
@@ -67,13 +104,13 @@ mod globalrev_syncer;
 mod hgrepo;
 mod lfs_verifier;
 
-use errors::{
-    ErrorKind::SyncFailed,
-    PipelineError::{self, AnonymousError, EntryError},
-};
+use errors::ErrorKind::SyncFailed;
+use errors::PipelineError;
+use errors::PipelineError::AnonymousError;
+use errors::PipelineError::EntryError;
 use globalrev_syncer::GlobalrevSyncer;
-use hgrepo::{list_hg_server_bookmarks, HgRepo};
-use hgserver_config::ServerConfig;
+use hgrepo::list_hg_server_bookmarks;
+use hgrepo::HgRepo;
 
 const ARG_BOOKMARK_REGEX_FORCE_GENERATE_LFS: &str = "bookmark-regex-force-generate-lfs";
 const ARG_BOOKMARK_MOVE_ANY_DIRECTION: &str = "bookmark-move-any-direction";
@@ -83,26 +120,384 @@ const ARG_DARKSTORM_BACKUP_REPO_GROUP: &str = "darkstorm-backup-repo";
 const ARG_DARKSTORM_BACKUP_REPO_ID: &str = "darkstorm-backup-repo-id";
 const ARG_DARKSTORM_BACKUP_REPO_NAME: &str = "darkstorm-backup-repo-name";
 const ARG_BYPASS_READONLY: &str = "bypass-readonly";
-const GENERATE_BUNDLES: &str = "generate-bundles";
 const MODE_SYNC_ONCE: &str = "sync-once";
 const MODE_SYNC_LOOP: &str = "sync-loop";
+const JOB_TYPE: &str = "job-type";
+const JOB_TYPE_PROD: &str = "prod";
+const JOB_TYPE_BACKUP: &str = "backup";
 const LATEST_REPLAYED_REQUEST_KEY: &str = "latest-replayed-request";
 const SLEEP_SECS: u64 = 1;
 const SCUBA_TABLE: &str = "mononoke_hg_sync";
-const UNLOCK_REASON: &str = "Unlocked by successful sync";
 const LOCK_REASON: &str = "Locked due to sync failure, check Source Control @ FB";
 
 const HGSQL_GLOBALREVS_USE_SQLITE: &str = "hgsql-globalrevs-use-sqlite";
 const HGSQL_GLOBALREVS_DB_ADDR: &str = "hgsql-globalrevs-db-addr";
 
-const DEFAULT_RETRY_NUM: usize = 3;
+// Since the job is sharded with shard-level health check, keep the app
+// level retries to a minimum. The manager will auto-restart the failing
+// repo.
+const DEFAULT_RETRY_NUM: usize = 1;
 const DEFAULT_BATCH_SIZE: usize = 10;
 const DEFAULT_SINGLE_BUNDLE_TIMEOUT_MS: u64 = 5 * 60 * 1000;
 
-const CONFIGERATOR_HGSERVER_PATH: &str = "scm/mononoke/hgserverconf/hgserver";
-
 #[derive(Copy, Clone)]
 struct QueueSize(usize);
+
+const SM_SERVICE_SCOPE: &str = "global";
+const SM_CLEANUP_TIMEOUT_SECS: u64 = 120;
+
+/// Struct representing the Hg Sync BP.
+pub struct HgSyncProcess {
+    matches: Arc<MononokeMatches<'static>>,
+    fb: FacebookInit,
+}
+
+#[facet::container]
+#[derive(Clone)]
+pub struct Repo {
+    #[facet]
+    pub changeset_fetcher: dyn ChangesetFetcher,
+
+    #[facet]
+    pub changesets: dyn Changesets,
+
+    #[facet]
+    pub bonsai_hg_mapping: dyn BonsaiHgMapping,
+
+    #[facet]
+    pub mutable_counters: dyn MutableCounters,
+
+    #[facet]
+    pub bonsai_globalrev_mapping: dyn BonsaiGlobalrevMapping,
+
+    #[facet]
+    pub repo_identity: RepoIdentity,
+
+    #[init(repo_identity.id())]
+    pub repoid: RepositoryId,
+
+    #[init(repo_identity.name().to_string())]
+    pub repo_name: String,
+
+    #[facet]
+    pub repo_blobstore: RepoBlobstore,
+
+    #[facet]
+    pub filestore_config: FilestoreConfig,
+
+    #[facet]
+    pub skiplist_index: SkiplistIndex,
+
+    #[facet]
+    pub repo_derived_data: RepoDerivedData,
+}
+
+impl HgSyncProcess {
+    fn new(fb: FacebookInit) -> Result<Self> {
+        let app = args::MononokeAppBuilder::new("Mononoke -> hg sync job")
+        .with_advanced_args_hidden()
+        .with_fb303_args()
+        .with_dynamic_repos()
+        .build()
+        .arg(
+            Arg::with_name(JOB_TYPE)
+            .long(JOB_TYPE)
+            .takes_value(true)
+            .help("The type of hg-sync job. Allowed values: prod, backup")
+        )
+        .arg(
+            Arg::with_name("hg-repo-ssh-path")
+                .takes_value(true)
+                .help("Remote path to hg repo to replay to. Example: ssh://hg.vip.facebook.com//data/scm/fbsource"),
+        )
+        .arg(
+            Arg::with_name("log-to-scuba")
+                .long("log-to-scuba")
+                .takes_value(false)
+                .required(false)
+                .help("If set job will log individual bundle sync states to Scuba"),
+        )
+        .arg(
+            Arg::with_name("lock-on-failure")
+                .long("lock-on-failure")
+                .takes_value(false)
+                .required(false)
+                .help("If set, mononoke repo will be locked on sync failure"),
+        )
+        .arg(
+            Arg::with_name("base-retry-delay-ms")
+                .long("base-retry-delay-ms")
+                .takes_value(true)
+                .required(false)
+                .help("initial delay between failures. It will be increased on the successive attempts")
+        )
+        .arg(
+            Arg::with_name("retry-num")
+                .long("retry-num")
+                .takes_value(true)
+                .required(false)
+                .help("how many times to retry to sync a single bundle")
+        )
+        .arg(
+            Arg::with_name("batch-size")
+                .long("batch-size")
+                .takes_value(true)
+                .required(false)
+                .help("maximum number of bundles allowed over a single hg peer")
+        )
+        .arg(
+            Arg::with_name("single-bundle-timeout-ms")
+                .long("single-bundle-timeout-ms")
+                .takes_value(true)
+                .required(false)
+                .help("a timeout to send a single bundle to (if exceeded, the peer is restarted)")
+        )
+        .arg(
+            Arg::with_name("verify-server-bookmark-on-failure")
+                .long("verify-server-bookmark-on-failure")
+                .takes_value(false)
+                .required(false)
+                .help("if present, check after a failure whether a server bookmark is already in the expected location")
+        )
+        .arg(
+            Arg::with_name(HGSQL_GLOBALREVS_USE_SQLITE)
+                .long(HGSQL_GLOBALREVS_USE_SQLITE)
+                .takes_value(false)
+                .required(false)
+                .help("Use sqlite for hgsql globalrev sync (use for testing)."),
+        )
+        .arg(
+            Arg::with_name(HGSQL_GLOBALREVS_DB_ADDR)
+                .long(HGSQL_GLOBALREVS_DB_ADDR)
+                .takes_value(true)
+                .required(false)
+                .help("unused"),
+        )
+        .arg(
+            Arg::with_name(ARG_BOOKMARK_REGEX_FORCE_GENERATE_LFS)
+                .long(ARG_BOOKMARK_REGEX_FORCE_GENERATE_LFS)
+                .takes_value(true)
+                .required(false)
+                .help("force generation of lfs bundles for bookmarks that match regex"),
+        )
+        .arg(
+            Arg::with_name("verify-lfs-blob-presence")
+                .long("verify-lfs-blob-presence")
+                .takes_value(true)
+                .required(false)
+                .help("If generating bundles, verify lfs blob presence at this batch endpoint"),
+        )
+        .arg(
+            Arg::with_name(ARG_USE_HG_SERVER_BOOKMARK_VALUE_IF_MISMATCH)
+                .long(ARG_USE_HG_SERVER_BOOKMARK_VALUE_IF_MISMATCH)
+                .takes_value(false)
+                .required(false)
+                .help("Every bundle generated by hg sync job tells hg server \
+                'move bookmark BM from commit A to commit B' where commit A is the previous \
+                value of the bookmark BM and commit B is the new value of the bookmark. \
+                Sync job takes commit A from bookmark update log entry. \
+                However it's possible that server's bookmark BM doesn't point to the same commit \
+                as bookmark update log entry. \
+                While usually it's a sign of problem in some cases it's an expected behaviour. \
+                If this option is set let's allow sync job to take previous value of bookmark \
+                from the server"),
+        )
+        .arg(
+            Arg::with_name(ARG_BOOKMARK_MOVE_ANY_DIRECTION)
+                .long(ARG_BOOKMARK_MOVE_ANY_DIRECTION)
+                .takes_value(false)
+                .required(false)
+                .help("This flag controls whether we tell the server to allow \
+                the bookmark movement in any direction (adding pushvar NON_FAST_FORWARD=true). \
+                However, the server checks its per bookmark configuration before move."),
+        )
+        .arg(
+            Arg::with_name(ARG_DARKSTORM_BACKUP_REPO_ID)
+            .long(ARG_DARKSTORM_BACKUP_REPO_ID)
+            .takes_value(true)
+            .required(false)
+            .help("Start hg-sync-job for syncing prod repo and darkstorm backup mononoke repo \
+            and use darkstorm-backup-repo-id value as a target for sync."),
+        )
+        .arg(
+            Arg::with_name(ARG_DARKSTORM_BACKUP_REPO_NAME)
+            .long(ARG_DARKSTORM_BACKUP_REPO_NAME)
+            .takes_value(true)
+            .required(false)
+            .help("Start hg-sync-job for syncing prod repo and darkstorm backup mononoke repo \
+            and use darkstorm-backup-repo-name as a target for sync."),
+        )
+        .group(
+            ArgGroup::with_name(ARG_DARKSTORM_BACKUP_REPO_GROUP)
+                .args(&[ARG_DARKSTORM_BACKUP_REPO_ID, ARG_DARKSTORM_BACKUP_REPO_NAME])
+        )
+        .arg(
+            Arg::with_name(ARG_BYPASS_READONLY)
+                .long(ARG_BYPASS_READONLY)
+                .takes_value(false)
+                .required(false)
+                .help("This flag make it possible to push bundle into readonly repos \
+                (by adding pushvar BYPASS_READONLY=true)."),
+        )
+        .about(
+            "Special job that takes bundles that were sent to Mononoke and \
+             applies them to mercurial",
+        );
+
+        let sync_once = SubCommand::with_name(MODE_SYNC_ONCE)
+            .about("Syncs a single bundle")
+            .arg(
+                Arg::with_name("start-id")
+                    .long("start-id")
+                    .takes_value(true)
+                    .required(true)
+                    .help("id in the database table to start sync with"),
+            );
+        let sync_loop = SubCommand::with_name(MODE_SYNC_LOOP)
+            .about("Syncs bundles one by one")
+            .arg(
+                Arg::with_name("start-id")
+                    .long("start-id")
+                    .takes_value(true)
+                    .required(true)
+                    .help("if current counter is not set then `start-id` will be used"),
+            )
+            .arg(
+                Arg::with_name("loop-forever")
+                    .long("loop-forever")
+                    .takes_value(false)
+                    .required(false)
+                    .help(
+                        "If set job will loop forever even if there are no new entries in db or \
+                     if there was an error",
+                    ),
+            )
+            .arg(
+                Arg::with_name("bundle-prefetch")
+                    .long("bundle-prefetch")
+                    .takes_value(true)
+                    .required(false)
+                    .help("How many bundles to prefetch"),
+            )
+            .arg(
+                Arg::with_name("exit-file")
+                    .long("exit-file")
+                    .takes_value(true)
+                    .required(false)
+                    .help(
+                        "If you provide this argument, the sync loop will gracefully exit \
+                     once this file exists",
+                    ),
+            )
+            .arg(
+                Arg::with_name("combine-bundles")
+                    .long("combine-bundles")
+                    .takes_value(true)
+                    .required(false)
+                    .help("How many bundles to combine into a single bundle before sending to hg"),
+            );
+        let app = app.subcommand(sync_once).subcommand(sync_loop);
+
+        let matches = Arc::new(app.get_matches(fb)?);
+        Ok(Self { matches, fb })
+    }
+}
+
+#[async_trait]
+impl RepoShardedProcess for HgSyncProcess {
+    async fn setup(&self, repo_name: &str) -> anyhow::Result<Arc<dyn RepoShardedProcessExecutor>> {
+        info!(
+            self.matches.logger(),
+            "Setting up hg sync command for repo {}", repo_name
+        );
+        let executor =
+            HgSyncProcessExecutor::new(self.fb, Arc::clone(&self.matches), repo_name.to_string());
+        info!(
+            self.matches.logger(),
+            "Completed hg sync command setup for repo {}", repo_name
+        );
+        Ok(Arc::new(executor))
+    }
+}
+
+/// Struct representing the execution of the Hg Sync
+/// BP over the context of a provided repo.
+pub struct HgSyncProcessExecutor {
+    matches: Arc<MononokeMatches<'static>>,
+    ctx: CoreContext,
+    cancellation_requested: Arc<AtomicBool>,
+    repo_name: String,
+}
+
+impl HgSyncProcessExecutor {
+    fn new(fb: FacebookInit, matches: Arc<MononokeMatches<'static>>, repo_name: String) -> Self {
+        let ctx = CoreContext::new_with_logger(fb, matches.logger().clone())
+            .clone_with_repo_name(&repo_name);
+        Self {
+            matches,
+            ctx,
+            repo_name,
+            cancellation_requested: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+#[async_trait]
+impl RepoShardedProcessExecutor for HgSyncProcessExecutor {
+    async fn execute(&self) -> anyhow::Result<()> {
+        info!(
+            self.ctx.logger(),
+            "Initiating hg sync command execution for repo {}", &self.repo_name,
+        );
+        let base_retry_delay_ms = 1000;
+        retry(
+            self.ctx.logger(),
+            |attempt| async move {
+                // Once cancellation is requested, do not retry even if its
+                // a retryable error.
+                if self.cancellation_requested.load(Ordering::Relaxed) {
+                    info!(
+                        self.ctx.logger(),
+                        "sync stopping due to cancellation request at attempt {}", attempt
+                    );
+                    anyhow::Ok(())
+                } else {
+                    run(
+                        &self.ctx,
+                        &self.matches,
+                        self.repo_name.clone(),
+                        Arc::clone(&self.cancellation_requested),
+                    )
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Error during hg sync command execution for repo {}. Attempt number {}",
+                            &self.repo_name, attempt
+                        )
+                    })?;
+                    anyhow::Ok(())
+                }
+            },
+            base_retry_delay_ms,
+            DEFAULT_RETRY_NUM,
+        )
+        .await?;
+        info!(
+            self.ctx.logger(),
+            "Finished hg sync command execution for repo {}", &self.repo_name,
+        );
+        Ok(())
+    }
+
+    async fn stop(&self) -> anyhow::Result<()> {
+        info!(
+            self.ctx.logger(),
+            "Terminating hg sync command execution for repo {}", &self.repo_name,
+        );
+        self.cancellation_requested.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+}
 
 struct PipelineState<T> {
     entries: Vec<BookmarkUpdateLogEntry>,
@@ -215,100 +610,41 @@ where
     }
 }
 
-fn get_read_write_fetcher(
-    fb: FacebookInit,
-    mysql_options: &MysqlOptions,
-    repo_lock_db_addr: Option<&str>,
-    hgsql_name: HgsqlName,
-    lock_on_failure: bool,
-    use_sqlite: bool,
-    readonly_storage: bool,
-) -> Result<(Option<RepoReadWriteFetcher>, RepoReadWriteFetcher)> {
-    let unlock_via: Result<RepoReadWriteFetcher> = match repo_lock_db_addr {
-        Some(repo_lock_db_addr) => {
-            let sql_repo_read_write_status = if use_sqlite {
-                let path = Path::new(repo_lock_db_addr);
-                SqlRepoReadWriteStatus::with_sqlite_path(path, readonly_storage)
-            } else {
-                SqlRepoReadWriteStatus::with_mysql(
-                    fb,
-                    repo_lock_db_addr.to_string(),
-                    mysql_options,
-                    readonly_storage,
-                )
-            };
-            sql_repo_read_write_status.and_then(|connection| {
-                Ok(RepoReadWriteFetcher::new(
-                    Some(connection),
-                    RepoReadOnly::ReadWrite,
-                    hgsql_name,
-                ))
-            })
-        }
-        None => {
-            if lock_on_failure {
-                Err(Error::msg(
-                    "repo_lock_db_addr not specified with lock_on_failure",
-                ))
-            } else {
-                Ok(RepoReadWriteFetcher::new(
-                    None,
-                    RepoReadOnly::ReadWrite,
-                    hgsql_name,
-                ))
-            }
-        }
-    };
-
-    unlock_via.and_then(|v| {
-        let lock_via = if lock_on_failure {
-            Some(v.clone())
-        } else {
-            None
-        };
-        Ok((lock_via, v))
-    })
-}
-
-async fn unlock_repo_if_locked(
-    ctx: &CoreContext,
-    read_write_fetcher: &RepoReadWriteFetcher,
-) -> Result<(), Error> {
-    let repo_state = read_write_fetcher.readonly().await?;
+async fn unlock_repo_if_locked(ctx: &CoreContext, repo_lock: &dyn RepoLock) -> Result<(), Error> {
+    let repo_state = repo_lock.check_repo_lock().await?;
 
     match repo_state {
-        RepoReadOnly::ReadOnly(ref lock_msg) if lock_msg == LOCK_REASON => {
-            let updated = read_write_fetcher
-                .set_mononoke_read_write(&UNLOCK_REASON.to_string())
-                .await?;
+        RepoLockState::Locked(ref lock_msg) if lock_msg == LOCK_REASON => {
+            let updated = repo_lock.set_repo_lock(RepoLockState::Unlocked).await?;
+
             if updated {
                 info!(ctx.logger(), "repo is unlocked");
             }
+
             Ok(())
         }
-        RepoReadOnly::ReadOnly(..) | RepoReadOnly::ReadWrite => Ok(()),
+        RepoLockState::Locked(..) | RepoLockState::Unlocked => Ok(()),
     }
 }
 
-async fn lock_repo_if_unlocked(
-    ctx: &CoreContext,
-    read_write_fetcher: &RepoReadWriteFetcher,
-) -> Result<(), Error> {
+async fn lock_repo_if_unlocked(ctx: &CoreContext, repo_lock: &dyn RepoLock) -> Result<(), Error> {
     info!(ctx.logger(), "locking repo...");
-    let repo_state = read_write_fetcher.readonly().await?;
+    let repo_state = repo_lock.check_repo_lock().await?;
 
     match repo_state {
-        RepoReadOnly::ReadWrite => {
-            let updated = read_write_fetcher
-                .set_read_only(&LOCK_REASON.to_string())
+        RepoLockState::Unlocked => {
+            let updated = repo_lock
+                .set_repo_lock(RepoLockState::Locked(LOCK_REASON.to_string()))
                 .await?;
+
             if updated {
                 info!(ctx.logger(), "repo is locked now");
             }
+
             Ok(())
         }
 
-        RepoReadOnly::ReadOnly(ref lock_msg) => {
+        RepoLockState::Locked(ref lock_msg) => {
             info!(ctx.logger(), "repo is locked already: {}", lock_msg);
             Ok(())
         }
@@ -317,7 +653,7 @@ async fn lock_repo_if_unlocked(
 
 fn build_outcome_handler<'a>(
     ctx: &'a CoreContext,
-    lock_via: &'a Option<RepoReadWriteFetcher>,
+    lock_via: Option<&'a dyn RepoLock>,
 ) -> impl Fn(Outcome) -> BoxFuture<'a, Result<Vec<BookmarkUpdateLogEntry>, Error>> {
     move |res| {
         async move {
@@ -331,12 +667,12 @@ fn build_outcome_handler<'a>(
                     Ok(entries)
                 }
                 Err(AnonymousError { cause: e }) => {
-                    info!(ctx.logger(), "error without entry");
+                    error!(ctx.logger(), "Error without entry: {:?}", e);
                     Err(e)
                 }
-                Err(EntryError { cause: e, .. }) => match &lock_via {
-                    Some(repo_read_write_fetcher) => {
-                        let _ = lock_repo_if_unlocked(ctx, repo_read_write_fetcher).await;
+                Err(EntryError { cause: e, .. }) => match lock_via {
+                    Some(repo_lock) => {
+                        let _ = lock_repo_if_unlocked(ctx, repo_lock).await;
                         Err(e)
                     }
                     None => Err(e),
@@ -413,8 +749,8 @@ async fn sync_single_combined_entry(
     }
 
     let (_, attempts) = retry(
-        &ctx.logger(),
-        |attempt| try_sync_single_combined_entry(&ctx, attempt, &combined_entry, &hg_repo),
+        ctx.logger(),
+        |attempt| try_sync_single_combined_entry(ctx, attempt, combined_entry, hg_repo),
         base_retry_delay_ms,
         retry_num,
     )
@@ -498,7 +834,7 @@ fn get_path(f: &NamedTempFile) -> Result<String> {
     f.path()
         .to_str()
         .map(|s| s.to_string())
-        .ok_or(Error::msg("non-utf8 file"))
+        .ok_or_else(|| Error::msg("non-utf8 file"))
 }
 
 fn loop_over_log_entries<'a, B>(
@@ -508,17 +844,14 @@ fn loop_over_log_entries<'a, B>(
     loop_forever: bool,
     scuba_sample: &'a MononokeScubaSampleBuilder,
     fetch_up_to_bundles: u64,
-    repo_read_write_fetcher: &'a RepoReadWriteFetcher,
+    repo_lock: Arc<dyn RepoLock>,
 ) -> impl Stream<Item = Result<Vec<BookmarkUpdateLogEntry>, Error>> + 'a
 where
     B: BookmarkUpdateLog + Clone,
 {
     stream::try_unfold(Some(start_id), {
-        let ctx = ctx.clone();
-        let bookmarks = bookmarks.clone();
         move |maybe_id| {
-            let ctx = ctx.clone();
-            let bookmarks = bookmarks.clone();
+            cloned!(ctx, bookmarks, repo_lock);
             async move {
                 match maybe_id {
                     Some(current_id) => {
@@ -542,9 +875,10 @@ where
                                     // Some(current_id) means that bookmarks will be fetched again
                                     tokio::time::sleep(Duration::new(SLEEP_SECS, 0)).await;
 
-                                    unlock_repo_if_locked(&ctx, &repo_read_write_fetcher)
+                                    unlock_repo_if_locked(&ctx, repo_lock.as_ref())
                                         .watched(ctx.logger())
                                         .await?;
+
                                     Ok(Some((vec![], Some(current_id))))
                                 } else {
                                     Ok(Some((vec![], None)))
@@ -608,10 +942,7 @@ struct LatestReplayedSyncCounter {
 }
 
 impl LatestReplayedSyncCounter {
-    fn new(
-        source_repo: &BlobRepo,
-        darkstorm_backup_repo: Option<&BlobRepo>,
-    ) -> Result<Self, Error> {
+    fn new(source_repo: &Repo, darkstorm_backup_repo: Option<&Repo>) -> Result<Self, Error> {
         if let Some(backup_repo) = darkstorm_backup_repo {
             let mutable_counters = backup_repo.mutable_counters_arc();
             Ok(Self { mutable_counters })
@@ -640,10 +971,27 @@ impl LatestReplayedSyncCounter {
     }
 }
 
-async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(), Error> {
-    let hg_repo_path = match matches.value_of("hg-repo-ssh-path") {
-        Some(hg_repo_path) => hg_repo_path.to_string(),
-        None => {
+async fn run<'a>(
+    ctx: &CoreContext,
+    matches: &'a MononokeMatches<'a>,
+    repo_name: String,
+    cancellation_requested: Arc<AtomicBool>,
+) -> Result<(), Error> {
+    let config_store = matches.config_store();
+    let resolved_repo = args::resolve_repo_by_name(config_store, matches, &repo_name)
+        .with_context(|| format!("Invalid repo name provided: {}", &repo_name))?;
+    let repo_config = resolved_repo.config.clone();
+    let repo_id = resolved_repo.id;
+    let job_config = match matches.value_of(JOB_TYPE) {
+        Some(JOB_TYPE_PROD) => repo_config.hg_sync_config,
+        Some(JOB_TYPE_BACKUP) => repo_config.backup_hg_sync_config,
+        _ => None,
+    };
+
+    let hg_repo_path = match (&job_config, matches.value_of("hg-repo-ssh-path")) {
+        (Some(config), _) => config.hg_repo_ssh_path.to_string(),
+        (_, Some(hg_repo_path)) => hg_repo_path.to_string(),
+        _ => {
             error!(ctx.logger(), "Path to hg repository must be specified");
             std::process::exit(1);
         }
@@ -660,9 +1008,6 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
     let mysql_options = matches.mysql_options();
     let readonly_storage = matches.readonly_storage();
     let config_store = matches.config_store();
-
-    let repo_id = args::get_repo_id(config_store, matches).expect("need repo id");
-    let (repo_name, repo_config) = args::get_config(config_store, matches)?;
 
     let base_retry_delay_ms = args::get_u64_opt(matches, "base-retry-delay-ms").unwrap_or(1000);
     let retry_num = args::get_usize(matches, "retry-num", DEFAULT_RETRY_NUM);
@@ -690,26 +1035,40 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
 
     let use_hg_server_bookmark_value_if_mismatch =
         matches.is_present(ARG_USE_HG_SERVER_BOOKMARK_VALUE_IF_MISMATCH);
-    let maybe_darkstorm_backup_repo = if matches.is_present(ARG_DARKSTORM_BACKUP_REPO_ID)
-        || matches.is_present(ARG_DARKSTORM_BACKUP_REPO_NAME)
-    {
-        let backup_repo_id = args::get_repo_id_from_value(
-            config_store,
-            &matches,
-            ARG_DARKSTORM_BACKUP_REPO_ID,
-            ARG_DARKSTORM_BACKUP_REPO_NAME,
-        )?;
-        let backup_repo: BlobRepo =
-            args::open_repo_by_id(ctx.fb, &ctx.logger(), &matches, backup_repo_id).await?;
+    let maybe_darkstorm_backup_repo = match (
+        (matches.is_present(ARG_DARKSTORM_BACKUP_REPO_ID)
+            || matches.is_present(ARG_DARKSTORM_BACKUP_REPO_NAME)),
+        job_config.as_ref().and_then(|c| c.darkstorm_backup_repo_id),
+    ) {
+        (_, Some(backup_repo_id)) => {
+            let backup_repo_id =
+                args::resolve_repo_by_id(config_store, matches, backup_repo_id)?.id;
+            let backup_repo: Repo =
+                args::open_repo_by_id(ctx.fb, ctx.logger(), matches, backup_repo_id).await?;
 
-        scuba_sample.add("repo", backup_repo.get_repoid().id());
-        scuba_sample.add("reponame", backup_repo.name().clone());
+            scuba_sample.add("repo", backup_repo.repoid.id());
+            scuba_sample.add("reponame", backup_repo.repo_name.clone());
+            Some(backup_repo)
+        }
+        (true, _) => {
+            let backup_repo_id = args::get_repo_id_from_value(
+                config_store,
+                matches,
+                ARG_DARKSTORM_BACKUP_REPO_ID,
+                ARG_DARKSTORM_BACKUP_REPO_NAME,
+            )?;
+            let backup_repo: Repo =
+                args::open_repo_by_id(ctx.fb, ctx.logger(), matches, backup_repo_id).await?;
 
-        Some(backup_repo)
-    } else {
-        scuba_sample.add("repo", repo_id.id());
-        scuba_sample.add("reponame", repo_name.clone());
-        None
+            scuba_sample.add("repo", backup_repo.repoid.id());
+            scuba_sample.add("reponame", backup_repo.repo_name.clone());
+            Some(backup_repo)
+        }
+        _ => {
+            scuba_sample.add("repo", repo_id.id());
+            scuba_sample.add("reponame", repo_name.clone());
+            None
+        }
     };
 
     let (repo, repo_parts) = {
@@ -717,20 +1076,20 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
         // FIXME: this cloned! will go away once HgRepo is asyncified
         cloned!(hg_repo_path);
 
-        let (repo, preparer): (BlobRepo, BoxFuture<Result<Arc<BundlePreparer>, Error>>) = {
-            let repo: InnerRepo = args::open_repo(ctx.fb, ctx.logger(), matches).await?;
+        let (repo, preparer): (Repo, BoxFuture<Result<Arc<BundlePreparer>, Error>>) = {
+            let repo: Repo = args::open_repo_by_id(ctx.fb, ctx.logger(), matches, repo_id).await?;
             let filenode_verifier = match verify_lfs_blob_presence {
                 Some(uri) => {
                     let uri = uri.parse::<Uri>()?;
-                    let verifier = LfsVerifier::new(uri, Arc::new(repo.blob_repo.get_blobstore()))?;
+                    let verifier = LfsVerifier::new(uri, Arc::new(repo.repo_blobstore().clone()))?;
                     FilenodeVerifier::LfsVerifier(verifier)
                 }
                 None => match maybe_darkstorm_backup_repo {
                     Some(ref backup_repo) => {
                         let verifier = DarkstormVerifier::new(
-                            Arc::new(repo.blob_repo.get_blobstore()),
-                            Arc::new(backup_repo.get_blobstore()),
-                            backup_repo.filestore_config(),
+                            Arc::new(repo.repo_blobstore().clone()),
+                            Arc::new(backup_repo.repo_blobstore().clone()),
+                            backup_repo.filestore_config().clone(),
                         );
                         FilenodeVerifier::DarkstormVerifier(verifier)
                     }
@@ -738,7 +1097,7 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
                 },
             };
             (
-                repo.blob_repo.clone(),
+                repo.clone(),
                 BundlePreparer::new_generate_bundles(
                     repo,
                     base_retry_delay_ms,
@@ -801,8 +1160,10 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
 
         (repo, try_join3(preparer, overlay, globalrev_syncer))
     };
-
-    let batch_size = args::get_usize(matches, "batch-size", DEFAULT_BATCH_SIZE);
+    let batch_size = match job_config.as_ref().map(|c| c.batch_size) {
+        Some(size) => size as usize,
+        None => args::get_usize(matches, "batch-size", DEFAULT_BATCH_SIZE),
+    };
     let single_bundle_timeout_ms = args::get_u64(
         matches,
         "single-bundle-timeout-ms",
@@ -815,23 +1176,42 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
         single_bundle_timeout_ms,
         verify_server_bookmark_on_failure,
     )?;
-
-    let bookmarks = args::open_sql::<SqlBookmarksBuilder>(ctx.fb, config_store, &matches)?;
+    let bookmarks =
+        args::open_sql_with_config::<SqlBookmarksBuilder>(ctx.fb, matches, &resolved_repo.config)?;
 
     let bookmarks = bookmarks.with_repo_id(repo_id);
-    let reporting_handler = build_reporting_handler(&ctx, &scuba_sample, retry_num, &bookmarks);
+    let reporting_handler = build_reporting_handler(ctx, &scuba_sample, retry_num, &bookmarks);
+    let lock_on_failure = match job_config.as_ref().map(|c| c.lock_on_failure) {
+        Some(lock_on_failure) => lock_on_failure,
+        None => matches.is_present("lock-on-failure"),
+    };
 
-    let (lock_via, unlock_via) = get_read_write_fetcher(
+    let sql_repo_lock = SqlRepoLock::with_metadata_database_config(
         ctx.fb,
-        &mysql_options,
-        get_repo_sqldb_address(&matches, &repo_config.hgsql_name)?.as_deref(),
-        repo_config.hgsql_name.clone(),
-        matches.is_present("lock-on-failure"),
-        matches.is_present("repo-lock-sqlite"),
+        &repo_config.storage_config.metadata,
+        mysql_options,
         readonly_storage.0,
     )?;
 
+    let repo_lock: Arc<dyn RepoLock> = Arc::new(MutableRepoLock::new(sql_repo_lock, repo_id));
+
+    let unlock_via = repo_lock.clone();
+
+    let lock_via = if lock_on_failure {
+        Some(repo_lock.as_ref())
+    } else {
+        None
+    };
+
+    // Before beginning any actual processing, check if cancellation has been requested.
+    // If yes, then lets return early.
+    if cancellation_requested.load(Ordering::Relaxed) {
+        info!(ctx.logger(), "sync stopping due to cancellation request");
+        return Ok(());
+    }
     match matches.subcommand() {
+        // In sync-mode, the command will auto-terminate after one iteration.
+        // Hence, no need to check cancellation flag.
         (MODE_SYNC_ONCE, Some(sub_m)) => {
             let start_id = args::get_usize_opt(&sub_m, "start-id")
                 .ok_or_else(|| Error::msg("--start-id must be specified"))?;
@@ -851,15 +1231,15 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
             if let Some(log_entry) = maybe_log_entry {
                 let (stats, res) = async {
                     let batches = bundle_preparer
-                        .prepare_batches(&ctx, vec![log_entry.clone()])
+                        .prepare_batches(ctx, vec![log_entry.clone()])
                         .await?;
                     let mut combined_entries = bundle_preparer
-                        .prepare_bundles(&ctx, batches, &mut overlay)
+                        .prepare_bundles(ctx.clone(), batches, &mut overlay)
                         .await?;
 
                     let combined_entry = combined_entries.remove(0);
                     sync_single_combined_entry(
-                        &ctx,
+                        ctx,
                         &combined_entry,
                         &hg_repo,
                         base_retry_delay_ms,
@@ -877,7 +1257,7 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
                     Err(err) => Err((Some(stats), err)),
                 };
                 let res = reporting_handler(res).await;
-                let _ = build_outcome_handler(&ctx, &lock_via)(res).await?;
+                let _ = build_outcome_handler(ctx, lock_via)(res).await?;
                 Ok(())
             } else {
                 info!(ctx.logger(), "no log entries found");
@@ -911,9 +1291,8 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
                 }
                 _ => true,
             };
-
             let counter = replayed_sync_counter
-                .get_counter(&ctx)
+                .get_counter(ctx)
                 .and_then(move |maybe_counter| {
                     future::ready(maybe_counter.or(start_id).ok_or_else(|| {
                         format_err!(
@@ -923,18 +1302,19 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
                     }))
                 });
 
-            let (start_id, (bundle_preparer, mut overlay, globalrev_syncer)) =
+            let (start_id, (bundle_preparer, overlay, globalrev_syncer)) =
                 try_join(counter, repo_parts).watched(ctx.logger()).await?;
 
             borrowed!(bundle_preparer: &BundlePreparer);
+            borrowed!(mut overlay: &BookmarkOverlay);
             let s = loop_over_log_entries(
-                &ctx,
+                ctx,
                 &bookmarks,
                 start_id,
                 loop_forever,
                 &scuba_sample,
                 combine_bundles,
-                &unlock_via,
+                unlock_via,
             )
             .try_take_while({
                 borrowed!(can_continue);
@@ -947,10 +1327,10 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
                     future::ready(Ok(Some(entry_vec)))
                 }
             })
-            .map(move |res_entries| async move {
+            .map(|res_entries| async move {
                 let entries = res_entries?;
                 bundle_preparer
-                    .prepare_batches(&ctx, entries)
+                    .prepare_batches(ctx, entries)
                     .watched(ctx.logger())
                     .await
             })
@@ -969,38 +1349,45 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
                         // would result in an error. Let's try to detect this case and
                         // fix the first batch if possible.
                         if let Some(batch) = first {
-                            first = maybe_adjust_batch(&ctx, batch, &overlay)
+                            first = maybe_adjust_batch(ctx, batch, overlay)
                                 .map_err(|cause| AnonymousError { cause })?;
                             seen_first_batch = true;
                         }
                     }
 
-                    let batches = first.into_iter().chain(batches);
-                    Ok(bundle_preparer
-                        .prepare_bundles(&ctx, batches.collect(), &mut overlay)
-                        .watched(ctx.logger()))
+                    Ok(first.into_iter().chain(batches))
                 }
             })
-            .map(|res| async move {
-                let f = res?;
-                f.watched(ctx.logger()).await
+            .map(|batches| async move {
+                let batches = batches?;
+                bundle_preparer
+                    .prepare_bundles(
+                        ctx.clone(),
+                        batches.into_iter().collect(),
+                        &mut overlay.clone(),
+                    )
+                    .watched(ctx.logger())
+                    .await
             })
             .buffered(bundle_buffer_size)
             .map_ok(|vec| stream::iter(vec.into_iter().map(Ok)))
             .try_flatten();
 
-            let outcome_handler = build_outcome_handler(&ctx, &lock_via);
+            let outcome_handler = build_outcome_handler(ctx, lock_via);
             pin_mut!(s);
-
+            // Before beginning the iteration, check if cancellation is requested.
+            if cancellation_requested.load(Ordering::Relaxed) {
+                info!(ctx.logger(), "sync stopping due to cancellation request");
+                return Ok(());
+            }
             while let Some(res) = s.next().watched(ctx.logger()).await {
                 if !can_continue() {
                     break;
                 }
-
                 let res = match res {
                     Ok(combined_entry) => {
                         let (stats, res) = sync_single_combined_entry(
-                            &ctx,
+                            ctx,
                             &combined_entry,
                             &hg_repo,
                             base_retry_delay_ms,
@@ -1025,10 +1412,10 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
                 let next_id = get_id_to_search_after(&entry);
 
                 retry(
-                    &ctx.logger(),
+                    ctx.logger(),
                     |_| async {
                         let success = replayed_sync_counter
-                            .set_counter(&ctx, next_id)
+                            .set_counter(ctx, next_id)
                             .watched(ctx.logger())
                             .await?;
 
@@ -1043,6 +1430,12 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
                 )
                 .watched(ctx.logger())
                 .await?;
+                // At the end of each iteration, check if cancellation has been
+                // requested.
+                if cancellation_requested.load(Ordering::Relaxed) {
+                    info!(ctx.logger(), "sync stopping due to cancellation request");
+                    return Ok(());
+                }
             }
             Ok(())
         }
@@ -1050,260 +1443,49 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
     }
 }
 
-fn get_repo_sqldb_address<'a>(
-    matches: &MononokeMatches<'a>,
-    repo_name: &HgsqlName,
-) -> Result<Option<String>, Error> {
-    let config_store = matches.config_store();
-    if let Some(db_addr) = matches.value_of("repo-lock-db-address") {
-        return Ok(Some(db_addr.to_string()));
-    }
-    if !matches.is_present("lock-on-failure") {
-        return Ok(None);
-    }
-    let handle = config_store.get_config_handle(CONFIGERATOR_HGSERVER_PATH.to_string())?;
-    let config: Arc<ServerConfig> = handle.get();
-    match config.sql_confs.get(AsRef::<str>::as_ref(repo_name)) {
-        Some(sql_conf) => Ok(Some(sql_conf.db_tier.clone())),
-        None => Ok(Some(config.sql_conf_default.db_tier.clone())),
-    }
-}
-
 #[fbinit::main]
 fn main(fb: FacebookInit) -> Result<()> {
-    let app = args::MononokeAppBuilder::new("Mononoke -> hg sync job")
-        .with_advanced_args_hidden()
-        .with_fb303_args()
-        .build()
-        .arg(
-            Arg::with_name("hg-repo-ssh-path")
-                .takes_value(true)
-                .required(true)
-                .help("Remote path to hg repo to replay to. Example: ssh://hg.vip.facebook.com//data/scm/fbsource"),
-        )
-        .arg(
-            Arg::with_name("log-to-scuba")
-                .long("log-to-scuba")
-                .takes_value(false)
-                .required(false)
-                .help("If set job will log individual bundle sync states to Scuba"),
-        )
-        .arg(
-            Arg::with_name("lock-on-failure")
-                .long("lock-on-failure")
-                .takes_value(false)
-                .required(false)
-                .help("If set, mononoke repo will be locked on sync failure"),
-        )
-        .arg(
-            Arg::with_name("base-retry-delay-ms")
-                .long("base-retry-delay-ms")
-                .takes_value(true)
-                .required(false)
-                .help("initial delay between failures. It will be increased on the successive attempts")
-        )
-        .arg(
-            Arg::with_name("retry-num")
-                .long("retry-num")
-                .takes_value(true)
-                .required(false)
-                .help("how many times to retry to sync a single bundle")
-        )
-        .arg(
-            Arg::with_name("batch-size")
-                .long("batch-size")
-                .takes_value(true)
-                .required(false)
-                .help("maximum number of bundles allowed over a single hg peer")
-        )
-        .arg(
-            Arg::with_name("single-bundle-timeout-ms")
-                .long("single-bundle-timeout-ms")
-                .takes_value(true)
-                .required(false)
-                .help("a timeout to send a single bundle to (if exceeded, the peer is restarted)")
-        )
-        .arg(
-            Arg::with_name("verify-server-bookmark-on-failure")
-                .long("verify-server-bookmark-on-failure")
-                .takes_value(false)
-                .required(false)
-                .help("if present, check after a failure whether a server bookmark is already in the expected location")
-        )
-        .arg(
-            Arg::with_name("repo-lock-sqlite")
-                .long("repo-lock-sqlite")
-                .takes_value(false)
-                .required(false)
-                .help("Enable sqlite for repo_lock access, path is in repo-lock-db-address"),
-        )
-        .arg(
-            Arg::with_name("repo-lock-db-address")
-                .long("repo-lock-db-address")
-                .takes_value(true)
-                .required(false)
-                .help("Db with repo_lock table. Will be used to lock/unlock repo"),
-        )
-        .arg(
-            Arg::with_name(HGSQL_GLOBALREVS_USE_SQLITE)
-                .long(HGSQL_GLOBALREVS_USE_SQLITE)
-                .takes_value(false)
-                .required(false)
-                .help("Use sqlite for hgsql globalrev sync (use for testing)."),
-        )
-        .arg(
-            Arg::with_name(HGSQL_GLOBALREVS_DB_ADDR)
-                .long(HGSQL_GLOBALREVS_DB_ADDR)
-                .takes_value(true)
-                .required(false)
-                .help("unused"),
-        )
-        .arg(
-            // TODO(yancouto): Remove once it's not used anymore
-            Arg::with_name(GENERATE_BUNDLES)
-                .long(GENERATE_BUNDLES)
-                .takes_value(false)
-                .required(false)
-                .hidden(true),
-        )
-        .arg(
-            Arg::with_name(ARG_BOOKMARK_REGEX_FORCE_GENERATE_LFS)
-                .long(ARG_BOOKMARK_REGEX_FORCE_GENERATE_LFS)
-                .takes_value(true)
-                .required(false)
-                .help("force generation of lfs bundles for bookmarks that match regex"),
-        )
-        .arg(
-            Arg::with_name("verify-lfs-blob-presence")
-                .long("verify-lfs-blob-presence")
-                .takes_value(true)
-                .required(false)
-                .help("If generating bundles, verify lfs blob presence at this batch endpoint"),
-        )
-        .arg(
-            Arg::with_name(ARG_USE_HG_SERVER_BOOKMARK_VALUE_IF_MISMATCH)
-                .long(ARG_USE_HG_SERVER_BOOKMARK_VALUE_IF_MISMATCH)
-                .takes_value(false)
-                .required(false)
-                .help("Every bundle generated by hg sync job tells hg server \
-                'move bookmark BM from commit A to commit B' where commit A is the previous \
-                value of the bookmark BM and commit B is the new value of the bookmark. \
-                Sync job takes commit A from bookmark update log entry. \
-                However it's possible that server's bookmark BM doesn't point to the same commit \
-                as bookmark update log entry. \
-                While usually it's a sign of problem in some cases it's an expected behaviour. \
-                If this option is set let's allow sync job to take previous value of bookmark \
-                from the server"),
-        )
-        .arg(
-            Arg::with_name(ARG_BOOKMARK_MOVE_ANY_DIRECTION)
-                .long(ARG_BOOKMARK_MOVE_ANY_DIRECTION)
-                .takes_value(false)
-                .required(false)
-                .help("This flag controls whether we tell the server to allow \
-                the bookmark movement in any direction (adding pushvar NON_FAST_FORWARD=true). \
-                However, the server checks its per bookmark configuration before move."),
-        )
-        .arg(
-            Arg::with_name(ARG_DARKSTORM_BACKUP_REPO_ID)
-            .long(ARG_DARKSTORM_BACKUP_REPO_ID)
-            .takes_value(true)
-            .required(false)
-            .help("Start hg-sync-job for syncing prod repo and darkstorm backup mononoke repo \
-            and use darkstorm-backup-repo-id value as a target for sync."),
-        )
-        .arg(
-            Arg::with_name(ARG_DARKSTORM_BACKUP_REPO_NAME)
-            .long(ARG_DARKSTORM_BACKUP_REPO_NAME)
-            .takes_value(true)
-            .required(false)
-            .help("Start hg-sync-job for syncing prod repo and darkstorm backup mononoke repo \
-            and use darkstorm-backup-repo-name as a target for sync."),
-        )
-        .group(
-            ArgGroup::with_name(ARG_DARKSTORM_BACKUP_REPO_GROUP)
-                .args(&[ARG_DARKSTORM_BACKUP_REPO_ID, ARG_DARKSTORM_BACKUP_REPO_NAME])
-        )
-        .arg(
-            Arg::with_name(ARG_BYPASS_READONLY)
-                .long(ARG_BYPASS_READONLY)
-                .takes_value(false)
-                .required(false)
-                .help("This flag make it possible to push bundle into readonly repos \
-                (by adding pushvar BYPASS_READONLY=true)."),
-        )
-        .about(
-            "Special job that takes bundles that were sent to Mononoke and \
-             applies them to mercurial",
-        );
-
-    let sync_once = SubCommand::with_name(MODE_SYNC_ONCE)
-        .about("Syncs a single bundle")
-        .arg(
-            Arg::with_name("start-id")
-                .long("start-id")
-                .takes_value(true)
-                .required(true)
-                .help("id in the database table to start sync with"),
-        );
-    let sync_loop = SubCommand::with_name(MODE_SYNC_LOOP)
-        .about("Syncs bundles one by one")
-        .arg(
-            Arg::with_name("start-id")
-                .long("start-id")
-                .takes_value(true)
-                .required(true)
-                .help("if current counter is not set then `start-id` will be used"),
-        )
-        .arg(
-            Arg::with_name("loop-forever")
-                .long("loop-forever")
-                .takes_value(false)
-                .required(false)
-                .help(
-                    "If set job will loop forever even if there are no new entries in db or \
-                     if there was an error",
-                ),
-        )
-        .arg(
-            Arg::with_name("bundle-prefetch")
-                .long("bundle-prefetch")
-                .takes_value(true)
-                .required(false)
-                .help("How many bundles to prefetch"),
-        )
-        .arg(
-            Arg::with_name("exit-file")
-                .long("exit-file")
-                .takes_value(true)
-                .required(false)
-                .help(
-                    "If you provide this argument, the sync loop will gracefully exit \
-                     once this file exists",
-                ),
-        )
-        .arg(
-            Arg::with_name("combine-bundles")
-                .long("combine-bundles")
-                .takes_value(true)
-                .required(false)
-                .help("How many bundles to combine into a single bundle before sending to hg"),
-        );
-    let app = app.subcommand(sync_once).subcommand(sync_loop);
-
-    let matches = app.get_matches(fb)?;
-    let logger = matches.logger();
-
-    let ctx = CoreContext::new_with_logger(fb, logger.clone());
-
-    let fut = run(ctx, &matches);
-
-    block_execute(
-        fut,
-        fb,
-        "hg_sync_job",
-        logger,
-        &matches,
-        cmdlib::monitoring::AliveService,
-    )
+    let process = HgSyncProcess::new(fb)?;
+    match process.matches.value_of("sharded-service-name") {
+        Some(service_name) => {
+            // The service name needs to be 'static to satisfy SM contract
+            static SM_SERVICE_NAME: OnceCell<String> = OnceCell::new();
+            let logger = process.matches.logger().clone();
+            let matches = Arc::clone(&process.matches);
+            let mut executor = BackgroundProcessExecutor::new(
+                process.fb,
+                process.matches.runtime().clone(),
+                &logger,
+                SM_SERVICE_NAME.get_or_init(|| service_name.to_string()),
+                SM_SERVICE_SCOPE,
+                SM_CLEANUP_TIMEOUT_SECS,
+                Arc::new(process),
+            )?;
+            block_execute(
+                executor.block_and_execute(&logger),
+                fb,
+                &std::env::var("TW_JOB_NAME").unwrap_or_else(|_| "hg_sync_job".to_string()),
+                matches.logger(),
+                &matches,
+                cmdlib::monitoring::AliveService,
+            )?;
+        }
+        None => {
+            let matches = process.matches.clone();
+            let config_store = matches.config_store();
+            let (repo_name, _) = args::get_config(config_store, &matches)?;
+            let ctx = CoreContext::new_with_logger(fb, matches.logger().clone())
+                .clone_with_repo_name(&repo_name);
+            let fut = run(&ctx, &matches, repo_name, Arc::new(AtomicBool::new(false)));
+            block_execute(
+                fut,
+                fb,
+                "hg_sync_job",
+                matches.logger(),
+                &matches,
+                cmdlib::monitoring::AliveService,
+            )?;
+        }
+    }
+    Ok(())
 }

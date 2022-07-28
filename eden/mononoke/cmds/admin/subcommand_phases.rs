@@ -5,25 +5,34 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{bail, format_err, Error};
-use clap_old::{App, Arg, ArgMatches, SubCommand};
+use anyhow::bail;
+use anyhow::format_err;
+use anyhow::Error;
+use clap_old::App;
+use clap_old::Arg;
+use clap_old::ArgMatches;
+use clap_old::SubCommand;
 use fbinit::FacebookInit;
-use futures::{stream, StreamExt, TryStreamExt};
-use std::{
-    fs::File,
-    io::{BufRead, BufReader, Write},
-    str::FromStr,
-    time::Duration,
-};
+use futures::stream;
+use futures::StreamExt;
+use futures::TryStreamExt;
+use std::fs::File;
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::Write;
+use std::str::FromStr;
+use std::time::Duration;
 
 use blobrepo::BlobRepo;
 use blobrepo_hg::BlobRepoHg;
-use cmdlib::args::{self, MononokeMatches};
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
 use context::CoreContext;
 use mercurial_types::HgChangesetId;
 use mononoke_types::ChangesetId;
 use phases::PhasesRef;
-use slog::{info, Logger};
+use slog::info;
+use slog::Logger;
 
 use crate::error::SubcommandError;
 
@@ -94,16 +103,12 @@ pub async fn subcommand_phases<'a>(
     matches: &'a MononokeMatches<'a>,
     sub_m: &'a ArgMatches<'a>,
 ) -> Result<(), SubcommandError> {
-    let repo = args::open_repo(fb, &logger, &matches).await?;
+    let repo = args::open_repo(fb, &logger, matches).await?;
     let ctx = CoreContext::new_with_logger(fb, logger.clone());
 
     match sub_m.subcommand() {
         (FETCH_PHASE, Some(sub_m)) => {
-            let ty = sub_m
-                .value_of("changeset-type")
-                .map(|s| s)
-                .unwrap_or("hg")
-                .to_string();
+            let ty = sub_m.value_of("changeset-type").unwrap_or("hg").to_string();
             let hash = sub_m
                 .value_of("hash")
                 .map(|s| s.to_string())
@@ -125,11 +130,7 @@ pub async fn subcommand_phases<'a>(
                 .map_err(SubcommandError::Error)
         }
         (LIST_PUBLIC, Some(sub_m)) => {
-            let ty = sub_m
-                .value_of("changeset-type")
-                .map(|s| s)
-                .unwrap_or("hg")
-                .to_string();
+            let ty = sub_m.value_of("changeset-type").unwrap_or("hg").to_string();
 
             subcommand_list_public_impl(ctx, ty, repo)
                 .await
@@ -189,7 +190,7 @@ async fn subcommand_list_public_impl(
         }
     } else {
         for chunk in public.chunks(1000) {
-            let bonsais: Vec<_> = chunk.iter().cloned().collect();
+            let bonsais: Vec<_> = chunk.to_vec();
             let hg_bonsais = repo.get_hg_bonsai_mapping(ctx.clone(), bonsais).await?;
             let hg_css: Vec<HgChangesetId> = hg_bonsais
                 .clone()

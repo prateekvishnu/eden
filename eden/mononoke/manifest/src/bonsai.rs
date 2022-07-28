@@ -5,21 +5,28 @@
  * GNU General Public License version 2.
  */
 
+use crate::Entry;
+use crate::Manifest;
 use anyhow::Error;
+use blobstore::StoreLoadable;
 use cloned::cloned;
 use context::CoreContext;
-use futures::{
-    future::{self, try_join_all},
-    try_join, FutureExt, Stream, TryFutureExt, TryStreamExt,
-};
-use maplit::{hashmap, hashset};
-use mononoke_types::{FileType, MPath};
-use std::collections::{HashMap, HashSet};
+use futures::future;
+use futures::future::try_join_all;
+use futures::try_join;
+use futures::FutureExt;
+use futures::Stream;
+use futures::TryFutureExt;
+use futures::TryStreamExt;
+use maplit::hashmap;
+use maplit::hashset;
+use mononoke_types::FileType;
+use mononoke_types::MPath;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::hash::Hash;
-
-use crate::{Entry, Manifest};
-use blobstore::StoreLoadable;
+use tokio::task;
 
 pub(crate) type BonsaiEntry<ManifestId, FileId> = Entry<ManifestId, (FileType, FileId)>;
 
@@ -149,7 +156,7 @@ where
 
     let node = async {
         let r = match node {
-            Some(node) => Some(node.load(ctx, &store).await?),
+            Some(node) => Some(node.load(ctx, store).await?),
             None => None,
         };
         Ok(r)
@@ -158,7 +165,7 @@ where
     let parents = try_join_all(
         parents
             .into_iter()
-            .map(|id| async move { id.load(ctx, &store).await }),
+            .map(|id| async move { id.load(ctx, store).await }),
     );
 
     let (node, parents) = try_join!(node, parents)?;
@@ -329,7 +336,13 @@ where
     .map_ok(|seed| {
         bounded_traversal::bounded_traversal_stream(256, seed, move |(path, (node, parents))| {
             cloned!(ctx, store);
-            async move { bonsai_diff_unfold(&ctx, &store, path, node, parents).await }.boxed()
+            async move {
+                task::spawn(
+                    async move { bonsai_diff_unfold(&ctx, &store, path, node, parents).await },
+                )
+                .await?
+            }
+            .boxed()
         })
     })
     .try_flatten_stream()
@@ -339,12 +352,17 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::tests::{
-        ctx, dir, element, file, path, ManifestStore, TestFileId, TestManifestIdStr,
-        TestManifestStr,
-    };
+    use crate::tests::ctx;
+    use crate::tests::dir;
+    use crate::tests::element;
+    use crate::tests::file;
+    use crate::tests::path;
+    use crate::tests::ManifestStore;
+    use crate::tests::TestFileId;
+    use crate::tests::TestManifestIdStr;
+    use crate::tests::TestManifestStr;
     use borrowed::borrowed;
-    use fbinit::{self, FacebookInit};
+    use fbinit::FacebookInit;
 
     impl<ManifestId, FileId> CompositeEntry<ManifestId, FileId>
     where

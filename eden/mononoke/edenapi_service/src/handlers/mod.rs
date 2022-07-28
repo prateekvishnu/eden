@@ -8,35 +8,47 @@
 use std::fmt;
 use std::pin::Pin;
 
-use anyhow::{Context, Error};
+use anyhow::Context;
+use anyhow::Error;
 use edenapi_types::ToWire;
-use futures::{stream::TryStreamExt, FutureExt, Stream};
-use gotham::{
-    handler::{HandlerError as GothamHandlerError, HandlerFuture},
-    middleware::state::StateMiddleware,
-    pipeline::{new_pipeline, single::single_pipeline},
-    router::{
-        builder::RouterBuilder,
-        builder::{build_router as gotham_build_router, DefineSingleRoute, DrawRoutes},
-        Router,
-    },
-    state::{FromState, State},
-};
+use futures::stream::TryStreamExt;
+use futures::FutureExt;
+use futures::Stream;
+use gotham::handler::HandlerError as GothamHandlerError;
+use gotham::handler::HandlerFuture;
+use gotham::middleware::state::StateMiddleware;
+use gotham::pipeline::new_pipeline;
+use gotham::pipeline::single::single_pipeline;
+use gotham::router::builder::build_router as gotham_build_router;
+use gotham::router::builder::DefineSingleRoute;
+use gotham::router::builder::DrawRoutes;
+use gotham::router::builder::RouterBuilder;
+use gotham::router::Router;
+use gotham::state::FromState;
+use gotham::state::State;
 use gotham_derive::StateData;
-use gotham_ext::{
-    content_encoding::ContentEncoding,
-    error::{ErrorFormatter, HttpError},
-    middleware::scuba::ScubaMiddlewareState,
-    response::{build_response, encode_stream, ResponseTryStreamExt, StreamBody, TryIntoResponse},
-    state_ext::StateExt,
-};
-use hyper::{Body, Response};
+use gotham_ext::content_encoding::ContentEncoding;
+use gotham_ext::error::ErrorFormatter;
+use gotham_ext::error::HttpError;
+use gotham_ext::middleware::scuba::ScubaMiddlewareState;
+use gotham_ext::response::build_response;
+use gotham_ext::response::encode_stream;
+use gotham_ext::response::ResponseTryStreamExt;
+use gotham_ext::response::StreamBody;
+use gotham_ext::response::TryIntoResponse;
+use gotham_ext::state_ext::StateExt;
+use hyper::Body;
+use hyper::Response;
 use mime::Mime;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::context::ServerContext;
 use crate::middleware::RequestContext;
-use crate::utils::{cbor_mime, get_repo, parse_wire_request, to_cbor_bytes};
+use crate::utils::cbor_mime;
+use crate::utils::get_repo;
+use crate::utils::parse_wire_request;
+use crate::utils::to_cbor_bytes;
 
 mod bookmarks;
 mod capabilities;
@@ -51,7 +63,10 @@ mod pull;
 mod repos;
 mod trees;
 
-pub(crate) use handler::{EdenApiHandler, HandlerError, HandlerResult, PathExtractorWithRepo};
+pub(crate) use handler::EdenApiHandler;
+pub(crate) use handler::HandlerError;
+pub(crate) use handler::HandlerResult;
+pub(crate) use handler::PathExtractorWithRepo;
 
 /// Enum identifying the EdenAPI method that each handler corresponds to.
 /// Used to identify the handler for logging and stats collection.
@@ -83,6 +98,7 @@ pub enum EdenApiMethod {
     CommitGraph,
     DownloadFile,
     CommitMutations,
+    CommitTranslateId,
 }
 
 impl fmt::Display for EdenApiMethod {
@@ -114,6 +130,7 @@ impl fmt::Display for EdenApiMethod {
             Self::FetchSnapshot => "fetch_snapshot",
             Self::DownloadFile => "download_file",
             Self::CommitMutations => "commit_mutations",
+            Self::CommitTranslateId => "commit_translate_id",
         };
         write!(f, "{}", name)
     }
@@ -219,7 +236,7 @@ async fn handler_wrapper<Handler: EdenApiHandler>(
         let rctx = RequestContext::borrow_from(&mut state).clone();
         let sctx = ServerContext::borrow_from(&mut state);
 
-        let repo = get_repo(&sctx, &rctx, path.repo(), None).await?;
+        let repo = get_repo(sctx, &rctx, path.repo(), None).await?;
         let request = parse_wire_request::<<Handler::Request as ToWire>::Wire>(&mut state).await?;
 
         let sampling_rate = Handler::sampling_rate(&request);
@@ -300,6 +317,7 @@ pub fn build_router(ctx: ServerContext) -> Router {
         Handlers::setup::<commit::GraphHandler>(route);
         Handlers::setup::<files::DownloadFileHandler>(route);
         Handlers::setup::<commit::CommitMutationsHandler>(route);
+        Handlers::setup::<commit::CommitTranslateId>(route);
         route.get("/:repo/health_check").to(health_handler);
         route
             .get("/:repo/capabilities")

@@ -6,22 +6,28 @@
  */
 
 use crate::select::select_path_tree;
-use crate::{Entry, Manifest, PathOrPrefix, PathTree, StoreLoadable};
+use crate::AsyncManifest as Manifest;
+use crate::Entry;
+use crate::PathOrPrefix;
+use crate::PathTree;
+use crate::StoreLoadable;
 use anyhow::Error;
 use borrowed::borrowed;
 use cloned::cloned;
 use context::CoreContext;
-use futures::{
-    future::{self, BoxFuture},
-    pin_mut,
-    stream::{self, BoxStream, Stream},
-    FutureExt, StreamExt, TryFutureExt, TryStreamExt,
-};
+use futures::future;
+use futures::future::BoxFuture;
+use futures::pin_mut;
+use futures::stream;
+use futures::stream::BoxStream;
+use futures::stream::Stream;
+use futures::FutureExt;
+use futures::StreamExt;
+use futures::TryFutureExt;
+use futures::TryStreamExt;
 use mononoke_types::MPath;
-use std::{
-    collections::HashMap,
-    marker::{PhantomData, Unpin},
-};
+use std::collections::HashMap;
+use std::marker::PhantomData;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Diff<Entry> {
@@ -34,8 +40,8 @@ pub trait ManifestOps<Store>
 where
     Store: Sync + Send + Clone + 'static,
     Self: StoreLoadable<Store> + Clone + Send + Sync + Eq + Unpin + 'static,
-    <Self as StoreLoadable<Store>>::Value: Manifest<TreeId = Self> + Send,
-    <<Self as StoreLoadable<Store>>::Value as Manifest>::LeafId: Clone + Send + Eq + Unpin,
+    <Self as StoreLoadable<Store>>::Value: Manifest<Store, TreeId = Self> + Send + Sync,
+    <<Self as StoreLoadable<Store>>::Value as Manifest<Store>>::LeafId: Clone + Send + Eq + Unpin,
 {
     fn find_entries<I, P>(
         &self,
@@ -47,7 +53,7 @@ where
         Result<
             (
                 Option<MPath>,
-                Entry<Self, <<Self as StoreLoadable<Store>>::Value as Manifest>::LeafId>,
+                Entry<Self, <<Self as StoreLoadable<Store>>::Value as Manifest<Store>>::LeafId>,
             ),
             Error,
         >,
@@ -72,14 +78,15 @@ where
                     } = selector;
 
                     async move {
-                        let manifest = manifest_id.load(ctx, &store).await?;
+                        let manifest = manifest_id.load(ctx, store).await?;
 
                         let mut output = Vec::new();
                         let mut recurse = Vec::new();
 
                         if recursive || select.is_recursive() {
                             output.push((path.clone(), Entry::Tree(manifest_id)));
-                            for (name, entry) in manifest.list() {
+                            let mut stream = manifest.list(ctx, store).await?;
+                            while let Some((name, entry)) = stream.try_next().await? {
                                 let path = Some(MPath::join_opt_element(path.as_ref(), &name));
                                 match entry {
                                     Entry::Leaf(_) => {
@@ -95,7 +102,7 @@ where
                                 output.push((path.clone(), Entry::Tree(manifest_id)));
                             }
                             for (name, selector) in subentries {
-                                if let Some(entry) = manifest.lookup(&name) {
+                                if let Some(entry) = manifest.lookup(ctx, store, &name).await? {
                                     let path = Some(MPath::join_opt_element(path.as_ref(), &name));
                                     match entry {
                                         Entry::Leaf(_) => {
@@ -134,7 +141,7 @@ where
     ) -> BoxFuture<
         'static,
         Result<
-            Option<Entry<Self, <<Self as StoreLoadable<Store>>::Value as Manifest>::LeafId>>,
+            Option<Entry<Self, <<Self as StoreLoadable<Store>>::Value as Manifest<Store>>::LeafId>>,
             Error,
         >,
     > {
@@ -153,7 +160,7 @@ where
         Result<
             (
                 Option<MPath>,
-                Entry<Self, <<Self as StoreLoadable<Store>>::Value as Manifest>::LeafId>,
+                Entry<Self, <<Self as StoreLoadable<Store>>::Value as Manifest<Store>>::LeafId>,
             ),
             Error,
         >,
@@ -170,7 +177,7 @@ where
         Result<
             (
                 MPath,
-                <<Self as StoreLoadable<Store>>::Value as Manifest>::LeafId,
+                <<Self as StoreLoadable<Store>>::Value as Manifest<Store>>::LeafId,
             ),
             Error,
         >,
@@ -197,7 +204,7 @@ where
         Result<
             (
                 MPath,
-                <<Self as StoreLoadable<Store>>::Value as Manifest>::LeafId,
+                <<Self as StoreLoadable<Store>>::Value as Manifest<Store>>::LeafId,
             ),
             Error,
         >,
@@ -229,7 +236,7 @@ where
         Result<
             (
                 Option<MPath>,
-                <<Self as StoreLoadable<Store>>::Value as Manifest>::TreeId,
+                <<Self as StoreLoadable<Store>>::Value as Manifest<Store>>::TreeId,
             ),
             Error,
         >,
@@ -258,7 +265,7 @@ where
     ) -> BoxStream<
         'static,
         Result<
-            Diff<Entry<Self, <<Self as StoreLoadable<Store>>::Value as Manifest>::LeafId>>,
+            Diff<Entry<Self, <<Self as StoreLoadable<Store>>::Value as Manifest<Store>>::LeafId>>,
             Error,
         >,
     > {
@@ -280,7 +287,9 @@ where
     ) -> BoxStream<'static, Result<Out, Error>>
     where
         FilterMap: Fn(
-                Diff<Entry<Self, <<Self as StoreLoadable<Store>>::Value as Manifest>::LeafId>>,
+                Diff<
+                    Entry<Self, <<Self as StoreLoadable<Store>>::Value as Manifest<Store>>::LeafId>,
+                >,
             ) -> Option<Out>
             + Clone
             + Send
@@ -310,9 +319,12 @@ where
                             )
                             .await?;
 
-                            for (name, left) in left_mf.list() {
+                            let mut stream = left_mf.list(ctx, &store).await?;
+                            while let Some((name, left)) = stream.try_next().await? {
                                 let path = Some(MPath::join_opt_element(path.as_ref(), &name));
-                                if let Some(right) = right_mf.lookup(&name) {
+                                if let Some(right) =
+                                    right_mf.lookup(ctx, &other_store, &name).await?
+                                {
                                     if left != right {
                                         match (left, right) {
                                             (left @ Entry::Leaf(_), right @ Entry::Leaf(_)) => {
@@ -340,8 +352,9 @@ where
                                     }
                                 }
                             }
-                            for (name, right) in right_mf.list() {
-                                if left_mf.lookup(&name).is_none() {
+                            let mut stream = right_mf.list(ctx, &other_store).await?;
+                            while let Some((name, right)) = stream.try_next().await? {
+                                if left_mf.lookup(ctx, &store, &name).await?.is_none() {
                                     let path = Some(MPath::join_opt_element(path.as_ref(), &name));
                                     match right {
                                         Entry::Tree(tree) => recurse.push(Diff::Added(path, tree)),
@@ -355,7 +368,8 @@ where
                         }
                         Diff::Added(path, tree) => {
                             let manifest = tree.load(ctx, &other_store).await?;
-                            for (name, entry) in manifest.list() {
+                            let mut stream = manifest.list(ctx, &other_store).await?;
+                            while let Some((name, entry)) = stream.try_next().await? {
                                 let path = Some(MPath::join_opt_element(path.as_ref(), &name));
                                 match entry {
                                     Entry::Tree(tree) => recurse.push(Diff::Added(path, tree)),
@@ -367,7 +381,8 @@ where
                         }
                         Diff::Removed(path, tree) => {
                             let manifest = tree.load(ctx, &store).await?;
-                            for (name, entry) in manifest.list() {
+                            let mut stream = manifest.list(ctx, &store).await?;
+                            while let Some((name, entry)) = stream.try_next().await? {
                                 let path = Some(MPath::join_opt_element(path.as_ref(), &name));
                                 match entry {
                                     Entry::Tree(tree) => recurse.push(Diff::Removed(path, tree)),
@@ -461,7 +476,8 @@ pub fn find_intersection_of_diffs<TreeId, LeafId, Store>(
 where
     Store: Sync + Send + Clone + 'static,
     TreeId: StoreLoadable<Store> + Clone + Send + Sync + Eq + Unpin + 'static,
-    <TreeId as StoreLoadable<Store>>::Value: Manifest<TreeId = TreeId, LeafId = LeafId> + Send,
+    <TreeId as StoreLoadable<Store>>::Value:
+        Manifest<Store, TreeId = TreeId, LeafId = LeafId> + Send + Sync,
     LeafId: Clone + Send + Eq + Unpin + 'static,
 {
     find_intersection_of_diffs_and_parents(ctx, store, mf_id, diff_against)
@@ -488,7 +504,8 @@ pub fn find_intersection_of_diffs_and_parents<TreeId, LeafId, Store>(
 where
     Store: Sync + Send + Clone + 'static,
     TreeId: StoreLoadable<Store> + Clone + Send + Sync + Eq + Unpin + 'static,
-    <TreeId as StoreLoadable<Store>>::Value: Manifest<TreeId = TreeId, LeafId = LeafId> + Send,
+    <TreeId as StoreLoadable<Store>>::Value:
+        Manifest<Store, TreeId = TreeId, LeafId = LeafId> + Send + Sync,
     LeafId: Clone + Send + Eq + Unpin + 'static,
 {
     match diff_against.get(0).cloned() {
@@ -541,7 +558,7 @@ where
         .try_flatten_stream()
         .right_stream(),
         None => mf_id
-            .list_all_entries(ctx.clone(), store.clone())
+            .list_all_entries(ctx, store)
             .map_ok(|(path, entry)| (path, entry, vec![]))
             .left_stream(),
     }
@@ -551,7 +568,7 @@ impl<TreeId, Store> ManifestOps<Store> for TreeId
 where
     Store: Sync + Send + Clone + 'static,
     Self: StoreLoadable<Store> + Clone + Send + Sync + Eq + Unpin + 'static,
-    <Self as StoreLoadable<Store>>::Value: Manifest<TreeId = Self> + Send,
-    <<Self as StoreLoadable<Store>>::Value as Manifest>::LeafId: Send + Clone + Eq + Unpin,
+    <Self as StoreLoadable<Store>>::Value: Manifest<Store, TreeId = Self> + Send + Sync,
+    <<Self as StoreLoadable<Store>>::Value as Manifest<Store>>::LeafId: Send + Clone + Eq + Unpin,
 {
 }

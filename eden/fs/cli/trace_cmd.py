@@ -148,8 +148,34 @@ class TraceInodeCommand(Subcmd):
         )
 
     async def run(self, args: argparse.Namespace) -> int:
-        if not args.retroactive:
-            print("`eden trace inode` is only currently supported in retroactive mode")
-        else:
-            print("\U0001F6A7 under construction \U0001F6A7")
-        return 0
+        instance, checkout, _rel_path = require_checkout(args, args.checkout)
+        trace_stream_command = get_trace_stream_command()
+        return execute_cmd(
+            [
+                trace_stream_command,
+                "--mountRoot",
+                checkout.path,
+                "--trace=inode",
+                f"--retroactive={'true' if args.retroactive else 'false'}",
+            ]
+        )
+
+
+@trace_cmd("thrift", "Monitor Thrift requests.")
+class TraceThriftCmd(Subcmd):
+    def setup_parser(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "checkout", default=None, nargs="?", help="Path to the checkout"
+        )
+
+    async def run(self, args: argparse.Namespace) -> int:
+        instance, checkout, _rel_path = require_checkout(args, args.checkout)
+        trace_stream_command = get_trace_stream_command()
+        return execute_cmd(
+            [
+                trace_stream_command,
+                "--mountRoot",
+                checkout.path,
+                "--trace=thrift",
+            ]
+        )

@@ -47,6 +47,7 @@ from .pycompat import decodeutf8, encodeutf8, iswindows
 
 
 if iswindows:
+    # pyre-fixme[21]: Could not find a module corresponding to import `eden.thrift.windows_thrift`.
     from eden.thrift.windows_thrift import WindowsSocketHandle
 
 # Netencoding special characters
@@ -88,48 +89,49 @@ class mononokepipe(object):
         return len(data)
 
     def _read_segment(self):
-        r = b""
-        while not r.endswith(NETSTRING_SEPARATOR):
+        while True:
+            r = b""
+            while not r.endswith(NETSTRING_SEPARATOR):
+                try:
+                    buf = self._pipe.read(1)
+                except Exception as e:
+                    raise error.NetworkError("failed reading from pipe: {}".format(e))
+                if not buf:
+                    raise error.NetworkError("unexpected EOL, expected netstring digit")
+                r += buf
+
+            segmentlength = int(r[:-1])
+
             try:
-                buf = self._pipe.read(1)
+                r = self._pipe.read(segmentlength + 1)
             except Exception as e:
                 raise error.NetworkError("failed reading from pipe: {}".format(e))
-            if not buf:
-                raise error.NetworkError("unexpected EOL, expected netstring digit")
-            r += buf
-
-        segmentlength = int(r[:-1])
-
-        try:
-            r = self._pipe.read(segmentlength + 1)
-        except Exception as e:
-            raise error.NetworkError("failed reading from pipe: {}".format(e))
-        if len(r) != segmentlength + 1:
-            raise error.NetworkError(
-                "unexpected read length, expected length {}, got length {}: '{}'".format(
-                    segmentlength + 1, len(r), r
+            if len(r) != segmentlength + 1:
+                raise error.NetworkError(
+                    "unexpected read length, expected length {}, got length {}: '{}'".format(
+                        segmentlength + 1, len(r), r
+                    )
                 )
-            )
 
-        stdtype_raw, segment, ending = r[:1], r[1:-1], r[-1:]
-        (stdtype,) = unpack("b", stdtype_raw)
+            stdtype_raw, segment, ending = r[:1], r[1:-1], r[-1:]
+            (stdtype,) = unpack("b", stdtype_raw)
 
-        if ending != NETSTRING_ENDING:
-            raise error.NetworkError(
-                "'%s' is not expected netencoding ending segment '%s'"
-                % (r[segmentlength], NETSTRING_ENDING)
-            )
+            if ending != NETSTRING_ENDING:
+                raise error.NetworkError(
+                    "'%s' is not expected netencoding ending segment '%s'"
+                    % (r[segmentlength], NETSTRING_ENDING)
+                )
 
-        if self._decompresser:
-            segment = self._decompresser.decompress_buffer(segment)
+            if self._decompresser:
+                segment = self._decompresser.decompress_buffer(segment)
 
-        if stdtype == IoStream.STDOUT.value:
-            return segment
-        elif stdtype == IoStream.STDERR.value:
-            stdiopeer._writestderror(self._ui, segment)
-            return self._read_segment()
-        else:
-            raise error.Abort("unexpected stdtype '{}'".format(stdtype))
+            if stdtype == IoStream.STDOUT.value:
+                return segment
+            elif stdtype == IoStream.STDERR.value:
+                stdiopeer._writestderror(self._ui, segment)
+                continue
+            else:
+                raise error.Abort("unexpected stdtype '{}'".format(stdtype))
 
     def read(self, size):
         bufs = [self._readbuf[self._readoffset :]]
@@ -203,7 +205,7 @@ class mononokepipe(object):
         return self._pipe.flush()
 
 
-def maybestripsquarebrackets(hostname):
+def maybestripsquarebrackets(hostname: str):
     """Strips the square braces from host name (if-present)
 
     socket.createconnection used for mononoke connections can't deal with ipv6
@@ -232,7 +234,7 @@ class mononokepeer(stdiopeer.stdiopeer):
         if u.passwd is not None:
             self._abort(error.RepoError(_("password in URL not supported")))
 
-        self._clientinfo = clientinfo.clientinfo(ui._uiconfig._rcfg._rcfg)
+        self._clientinfo = clientinfo.clientinfo(ui._uiconfig._rcfg)
         self._user = u.user
         self._host = maybestripsquarebrackets(u.host)
         self._port = u.port or 443
@@ -244,7 +246,7 @@ class mononokepeer(stdiopeer.stdiopeer):
         self._confheaders = ui.config("http", "extra_headers_json")
         self._verbose = ui.configwith(bool, "http", "verbose")
         try:
-            self._cats = cats.getcats(ui._uiconfig._rcfg._rcfg, raise_if_missing=True)
+            self._cats = cats.getcats(ui._uiconfig._rcfg, raise_if_missing=True)
         except Exception as e:
             ui.log("features", feature="missing-cats")
             ui.debug("CATs missing: %s. Identities won't be propagated.\n" % e)

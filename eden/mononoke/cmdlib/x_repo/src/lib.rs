@@ -7,18 +7,24 @@
 
 //! Scaffolding that's generally useful to build CLI tools on top of Mononoke.
 
-use anyhow::{bail, Error};
+use anyhow::bail;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use cacheblob::LeaseOps;
-use cmdlib::args::{self, MononokeMatches};
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
 use context::CoreContext;
-use cross_repo_sync::{
-    create_commit_syncer_lease, create_commit_syncers,
-    types::{Source, Target},
-    CommitSyncRepos, CommitSyncer, Syncers,
-};
+use cross_repo_sync::create_commit_syncer_lease;
+use cross_repo_sync::create_commit_syncers;
+use cross_repo_sync::types::Source;
+use cross_repo_sync::types::Target;
+use cross_repo_sync::CommitSyncRepos;
+use cross_repo_sync::CommitSyncer;
+use cross_repo_sync::Syncers;
 use futures_util::try_join;
-use live_commit_sync_config::{CfgrLiveCommitSyncConfig, LiveCommitSyncConfig};
+use live_commit_sync_config::CfgrLiveCommitSyncConfig;
+use live_commit_sync_config::LiveCommitSyncConfig;
+use mononoke_types::RepositoryId;
 use sql_construct::SqlConstructFromMetadataDatabaseConfig;
 use std::sync::Arc;
 use synced_commit_mapping::SqlSyncedCommitMapping;
@@ -27,9 +33,10 @@ use synced_commit_mapping::SqlSyncedCommitMapping;
 pub async fn create_commit_syncers_from_matches(
     ctx: &CoreContext,
     matches: &MononokeMatches<'_>,
+    repo_pair: Option<(RepositoryId, RepositoryId)>,
 ) -> Result<Syncers<SqlSyncedCommitMapping>, Error> {
     let (source_repo, target_repo, mapping, live_commit_sync_config) =
-        get_things_from_matches(ctx, matches).await?;
+        get_things_from_matches(ctx, matches, repo_pair).await?;
 
     let common_config = live_commit_sync_config.get_common_config(source_repo.0.get_repoid())?;
 
@@ -66,16 +73,18 @@ pub async fn create_commit_syncers_from_matches(
 pub async fn create_commit_syncer_from_matches(
     ctx: &CoreContext,
     matches: &MononokeMatches<'_>,
+    repo_pair: Option<(RepositoryId, RepositoryId)>,
 ) -> Result<CommitSyncer<SqlSyncedCommitMapping>, Error> {
-    create_commit_syncer_from_matches_impl(ctx, matches, false /* reverse */).await
+    create_commit_syncer_from_matches_impl(ctx, matches, false /* reverse */, repo_pair).await
 }
 
 /// Instantiate the target-source `CommitSyncer` struct by parsing `matches`
 pub async fn create_reverse_commit_syncer_from_matches(
     ctx: &CoreContext,
     matches: &MononokeMatches<'_>,
+    repo_pair: Option<(RepositoryId, RepositoryId)>,
 ) -> Result<CommitSyncer<SqlSyncedCommitMapping>, Error> {
-    create_commit_syncer_from_matches_impl(ctx, matches, true /* reverse */).await
+    create_commit_syncer_from_matches_impl(ctx, matches, true /* reverse */, repo_pair).await
 }
 
 /// Instantiate some auxiliary things from `matches`
@@ -83,6 +92,7 @@ pub async fn create_reverse_commit_syncer_from_matches(
 async fn get_things_from_matches(
     ctx: &CoreContext,
     matches: &MononokeMatches<'_>,
+    repo_pair: Option<(RepositoryId, RepositoryId)>,
 ) -> Result<
     (
         Source<BlobRepo>,
@@ -96,13 +106,18 @@ async fn get_things_from_matches(
     let logger = ctx.logger();
 
     let config_store = matches.config_store();
-    let source_repo_id = args::get_source_repo_id(config_store, &matches)?;
-    let target_repo_id = args::get_target_repo_id(config_store, &matches)?;
+    let (source_repo_id, target_repo_id) = match repo_pair {
+        Some((source_repo_id, target_repo_id)) => (source_repo_id, target_repo_id),
+        None => (
+            args::get_source_repo_id(config_store, matches)?,
+            args::get_target_repo_id(config_store, matches)?,
+        ),
+    };
 
     let (_, source_repo_config) =
-        args::get_config_by_repoid(config_store, &matches, source_repo_id)?;
+        args::get_config_by_repoid(config_store, matches, source_repo_id)?;
     let (_, target_repo_config) =
-        args::get_config_by_repoid(config_store, &matches, target_repo_id)?;
+        args::get_config_by_repoid(config_store, matches, target_repo_id)?;
 
     if source_repo_config.storage_config.metadata != target_repo_config.storage_config.metadata {
         return Err(Error::msg(
@@ -116,17 +131,17 @@ async fn get_things_from_matches(
     let mapping = SqlSyncedCommitMapping::with_metadata_database_config(
         ctx.fb,
         &source_repo_config.storage_config.metadata,
-        &mysql_options,
+        mysql_options,
         readonly_storage.0,
     )?;
 
-    let source_repo_fut = args::open_repo_with_repo_id(fb, logger, source_repo_id, &matches);
-    let target_repo_fut = args::open_repo_with_repo_id(fb, logger, target_repo_id, &matches);
+    let source_repo_fut = args::open_repo_with_repo_id(fb, logger, source_repo_id, matches);
+    let target_repo_fut = args::open_repo_with_repo_id(fb, logger, target_repo_id, matches);
 
     let (source_repo, target_repo) = try_join!(source_repo_fut, target_repo_fut)?;
 
     let live_commit_sync_config: Arc<dyn LiveCommitSyncConfig> =
-        Arc::new(CfgrLiveCommitSyncConfig::new(&ctx.logger(), config_store)?);
+        Arc::new(CfgrLiveCommitSyncConfig::new(ctx.logger(), config_store)?);
 
     Ok((
         Source(source_repo),
@@ -144,9 +159,10 @@ async fn create_commit_syncer_from_matches_impl(
     ctx: &CoreContext,
     matches: &MononokeMatches<'_>,
     reverse: bool,
+    repo_pair: Option<(RepositoryId, RepositoryId)>,
 ) -> Result<CommitSyncer<SqlSyncedCommitMapping>, Error> {
     let (source_repo, target_repo, mapping, live_commit_sync_config) =
-        get_things_from_matches(ctx, matches).await?;
+        get_things_from_matches(ctx, matches, repo_pair).await?;
 
     let (source_repo, target_repo) = if reverse {
         flip_direction(source_repo, target_repo)

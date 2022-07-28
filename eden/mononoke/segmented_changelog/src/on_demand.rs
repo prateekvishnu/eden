@@ -9,19 +9,26 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+use anyhow::Result;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
-use futures::{FutureExt, TryFutureExt};
+use futures::FutureExt;
+use futures::TryFutureExt;
 use parking_lot::Mutex;
 use rand::Rng;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::Notify;
+use tokio::sync::RwLock;
 
 use cloned::cloned;
 use futures::compat::Stream01CompatExt;
 use futures::pin_mut;
-use futures::stream::{StreamExt, TryStreamExt};
-use futures_ext::future::{spawn_controlled, ControlledHandle, FbTryFutureExt, TryShared};
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use futures_ext::future::spawn_controlled;
+use futures_ext::future::ControlledHandle;
+use futures_ext::future::FbTryFutureExt;
+use futures_ext::future::TryShared;
 use futures_stats::TimedFutureExt;
 use stats::prelude::*;
 
@@ -29,7 +36,8 @@ use bookmarks::Bookmarks;
 use changeset_fetcher::ArcChangesetFetcher;
 use context::CoreContext;
 use mercurial_types::HgChangesetId;
-use mononoke_types::{ChangesetId, RepositoryId};
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
 use revset::AncestorsNodeStream;
 
 use crate::dag::ops::DagAddHeads;
@@ -37,11 +45,17 @@ use crate::dag::VertexListWithOptions;
 use crate::idmap::IdMap;
 use crate::parents::FetchParents;
 use crate::read_only::ReadOnlySegmentedChangelog;
-use crate::update::{server_namedag, vertexlist_from_seedheads, SeedHead, ServerNameDag};
-use crate::{
-    segmented_changelog_delegate, CloneData, CloneHints, InProcessIdDag, Location,
-    MismatchedHeadsError, SegmentedChangelog,
-};
+use crate::segmented_changelog_delegate;
+use crate::update::server_namedag;
+use crate::update::vertexlist_from_seedheads;
+use crate::update::SeedHead;
+use crate::update::ServerNameDag;
+use crate::CloneData;
+use crate::CloneHints;
+use crate::InProcessIdDag;
+use crate::Location;
+use crate::MismatchedHeadsError;
+use crate::SegmentedChangelog;
 
 define_stats! {
     prefix = "mononoke.segmented_changelog.ondemand";
@@ -204,7 +218,7 @@ impl OnDemandUpdateSegmentedChangelog {
             let mut tries: i64 = 0;
             loop {
                 tries += 1;
-                if self.try_update(ctx, &list).await? {
+                if self.try_update(ctx, list).await? {
                     return Ok(tries);
                 }
             }
@@ -237,7 +251,7 @@ impl OnDemandUpdateSegmentedChangelog {
     async fn build_up_to_bookmark(&self, ctx: &CoreContext) -> Result<()> {
         let vertex_list =
             vertexlist_from_seedheads(ctx, &self.seed_heads, self.bookmarks.as_ref()).await?;
-        self.build_up_to_vertex_list(&ctx, &vertex_list).await
+        self.build_up_to_vertex_list(ctx, &vertex_list).await
     }
 
     async fn are_descendants_of_known_commtis(
@@ -323,7 +337,7 @@ async fn the_actual_update(
         let mut namedag = namedag.write().await;
         let parent_fetcher = FetchParents::new(ctx.clone(), changeset_fetcher);
 
-        namedag.add_heads(&parent_fetcher, &heads).await?;
+        namedag.add_heads(&parent_fetcher, heads).await?;
         namedag.map().flush_writes().await?;
         Ok(())
     };

@@ -5,19 +5,26 @@
  * GNU General Public License version 2.
  */
 
-use crate::{fetch_blame_compat, CompatBlame};
-use anyhow::{anyhow, Error};
+use crate::fetch_blame_compat;
+use crate::CompatBlame;
+use anyhow::anyhow;
+use anyhow::Error;
 use blobrepo::BlobRepo;
 use borrowed::borrowed;
 use context::CoreContext;
 use fbinit::FacebookInit;
-use maplit::{btreemap, hashmap};
+use maplit::btreemap;
+use maplit::hashmap;
 use metaconfig_types::BlameVersion;
 use mononoke_types::blame::BlameRejected;
-use mononoke_types::{ChangesetId, MPath};
+use mononoke_types::ChangesetId;
+use mononoke_types::MPath;
 use std::collections::HashMap;
 use test_repo_factory::TestRepoFactory;
-use tests_utils::{create_commit, store_files, store_rename, CreateCommitContext};
+use tests_utils::create_commit;
+use tests_utils::store_files;
+use tests_utils::store_rename;
+use tests_utils::CreateCommitContext;
 
 // File with multiple changes and a merge
 const F0: &[&str] = &[
@@ -264,7 +271,7 @@ async fn test_blame_size_rejected_version(
     borrowed!(ctx, repo);
     let file1 = "file1";
     let content = "content";
-    let c1 = CreateCommitContext::new_root(&ctx, &repo)
+    let c1 = CreateCommitContext::new_root(ctx, &repo)
         .add_file(file1, content)
         .commit()
         .await?;
@@ -322,7 +329,7 @@ async fn test_blame_copy_source(fb: FacebookInit) -> Result<(), Error> {
         .build()?;
     borrowed!(ctx, repo);
 
-    let c1 = CreateCommitContext::new_root(&ctx, &repo)
+    let c1 = CreateCommitContext::new_root(ctx, &repo)
         .add_file("file1", "one\ntwo\nthree\n")
         .add_file("file2", "zero\none\ntwo\nfour\n")
         .commit()
@@ -375,9 +382,9 @@ fn annotate(
             .get(&range.csid)
             .ok_or_else(|| Error::msg("unresolved csid"))?;
         result.push_str(name);
-        result.push_str(&": ");
+        result.push_str(": ");
         result.push_str(line);
-        result.push_str("\n");
+        result.push('\n');
     }
     Ok(result)
 }

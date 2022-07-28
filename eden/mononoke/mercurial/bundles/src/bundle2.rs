@@ -7,25 +7,37 @@
 
 //! Overall coordinator for parsing bundle2 streams.
 
-use std::fmt::{self, Debug, Display, Formatter};
-use std::io::{BufRead, Chain, Cursor, Read};
+use std::fmt;
+use std::fmt::Debug;
+use std::fmt::Display;
+use std::fmt::Formatter;
+use std::io::BufRead;
+use std::io::Chain;
+use std::io::Cursor;
+use std::io::Read;
 use std::mem;
 
 use anyhow::Error;
 use bytes_old::BytesMut;
-use futures_old::{Async, Poll, Stream};
+use futures_old::Async;
+use futures_old::Poll;
+use futures_old::Stream;
 
 use futures_ext::io::Either;
 use futures_ext::BoxFuture;
 use slog::Logger;
-use tokio_codec::{Framed, FramedParts};
+use tokio_codec::Framed;
+use tokio_codec::FramedParts;
 use tokio_io::AsyncRead;
 
 use crate::errors::ErrorKind;
 use crate::part_inner::inner_stream;
-use crate::part_outer::{outer_stream, OuterFrame, OuterStream};
+use crate::part_outer::outer_stream;
+use crate::part_outer::OuterFrame;
+use crate::part_outer::OuterStream;
 use crate::stream_start::StartDecoder;
-use crate::{Bundle2Item, OldBundle2Item};
+use crate::Bundle2Item;
+use crate::OldBundle2Item;
 
 pub enum StreamEvent<I, S> {
     Next(I),
@@ -44,9 +56,9 @@ impl<I, S> StreamEvent<I, S> {
 
 impl<I, S> Debug for StreamEvent<I, S> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            &StreamEvent::Next(_) => write!(f, "Next(...)"),
-            &StreamEvent::Done(_) => write!(f, "Done(...)"),
+        match *self {
+            StreamEvent::Next(_) => write!(f, "Next(...)"),
+            StreamEvent::Done(_) => write!(f, "Done(...)"),
         }
     }
 }
@@ -95,12 +107,12 @@ where
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         use self::CurrentStream::*;
 
-        let s = match self {
-            &Start(_) => "start",
-            &Outer(_) => "outer",
-            &Inner(_) => "inner",
-            &Invalid => "invalid",
-            &End => "end",
+        let s = match *self {
+            Start(_) => "start",
+            Outer(_) => "outer",
+            Inner(_) => "inner",
+            Invalid => "invalid",
+            End => "end",
         };
         write!(fmt, "{}", s)
     }
@@ -111,14 +123,14 @@ where
     R: AsyncRead + BufRead + Debug + 'static + Send,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            &CurrentStream::Start(ref framed_stream) => write!(f, "Start({:?})", framed_stream),
-            &CurrentStream::Outer(ref outer_stream) => write!(f, "Outer({:?})", outer_stream),
+        match *self {
+            CurrentStream::Start(ref framed_stream) => write!(f, "Start({:?})", framed_stream),
+            CurrentStream::Outer(ref outer_stream) => write!(f, "Outer({:?})", outer_stream),
             // InnerStream currently doesn't implement Debug because
             // part_inner::BoolFuture doesn't implement Debug.
-            &CurrentStream::Inner(_) => write!(f, "Inner(inner_stream)"),
-            &CurrentStream::Invalid => write!(f, "Invalid"),
-            &CurrentStream::End => write!(f, "End"),
+            CurrentStream::Inner(_) => write!(f, "Inner(inner_stream)"),
+            CurrentStream::Invalid => write!(f, "Invalid"),
+            CurrentStream::End => write!(f, "End"),
         }
     }
 }
@@ -210,7 +222,7 @@ impl Bundle2StreamInner {
                             Err(e) => {
                                 // Can't do much if reading stream level params
                                 // failed -- go to the invalid state.
-                                (Err(e.into()), CurrentStream::Invalid)
+                                (Err(e), CurrentStream::Invalid)
                             }
                             Ok(v) => {
                                 let outer = CurrentStream::Outer(v);

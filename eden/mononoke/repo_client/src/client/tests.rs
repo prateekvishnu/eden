@@ -13,18 +13,16 @@ use fbinit::FacebookInit;
 use fixtures::ManyFilesDirs;
 use fixtures::TestRepoFixture;
 use futures::compat::Future01CompatExt;
-use manifest::{Entry, ManifestOps};
+use manifest::Entry;
+use manifest::ManifestOps;
 use maplit::hashset;
 use mercurial_derived_data::DeriveHgChangeset;
 use mercurial_types::HgFileNodeId;
 use metaconfig_types::LfsParams;
 use mononoke_api::Repo;
-use mononoke_repo::MononokeRepo;
 use mononoke_types_mocks::changesetid::ONES_CSID;
 use scuba_ext::MononokeScubaSampleBuilder;
 use serde_json::json;
-use sql_construct::SqlConstruct;
-use streaming_clone::SqlStreamingChunksFetcher;
 use tests_utils::CreateCommitContext;
 
 #[test]
@@ -405,19 +403,7 @@ async fn run_and_check_if_lfs(
     filenode_id: &HgFileNodeId,
     lfs_params: LfsParams,
 ) -> Result<bool, Error> {
-    let repo = Repo::new_test_lfs(ctx.clone(), repo.clone(), lfs_params).await?;
-
-    let blob_repo = repo.blob_repo().clone();
-    let mononoke_repo = MononokeRepo::new_from_parts(
-        ctx.fb,
-        Arc::new(repo),
-        SqlStreamingCloneConfig {
-            blobstore: blob_repo.get_blobstore(),
-            fetcher: SqlStreamingChunksFetcher::with_sqlite_in_memory()?,
-            repoid: blob_repo.get_repoid(),
-        },
-    )
-    .await?;
+    let repo = Arc::new(Repo::new_test_lfs(ctx.clone(), repo.clone(), lfs_params).await?);
 
     let logging = LoggingContainer::new(
         ctx.fb,
@@ -426,11 +412,10 @@ async fn run_and_check_if_lfs(
     );
 
     let repo_client = RepoClient::new(
-        mononoke_repo,
+        repo,
         ctx.session().clone(),
         logging,
-        false, // Don't preserve raw bundle 2 (we don't push)
-        None,  // No PushRedirectorArgs
+        None, // No PushRedirectorArgs
         Default::default(),
         None, // No backup repo source
     );
@@ -458,7 +443,7 @@ async fn fetch_mfs(
 ) -> Result<Vec<(HgManifestId, Option<MPath>)>, Error> {
     let fetched_mfs = get_changed_manifests_stream(
         ctx.clone(),
-        &repo,
+        repo,
         root_mf_id,
         base_root_mf_id,
         base_path,

@@ -12,7 +12,10 @@ use cross_repo_sync::CommitSyncer;
 use futures_stats::FutureStats;
 use mononoke_types::ChangesetId;
 use scuba_ext::MononokeScubaSampleBuilder;
-use slog::{error, info, warn, Logger};
+use slog::error;
+use slog::info;
+use slog::warn;
+use slog::Logger;
 use synced_commit_mapping::SyncedCommitMapping;
 
 pub const SCUBA_TABLE: &str = "mononoke_x_repo_sync";
@@ -118,7 +121,7 @@ fn log_sync_single_changeset_result(
 ) {
     match res {
         Ok(maybe_synced_cs_id) => {
-            log_success_to_logger(ctx.logger(), &bcs_id, &maybe_synced_cs_id, &stats);
+            log_success_to_logger(ctx.logger(), &bcs_id, maybe_synced_cs_id, &stats);
             log_success_to_scuba(scuba_sample, bcs_id, *maybe_synced_cs_id, stats);
         }
         Err(e) => {
@@ -137,7 +140,7 @@ pub fn log_pushrebase_sync_single_changeset_result(
     stats: FutureStats,
 ) {
     scuba_sample.add(SYNC_TYPE_ARG, "pushrebase");
-    log_sync_single_changeset_result(ctx, scuba_sample, bcs_id, &res, stats)
+    log_sync_single_changeset_result(ctx, scuba_sample, bcs_id, res, stats)
 }
 
 pub fn log_non_pushrebase_sync_single_changeset_result(

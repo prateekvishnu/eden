@@ -5,45 +5,81 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{self, format_err, Context, Error};
+use anyhow;
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
 use blobrepo::BlobRepo;
-use blobrepo_hg::{save_bonsai_changeset_object, BlobRepoHg, ChangesetHandle};
-use blobstore::{Blobstore, Loadable, LoadableError};
+use blobrepo_hg::save_bonsai_changeset_object;
+use blobrepo_hg::BlobRepoHg;
+use blobrepo_hg::ChangesetHandle;
+use blobstore::Blobstore;
+use blobstore::Loadable;
+use blobstore::LoadableError;
 use bookmarks::Freshness;
 use bytes::Bytes;
-use changesets::{ChangesetInsert, Changesets};
-use context::{CoreContext, SessionClass};
-use edenapi_types::{AnyId, UploadToken};
-use ephemeral_blobstore::{Bubble, BubbleId, RepoEphemeralStore, StorageLocation};
-use filestore::{self, FetchKey, StoreRequest};
-use futures::compat::{Future01CompatExt, Stream01CompatExt};
-use futures::{future, stream, Stream, StreamExt, TryStream, TryStreamExt};
+use changesets::ChangesetInsert;
+use changesets::Changesets;
+use context::CoreContext;
+use context::SessionClass;
+use edenapi_types::AnyId;
+use edenapi_types::UploadToken;
+use ephemeral_blobstore::Bubble;
+use ephemeral_blobstore::BubbleId;
+use ephemeral_blobstore::RepoEphemeralStore;
+use ephemeral_blobstore::StorageLocation;
+use filestore;
+use filestore::FetchKey;
+use filestore::StoreRequest;
+use futures::compat::Future01CompatExt;
+use futures::compat::Stream01CompatExt;
+use futures::future;
+use futures::stream;
+use futures::Stream;
+use futures::StreamExt;
+use futures::TryStream;
+use futures::TryStreamExt;
 use futures_util::try_join;
 use hgproto::GettreepackArgs;
 use mercurial_derived_data::DeriveHgChangeset;
 use mercurial_mutation::HgMutationEntry;
-use mercurial_types::blobs::{RevlogChangeset, UploadHgNodeHash, UploadHgTreeEntry};
-use mercurial_types::{HgChangesetId, HgFileEnvelopeMut, HgFileNodeId, HgManifestId, HgNodeHash};
+use mercurial_types::blobs::RevlogChangeset;
+use mercurial_types::blobs::UploadHgNodeHash;
+use mercurial_types::blobs::UploadHgTreeEntry;
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgFileEnvelopeMut;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::HgManifestId;
+use mercurial_types::HgNodeHash;
 use metaconfig_types::RepoConfig;
-use mononoke_api::RepoWriteContext;
-use mononoke_api::{errors::MononokeError, path::MononokePath, repo::RepoContext};
-use mononoke_types::{BonsaiChangeset, ChangesetId, ContentId, ContentMetadata, MPath, RepoPath};
+use mononoke_api::errors::MononokeError;
+use mononoke_api::path::MononokePath;
+use mononoke_api::repo::RepoContext;
+use mononoke_types::BonsaiChangeset;
+use mononoke_types::ChangesetId;
+use mononoke_types::ContentId;
+use mononoke_types::ContentMetadata;
+use mononoke_types::MPath;
+use mononoke_types::RepoPath;
 use phases::PhasesRef;
 use reachabilityindex::LeastCommonAncestorsHint;
 use repo_blobstore::RepoBlobstore;
-use repo_client::{
-    find_commits_to_send, find_new_draft_commits_and_derive_filenodes_for_public_roots,
-    gettreepack_entries,
-};
-use segmented_changelog::{CloneData, Location};
+use repo_client::find_commits_to_send;
+use repo_client::find_new_draft_commits_and_derive_filenodes_for_public_roots;
+use repo_client::gettreepack_entries;
+use segmented_changelog::CloneData;
+use segmented_changelog::Location;
 use tunables::tunables;
 use unbundle::upload_changeset;
 
-use super::{HgFileContext, HgTreeContext};
+use super::HgFileContext;
+use super::HgTreeContext;
 
 #[derive(Clone)]
 pub struct HgRepoContext {
@@ -57,7 +93,7 @@ impl HgRepoContext {
 
     /// The `CoreContext` for this query.
     pub fn ctx(&self) -> &CoreContext {
-        &self.repo.ctx()
+        self.repo.ctx()
     }
 
     /// The `RepoContext` for this query.
@@ -67,7 +103,7 @@ impl HgRepoContext {
 
     /// The underlying Mononoke `BlobRepo` backing this repo.
     pub(crate) fn blob_repo(&self) -> &BlobRepo {
-        &self.repo().blob_repo()
+        self.repo().blob_repo()
     }
 
     /// The configuration for the repository.
@@ -87,18 +123,13 @@ impl HgRepoContext {
             .await?)
     }
 
-    /// Get a write context to make changes to this repository.
-    pub async fn write(self) -> Result<RepoWriteContext, MononokeError> {
-        self.repo.write().await
-    }
-
     pub fn ephemeral_store(&self) -> &Arc<RepoEphemeralStore> {
         self.repo().ephemeral_store()
     }
 
     /// Load bubble from id
     pub async fn open_bubble(&self, bubble_id: BubbleId) -> Result<Bubble, MononokeError> {
-        Ok(self.repo.open_bubble(bubble_id).await?)
+        self.repo.open_bubble(bubble_id).await
     }
 
     /// Get blobstore. If bubble id is present, this is the ephemeral blobstore
@@ -164,7 +195,7 @@ impl HgRepoContext {
             }
             self.bubble_blobstore(bubble_id)
                 .await?
-                .is_present(&ctx, &key)
+                .is_present(&ctx, key)
                 .await
                 .map(|is_present| {
                     // if we can't resolve the presence (some blobstores failed, some returned None)
@@ -235,7 +266,7 @@ impl HgRepoContext {
             self.ctx().clone(),
             &match upload_token.data.id {
                 AnyId::AnyFileContentId(file_id) => file_id.into(),
-                e @ _ => {
+                e => {
                     return Err(MononokeError::from(format_err!(
                         "Id is not of a file: {:?}",
                         e
@@ -263,10 +294,9 @@ impl HgRepoContext {
         changeset_id: ChangesetId,
         storage_location: StorageLocation,
     ) -> Result<bool, MononokeError> {
-        Ok(self
-            .repo
+        self.repo
             .changeset_exists(changeset_id, storage_location)
-            .await?)
+            .await
     }
 
     /// Look up in blobstore by `HgFileNodeId`
@@ -394,7 +424,7 @@ impl HgRepoContext {
         }
         self.blob_repo()
             .hg_mutation_store()
-            .add_entries(&self.ctx(), hg_changesets, mutations)
+            .add_entries(self.ctx(), hg_changesets, mutations)
             .await
             .map_err(MononokeError::from)?;
 
@@ -423,7 +453,7 @@ impl HgRepoContext {
             cs_id,
             parents: bonsai_cs.parents().collect(),
         };
-        match save_bonsai_changeset_object(&self.ctx(), blobstore, bonsai_cs).await {
+        match save_bonsai_changeset_object(self.ctx(), blobstore, bonsai_cs).await {
             Ok(_) => {
                 self.blob_repo()
                     .get_changesets_object()
@@ -671,7 +701,7 @@ impl HgRepoContext {
             .map(|hgid| {
                 hg_to_bonsai
                     .get(&hgid)
-                    .map(|bonsai| bonsai.clone())
+                    .copied()
                     .ok_or_else(|| format_err!("Failed to convert common {} to bonsai", hgid))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -680,7 +710,7 @@ impl HgRepoContext {
             .map(|hgid| {
                 hg_to_bonsai
                     .get(&hgid)
-                    .map(|bonsai| bonsai.clone())
+                    .copied()
                     .ok_or_else(|| format_err!("Failed to convert missing {} to bonsai", hgid))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -701,7 +731,7 @@ impl HgRepoContext {
                 .idmap
                 .values()
                 .filter(|csid| !hints.contains_key(csid))
-                .map(|&csid| csid)
+                .copied()
                 .collect();
 
             let mut mapping = hints;
@@ -831,7 +861,7 @@ impl HgRepoContext {
         for (cs_id, cs_parents) in cs_parent_mapping.iter() {
             let hg_id = get_hg_id(cs_id)?;
             let hg_parents = cs_parents
-                .into_iter()
+                .iter()
                 .map(get_hg_id)
                 .collect::<Result<Vec<HgChangesetId>, Error>>()
                 .map_err(MononokeError::from)?;
@@ -863,10 +893,10 @@ mod tests {
 
         let blob_repo: BlobRepo = test_repo_factory::build_empty(fb)?;
         let repo = Repo::new_test(ctx.clone(), blob_repo).await?;
-        let repo_ctx = RepoContext::new(ctx, Arc::new(repo)).await?;
+        let repo_ctx = RepoContext::new_test(ctx, Arc::new(repo)).await?;
 
         let hg = repo_ctx.hg();
-        assert_eq!(hg.repo().name(), "test");
+        assert_eq!(hg.repo().name(), "repo");
 
         Ok(())
     }
@@ -893,7 +923,7 @@ mod tests {
         let root_mfid_2 = root_manifest_id(ctx.clone(), &blob_repo, commit_2).await?;
 
         let repo = Repo::new_test(ctx.clone(), blob_repo).await?;
-        let repo_ctx = RepoContext::new(ctx, Arc::new(repo)).await?;
+        let repo_ctx = RepoContext::new_test(ctx, Arc::new(repo)).await?;
         let hg = repo_ctx.hg();
 
         let trees = hg

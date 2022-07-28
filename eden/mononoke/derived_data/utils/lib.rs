@@ -5,9 +5,12 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, format_err, Error};
+use anyhow::anyhow;
+use anyhow::format_err;
+use anyhow::Error;
 use async_trait::async_trait;
-use blame::{BlameRoot, RootBlameV2};
+use blame::BlameRoot;
+use blame::RootBlameV2;
 use blobrepo::BlobRepo;
 use bonsai_hg_mapping::BonsaiHgMappingArc;
 use changeset_info::ChangesetInfo;
@@ -17,19 +20,25 @@ use context::CoreContext;
 use deleted_manifest::RootDeletedManifestV2Id;
 use derived_data::DerivedDataTypesConfig;
 use derived_data_filenodes::FilenodesOnlyPublic;
-use derived_data_manager::{
-    BatchDeriveOptions, BatchDeriveStats, BonsaiDerivable as NewBonsaiDerivable,
-    DerivedDataManager, Rederivation,
-};
+use derived_data_manager::BatchDeriveOptions;
+use derived_data_manager::BatchDeriveStats;
+use derived_data_manager::BonsaiDerivable as NewBonsaiDerivable;
+use derived_data_manager::DerivedDataManager;
+use derived_data_manager::Rederivation;
 use fastlog::RootFastlog;
 use fbinit::FacebookInit;
 use filenodes::FilenodesArc;
 use fsnodes::RootFsnodeId;
-use futures::{
-    future::{self, ready, try_join_all, BoxFuture, FutureExt},
-    stream::futures_unordered::FuturesUnordered,
-    Future, Stream, TryFutureExt, TryStreamExt,
-};
+use futures::future;
+use futures::future::ready;
+use futures::future::try_join_all;
+use futures::future::BoxFuture;
+use futures::future::FutureExt;
+use futures::stream::futures_unordered::FuturesUnordered;
+use futures::Future;
+use futures::Stream;
+use futures::TryFutureExt;
+use futures::TryStreamExt;
 use futures_stats::TimedTryFutureExt;
 use git_types::TreeHandle;
 use lazy_static::lazy_static;
@@ -41,13 +50,14 @@ use repo_blobstore::RepoBlobstoreRef;
 use repo_derived_data::RepoDerivedDataRef;
 use scuba_ext::MononokeScubaSampleBuilder;
 use skeleton_manifest::RootSkeletonManifestId;
-use std::{
-    collections::{HashMap, HashSet},
-    hash::{Hash, Hasher},
-    io::Write,
-    marker::PhantomData,
-    sync::{Arc, Mutex},
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::hash::Hash;
+use std::hash::Hasher;
+use std::io::Write;
+use std::marker::PhantomData;
+use std::sync::Arc;
+use std::sync::Mutex;
 use topo_sort::sort_topological;
 use unodes::RootUnodeManifestId;
 
@@ -174,7 +184,7 @@ pub trait DerivedUtils: Send + Sync + 'static {
     ) -> Result<u64, Error>;
 
     /// Regenerate derived data for specified set of commits
-    fn regenerate(&self, csids: &Vec<ChangesetId>);
+    fn regenerate(&self, csids: &[ChangesetId]);
 
     /// Remove all previously set regenerations
     fn clear_regenerate(&self);
@@ -307,7 +317,7 @@ where
             .manager
             .fetch_derived_batch::<Derivable>(&ctx, csids.clone(), Some(utils))
             .await?;
-        csids.retain(|csid| !derived.contains_key(&csid));
+        csids.retain(|csid| !derived.contains_key(csid));
         Ok(csids)
     }
 
@@ -324,7 +334,7 @@ where
             .await?)
     }
 
-    fn regenerate(&self, csids: &Vec<ChangesetId>) {
+    fn regenerate(&self, csids: &[ChangesetId]) {
         self.rederive
             .with(|rederive| rederive.extend(csids.iter().copied()));
     }
@@ -528,7 +538,7 @@ impl DeriveGraph {
         let mut visited = HashSet::new();
         let mut res = HashSet::new();
         while let Some(node) = stack.pop() {
-            res.extend(node.csids.iter().map(|cs_id| *cs_id));
+            res.extend(node.csids.iter().copied());
             for dep in node.dependencies.iter() {
                 if visited.insert(dep.id) {
                     stack.push(dep);
@@ -896,7 +906,7 @@ pub fn find_underived_many(
                     let derivers = try_join_all(derivers)
                         .await?
                         .into_iter()
-                        .filter_map(|v| v)
+                        .filter_map(std::convert::identity)
                         .collect::<Vec<_>>();
                     Arc::new(derivers)
                 } else {
@@ -937,12 +947,12 @@ mod tests {
     use fbinit::FacebookInit;
     use fixtures::MergeEven;
     use fixtures::TestRepoFixture;
-    use maplit::{btreemap, hashset};
+    use maplit::btreemap;
+    use maplit::hashset;
     use metaconfig_types::UnodeVersion;
-    use std::{
-        collections::BTreeMap,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
+    use std::collections::BTreeMap;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use tests_utils::drawdag::create_from_dag;
 
     // decompose graph into map between node indices and list of nodes
@@ -1127,7 +1137,7 @@ mod tests {
             unimplemented!()
         }
 
-        fn regenerate(&self, _csids: &Vec<ChangesetId>) {
+        fn regenerate(&self, _csids: &[ChangesetId]) {
             unimplemented!()
         }
 

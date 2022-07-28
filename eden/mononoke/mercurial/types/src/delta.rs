@@ -5,13 +5,20 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{bail, ensure, format_err, Context, Result};
-use quickcheck::{Arbitrary, Gen};
-use rand_distr::{Distribution, LogNormal};
+use anyhow::bail;
+use anyhow::ensure;
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Result;
+use quickcheck::Arbitrary;
+use quickcheck::Gen;
+use rand_distr::Distribution;
+use rand_distr::LogNormal;
 
 use crate::errors::ErrorKind;
 
-use super::delta_apply::{mpatch_fold, wrap_deltas};
+use super::delta_apply::mpatch_fold;
+use super::delta_apply::wrap_deltas;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Delta {
@@ -97,12 +104,12 @@ impl Arbitrary for Delta {
             .map(|_| {
                 start = end + usize::arbitrary(g) % size;
                 end = start + usize::arbitrary(g) % size;
-                let val = Fragment {
+
+                Fragment {
                     start,
                     end,
                     content: arbitrary_frag_content(g),
-                };
-                val
+                }
             })
             .collect();
         Delta { frags }
@@ -115,7 +122,7 @@ impl Arbitrary for Delta {
         Box::new(
             self.frags
                 .shrink()
-                .filter(|frags| Delta::verify(&frags).is_ok())
+                .filter(|frags| Delta::verify(frags).is_ok())
                 .map(|frags| Delta { frags }),
         )
     }
@@ -318,7 +325,7 @@ pub mod compat {
                 .map(|delta| Fragment {
                     start: delta.start,
                     end: delta.end,
-                    content: delta.content.clone(),
+                    content: delta.content,
                 })
                 .collect(),
         }
@@ -340,7 +347,7 @@ mod tests {
     /// Test that fragments are verified properly.
     #[test]
     fn test_delta_new() {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let test_cases = vec![
             (vec![Fragment { start: 0, end: 0, content: vec![] }], true),
             (vec![Fragment { start: 0, end: 5, content: vec![] }], true),
@@ -366,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_maybe_fulltext() {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let test_cases = vec![
             (vec![Fragment { start: 0, end: 0, content: vec![] }], true),
             (vec![Fragment { start: 0, end: 0, content: vec![b'a'] }], true),

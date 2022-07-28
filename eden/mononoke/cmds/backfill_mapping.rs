@@ -5,22 +5,26 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Error};
+use anyhow::anyhow;
+use anyhow::Error;
 use args::MononokeClapApp;
 use ascii::AsciiStr;
 use blobrepo::BlobRepo;
 use blobstore::Loadable;
-use clap_old::{Arg, ArgGroup};
+use clap_old::Arg;
+use clap_old::ArgGroup;
 use cloned::cloned;
 use cmdlib::args;
 use context::CoreContext;
 use fbinit::FacebookInit;
 use futures::stream;
 use futures_util::future::TryFutureExt;
-use futures_util::stream::{StreamExt, TryStreamExt};
+use futures_util::stream::StreamExt;
+use futures_util::stream::TryStreamExt;
 use mercurial_types::HgChangesetId;
 use std::fs;
-use std::io::{self, BufRead};
+use std::io;
+use std::io::BufRead;
 use std::path::Path;
 
 fn setup_app<'a, 'b>() -> MononokeClapApp<'a, 'b> {
@@ -70,7 +74,7 @@ pub async fn backfill<P: AsRef<Path>>(
                     .bonsai_hg_mapping()
                     .get_bonsai_from_hg(&ctx, hg_cs_id)
                     .await?
-                    .ok_or(anyhow!("hg commit {} is missing", hg_cs_id))?;
+                    .ok_or_else(|| anyhow!("hg commit {} is missing", hg_cs_id))?;
                 Ok(id)
             }
         })
@@ -123,7 +127,7 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
     };
 
     let run = async {
-        let repo = args::open_repo(fb, &logger, &matches).await?;
+        let repo = args::open_repo(fb, logger, &matches).await?;
         let in_filename = matches.value_of("IN_FILENAME").unwrap();
         backfill(ctx, repo, in_filename, mode).await
     };

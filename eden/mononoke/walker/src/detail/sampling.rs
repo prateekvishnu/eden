@@ -5,24 +5,40 @@
  * GNU General Public License version 2.
  */
 
-use crate::detail::{
-    graph::{EdgeType, Node, NodeData, NodeType, WrappedPathHash, WrappedPathLike},
-    state::{InternedType, StepStats, WalkState},
-    walk::{EmptyRoute, OutgoingEdge, StepRoute, TailingWalkVisitor, VisitOne, WalkVisitor},
-};
+use crate::detail::graph::EdgeType;
+use crate::detail::graph::Node;
+use crate::detail::graph::NodeData;
+use crate::detail::graph::NodeType;
+use crate::detail::graph::WrappedPathHash;
+use crate::detail::graph::WrappedPathLike;
+use crate::detail::state::InternedType;
+use crate::detail::state::StepStats;
+use crate::detail::state::WalkState;
+use crate::detail::walk::EmptyRoute;
+use crate::detail::walk::OutgoingEdge;
+use crate::detail::walk::StepRoute;
+use crate::detail::walk::TailingWalkVisitor;
+use crate::detail::walk::VisitOne;
+use crate::detail::walk::WalkVisitor;
 
 use anyhow::Error;
 use async_trait::async_trait;
-use bonsai_hg_mapping::{BonsaiHgMapping, BonsaiHgMappingEntry};
+use bonsai_hg_mapping::BonsaiHgMapping;
+use bonsai_hg_mapping::BonsaiHgMappingEntry;
 use bulkops::Direction;
-use context::{CoreContext, SamplingKey};
+use context::CoreContext;
+use context::SamplingKey;
 use dashmap::DashMap;
 use mercurial_types::HgChangesetId;
-use mononoke_types::{datetime::DateTime, ChangesetId};
+use mononoke_types::datetime::DateTime;
+use mononoke_types::ChangesetId;
 use phases::Phases;
 use regex::Regex;
 use slog::Logger;
-use std::{collections::HashSet, fmt, hash, sync::Arc};
+use std::collections::HashSet;
+use std::fmt;
+use std::hash;
+use std::sync::Arc;
 
 pub trait SampleTrigger<K> {
     fn map_keys(&self, key: SamplingKey, walk_key: K);
@@ -155,7 +171,7 @@ where
     fn evolve(route: Option<Self>, walk_item: &OutgoingEdge, mtime: Option<&DateTime>) -> Self {
         let existing_path = route.as_ref().and_then(|r| r.path.as_ref());
         let existing_mtime = route.as_ref().and_then(|r| r.mtime.as_ref());
-        let new_path = P::evolve_path(existing_path, &walk_item);
+        let new_path = P::evolve_path(existing_path, walk_item);
 
         // reuse same route if possible
         if new_path == existing_path && (mtime.is_none() || mtime == existing_mtime) {
@@ -232,7 +248,7 @@ where
         step: &OutgoingEdge,
     ) -> Option<CoreContext> {
         if self.options.node_types.contains(&step.target.get_type()) {
-            let repo_path = route.and_then(|r| P::evolve_path(r.path.as_ref(), &step));
+            let repo_path = route.and_then(|r| P::evolve_path(r.path.as_ref(), step));
             if self.sample_path_regex.as_ref().map_or_else(
                 || true,
                 |re| match repo_path {

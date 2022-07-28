@@ -7,17 +7,26 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Error};
+use anyhow::Context;
+use anyhow::Error;
 use async_trait::async_trait;
+use bookmarks_movement::BookmarkKindRestrictions;
 use bytes::Bytes;
-use edenapi_types::{HgId, LandStackRequest, LandStackResponse};
-use futures::{stream, StreamExt};
-use mercurial_types::{HgChangesetId, HgNodeHash};
+use edenapi_types::HgId;
+use edenapi_types::LandStackRequest;
+use edenapi_types::LandStackResponse;
+use futures::stream;
+use futures::StreamExt;
+use hooks::CrossRepoPushSource;
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgNodeHash;
 use mononoke_api_hg::HgRepoContext;
 
 use crate::errors::ErrorKind;
 
-use super::{EdenApiHandler, EdenApiMethod, HandlerResult};
+use super::EdenApiHandler;
+use super::EdenApiMethod;
+use super::HandlerResult;
 
 /// Rebase a stack of commits onto a bookmark, and update the bookmark to the top of the newly-rebased stack.
 pub struct LandStackHandler;
@@ -38,7 +47,7 @@ impl EdenApiHandler for LandStackHandler {
         request: Self::Request,
     ) -> HandlerResult<'async_trait, Self::Response> {
         Ok(stream::once(land_stack(
-            repo.clone(),
+            repo,
             request.bookmark,
             request.head,
             request.base,
@@ -59,15 +68,14 @@ async fn land_stack(
     base_hgid: HgId,
     pushvars: HashMap<String, Bytes>,
 ) -> Result<LandStackResponse, Error> {
-    // TODO(meyer): Figure out why these errors weren't propagating to the client
-    let repo = repo.write().await?;
+    let repo = repo.repo();
 
     let head = HgChangesetId::new(HgNodeHash::from(head_hgid));
     let head = repo
         .changeset(head)
         .await
         .context("failed to resolve head")?
-        .ok_or_else(|| ErrorKind::HgIdNotFound(head_hgid))?
+        .ok_or(ErrorKind::HgIdNotFound(head_hgid))?
         .id();
 
     let base = HgChangesetId::new(HgNodeHash::from(base_hgid));
@@ -75,7 +83,7 @@ async fn land_stack(
         .changeset(base)
         .await
         .context("failed to resolve base")?
-        .ok_or_else(|| ErrorKind::HgIdNotFound(base_hgid))?
+        .ok_or(ErrorKind::HgIdNotFound(base_hgid))?
         .id();
 
     let pushrebase_outcome = repo
@@ -88,6 +96,8 @@ async fn land_stack(
             } else {
                 Some(&pushvars)
             },
+            CrossRepoPushSource::NativeToThisRepo,
+            BookmarkKindRestrictions::AnyKind,
         )
         .await?;
 
@@ -110,7 +120,7 @@ async fn land_stack(
 
     let new_head_hgid = all_hgids
         .get(&new_head)
-        .ok_or_else(|| ErrorKind::BonsaiChangesetToHgIdError(new_head))
+        .ok_or(ErrorKind::BonsaiChangesetToHgIdError(new_head))
         .context("failed to fetch hgid for new head")?
         .into_nodehash()
         .into();
@@ -120,7 +130,7 @@ async fn land_stack(
         .map(|id| {
             all_hgids
                 .get(id)
-                .ok_or_else(|| ErrorKind::BonsaiChangesetToHgIdError(*id))
+                .ok_or(ErrorKind::BonsaiChangesetToHgIdError(*id))
                 .context("failed to fetch hgids for old ids")
                 .map(|id| id.into_nodehash().into())
         })
@@ -131,7 +141,7 @@ async fn land_stack(
         .map(|id| {
             all_hgids
                 .get(id)
-                .ok_or_else(|| ErrorKind::BonsaiChangesetToHgIdError(*id))
+                .ok_or(ErrorKind::BonsaiChangesetToHgIdError(*id))
                 .context("failed to fetch hgids for new ids")
                 .map(|id| id.into_nodehash().into())
         })

@@ -5,28 +5,50 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use context::CoreContext;
-use futures::stream::{self, FuturesOrdered, StreamExt, TryStreamExt};
-use futures::{future, try_join};
-use hooks::{HookExecution, HookOutcome};
-use itertools::{Either, Itertools};
+use futures::future;
+use futures::stream;
+use futures::stream::FuturesOrdered;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use futures::try_join;
+use hooks::HookExecution;
+use hooks::HookOutcome;
+use itertools::Either;
+use itertools::Itertools;
 use maplit::btreeset;
-use mononoke_api::{
-    unified_diff, CandidateSelectionHintArgs, ChangesetContext, ChangesetDiffItem,
-    ChangesetFileOrdering, ChangesetHistoryOptions, ChangesetId, ChangesetPathDiffContext,
-    ChangesetSpecifier, CopyInfo, MononokeError, MononokePath, RepoContext, UnifiedDiffMode,
-};
+use mononoke_api::unified_diff;
+use mononoke_api::CandidateSelectionHintArgs;
+use mononoke_api::ChangesetContext;
+use mononoke_api::ChangesetDiffItem;
+use mononoke_api::ChangesetFileOrdering;
+use mononoke_api::ChangesetHistoryOptions;
+use mononoke_api::ChangesetId;
+use mononoke_api::ChangesetPathDiffContext;
+use mononoke_api::ChangesetSpecifier;
+use mononoke_api::CopyInfo;
+use mononoke_api::MononokeError;
+use mononoke_api::MononokePath;
+use mononoke_api::RepoContext;
+use mononoke_api::UnifiedDiffMode;
 use source_control as thrift;
 
-use crate::commit_id::{map_commit_identities, map_commit_identity};
-use crate::errors::{self, ServiceErrorResultExt};
-use crate::from_request::{check_range_and_convert, validate_timestamp, FromRequest};
+use crate::commit_id::map_commit_identities;
+use crate::commit_id::map_commit_identity;
+use crate::errors;
+use crate::errors::ServiceErrorResultExt;
+use crate::from_request::check_range_and_convert;
+use crate::from_request::validate_timestamp;
+use crate::from_request::FromRequest;
 use crate::history::collect_history;
-use crate::into_response::{AsyncIntoResponse, AsyncIntoResponseWith, IntoResponse};
+use crate::into_response::AsyncIntoResponse;
+use crate::into_response::AsyncIntoResponseWith;
+use crate::into_response::IntoResponse;
 use crate::source_control_impl::SourceControlServiceImpl;
 
 // Magic number used when we want to limit concurrency with buffer_unordered.
@@ -46,7 +68,7 @@ impl CommitComparePath {
             CommitComparePath::File(file) => file
                 .base_file
                 .as_ref()
-                .or_else(|| file.other_file.as_ref())
+                .or(file.other_file.as_ref())
                 .map(|file| file.path.as_str())
                 .ok_or_else(|| {
                     errors::internal_error("programming error, file entry has no file").into()
@@ -55,7 +77,7 @@ impl CommitComparePath {
             CommitComparePath::Tree(tree) => tree
                 .base_tree
                 .as_ref()
-                .or_else(|| tree.other_tree.as_ref())
+                .or(tree.other_tree.as_ref())
                 .map(|tree| tree.path.as_str())
                 .ok_or_else(|| {
                     errors::internal_error("programming error, tree entry has no tree").into()
@@ -474,7 +496,7 @@ impl SourceControlServiceImpl {
         let (base_changeset, other_changeset) = match &params.other_commit_id {
             Some(id) => {
                 let (_repo, mut base_changeset, other_changeset) =
-                    self.repo_changeset_pair(ctx, &commit, &id).await?;
+                    self.repo_changeset_pair(ctx, &commit, id).await?;
                 add_mutable_renames(&mut base_changeset, &params).await?;
                 (base_changeset, Some(other_changeset))
             }
@@ -653,7 +675,12 @@ impl SourceControlServiceImpl {
         };
 
         let files = changeset
-            .find_files(prefixes, params.basenames, ordering)
+            .find_files(
+                prefixes,
+                params.basenames,
+                params.basename_suffixes,
+                ordering,
+            )
             .await?
             .take(limit)
             .map_ok(|path| path.to_string())
@@ -677,7 +704,7 @@ impl SourceControlServiceImpl {
             async {
                 if let Some(descendants_of) = &params.descendants_of {
                     Ok::<_, errors::ServiceError>(Some(
-                        self.changeset_id(&repo, &descendants_of).await?,
+                        self.changeset_id(&repo, descendants_of).await?,
                     ))
                 } else {
                     Ok(None)
@@ -688,7 +715,7 @@ impl SourceControlServiceImpl {
                     &params.exclude_changeset_and_ancestors
                 {
                     Ok::<_, errors::ServiceError>(Some(
-                        self.changeset_id(&repo, &exclude_changeset_and_ancestors)
+                        self.changeset_id(&repo, exclude_changeset_and_ancestors)
                             .await?,
                     ))
                 } else {

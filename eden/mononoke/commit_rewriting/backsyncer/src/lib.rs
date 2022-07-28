@@ -22,28 +22,78 @@
 /// 2) Rewrite these commits and create rewritten commits in target repo
 /// 3) In the same transaction try to update a bookmark in the source repo AND latest backsynced
 ///    log id.
-use anyhow::{bail, format_err, Error};
+use anyhow::bail;
+/// Backsyncer
+///
+/// Library to sync commits from source repo to target repo by following bookmark update log
+/// and doing commit rewrites. The main motivation for backsyncer is to keep "small repo" up to
+/// date with "large repo" in a setup where all writes to small repo are redirected to large repo
+/// in a push redirector.
+/// More details can be found here - <https://fb.quip.com/tZ4yAaA3S4Mc>
+///
+/// Target repo tails source repo's bookmark update log and backsync bookmark updates one by one.
+/// The latest backsynced log id is stored in mutable_counters table. Backsync consists of the
+/// following phases:
+///
+/// 1) Given an entry from bookmark update log of a target repo,
+///    find commits to backsync from source repo into a target repo.
+/// 2) Rewrite these commits and create rewritten commits in target repo
+/// 3) In the same transaction try to update a bookmark in the source repo AND latest backsynced
+///    log id.
+use anyhow::format_err;
+/// Backsyncer
+///
+/// Library to sync commits from source repo to target repo by following bookmark update log
+/// and doing commit rewrites. The main motivation for backsyncer is to keep "small repo" up to
+/// date with "large repo" in a setup where all writes to small repo are redirected to large repo
+/// in a push redirector.
+/// More details can be found here - <https://fb.quip.com/tZ4yAaA3S4Mc>
+///
+/// Target repo tails source repo's bookmark update log and backsync bookmark updates one by one.
+/// The latest backsynced log id is stored in mutable_counters table. Backsync consists of the
+/// following phases:
+///
+/// 1) Given an entry from bookmark update log of a target repo,
+///    find commits to backsync from source repo into a target repo.
+/// 2) Rewrite these commits and create rewritten commits in target repo
+/// 3) In the same transaction try to update a bookmark in the source repo AND latest backsynced
+///    log id.
+use anyhow::Error;
 use blobrepo::BlobRepo;
-use blobstore_factory::{make_metadata_sql_factory, ReadOnlyStorage};
-use bookmarks::{
-    ArcBookmarkUpdateLog, ArcBookmarks, BookmarkTransactionError, BookmarkUpdateLogEntry,
-    BookmarkUpdateReason, Freshness,
-};
+use blobstore_factory::make_metadata_sql_factory;
+use blobstore_factory::ReadOnlyStorage;
+use bookmarks::ArcBookmarkUpdateLog;
+use bookmarks::ArcBookmarks;
+use bookmarks::BookmarkTransactionError;
+use bookmarks::BookmarkUpdateLogEntry;
+use bookmarks::BookmarkUpdateReason;
+use bookmarks::Freshness;
 use cloned::cloned;
 use context::CoreContext;
-use cross_repo_sync::{
-    find_toposorted_unsynced_ancestors, CandidateSelectionHint, CommitSyncContext,
-    CommitSyncOutcome, CommitSyncer,
-};
-use futures::{FutureExt, TryStreamExt};
+use cross_repo_sync::find_toposorted_unsynced_ancestors;
+use cross_repo_sync::CandidateSelectionHint;
+use cross_repo_sync::CommitSyncContext;
+use cross_repo_sync::CommitSyncOutcome;
+use cross_repo_sync::CommitSyncer;
+use futures::FutureExt;
+use futures::TryStreamExt;
 use metaconfig_types::MetadataDatabaseConfig;
-use mononoke_types::{ChangesetId, RepositoryId};
-use mutable_counters::{ArcMutableCounters, MutableCountersArc, SqlMutableCounters};
-use slog::{debug, warn};
+use mononoke_types::ChangesetId;
+use mononoke_types::RepositoryId;
+use mutable_counters::ArcMutableCounters;
+use mutable_counters::MutableCountersArc;
+use mutable_counters::SqlMutableCounters;
+use slog::debug;
+use slog::info;
+use slog::warn;
 use sql::Transaction;
 use sql_ext::facebook::MysqlOptions;
-use sql_ext::{SqlConnections, TransactionResult};
-use std::{sync::Arc, time::Instant};
+use sql_ext::SqlConnections;
+use sql_ext::TransactionResult;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Instant;
 use synced_commit_mapping::SyncedCommitMapping;
 use thiserror::Error;
 
@@ -69,6 +119,7 @@ pub async fn backsync_latest<M>(
     commit_syncer: CommitSyncer<M>,
     target_repo_dbs: TargetRepoDbs,
     limit: BacksyncLimit,
+    cancellation_requested: Arc<AtomicBool>,
 ) -> Result<(), Error>
 where
     M: SyncedCommitMapping + Clone + 'static,
@@ -103,6 +154,13 @@ where
         .try_collect()
         .await?;
 
+    // Before syncing entries, check if cancellation has been
+    // requested. If yes, then exit early.
+    if cancellation_requested.load(Ordering::Relaxed) {
+        info!(ctx.logger(), "sync stopping due to cancellation request");
+        return Ok(());
+    }
+
     if next_entries.is_empty() {
         debug!(ctx.logger(), "nothing to sync");
         Ok(())
@@ -113,6 +171,7 @@ where
             target_repo_dbs,
             next_entries,
             counter as i64,
+            cancellation_requested,
         )
         .await
     }
@@ -124,11 +183,18 @@ async fn sync_entries<M>(
     target_repo_dbs: TargetRepoDbs,
     entries: Vec<BookmarkUpdateLogEntry>,
     mut counter: i64,
+    cancellation_requested: Arc<AtomicBool>,
 ) -> Result<(), Error>
 where
     M: SyncedCommitMapping + Clone + 'static,
 {
     for entry in entries {
+        // Before processing each entry, check if cancellation has
+        // been requested and exit if that's the case.
+        if cancellation_requested.load(Ordering::Relaxed) {
+            info!(ctx.logger(), "sync stopping due to cancellation request");
+            return Ok(());
+        }
         let entry_id = entry.id;
         if counter >= entry_id {
             continue;
@@ -335,44 +401,27 @@ where
                 "syncing bookmark {} to {:?}", bookmark, to_cs_id
             );
 
-            let bundle_replay = None;
             match (from_cs_id, to_cs_id) {
                 (Some(from), Some(to)) => {
                     debug!(
                         ctx.logger(),
                         "updating bookmark {:?} from {:?} to {:?}", bookmark, from, to
                     );
-                    bookmark_txn.update(
-                        &bookmark,
-                        to,
-                        from,
-                        BookmarkUpdateReason::Backsyncer,
-                        bundle_replay,
-                    )?;
+                    bookmark_txn.update(&bookmark, to, from, BookmarkUpdateReason::Backsyncer)?;
                 }
                 (Some(from), None) => {
                     debug!(
                         ctx.logger(),
                         "deleting bookmark {:?} with original position {:?}", bookmark, from
                     );
-                    bookmark_txn.delete(
-                        &bookmark,
-                        from,
-                        BookmarkUpdateReason::Backsyncer,
-                        bundle_replay,
-                    )?;
+                    bookmark_txn.delete(&bookmark, from, BookmarkUpdateReason::Backsyncer)?;
                 }
                 (None, Some(to)) => {
                     debug!(
                         ctx.logger(),
                         "creating bookmark {:?} to point to {:?}", bookmark, to
                     );
-                    bookmark_txn.create(
-                        &bookmark,
-                        to,
-                        BookmarkUpdateReason::Backsyncer,
-                        bundle_replay,
-                    )?;
+                    bookmark_txn.create(&bookmark, to, BookmarkUpdateReason::Backsyncer)?;
                 }
                 (None, None) => {
                     bail!("unexpected bookmark move");

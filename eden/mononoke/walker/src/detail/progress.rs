@@ -5,25 +5,31 @@
  * GNU General Public License version 2.
  */
 
-use crate::detail::{
-    graph::{Node, NodeType},
-    log,
-    state::StepStats,
-};
+use crate::detail::graph::Node;
+use crate::detail::graph::NodeType;
+use crate::detail::log;
+use crate::detail::state::StepStats;
 use anyhow::Error;
 use context::CoreContext;
-use derive_more::{Add, Div, Mul, Sub};
+use derive_more::Add;
+use derive_more::Div;
+use derive_more::Mul;
+use derive_more::Sub;
 use fbinit::FacebookInit;
-use futures::stream::{Stream, StreamExt, TryStreamExt};
+use futures::stream::Stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use scuba_ext::MononokeScubaSampleBuilder;
-use slog::{info, Logger};
+use slog::info;
+use slog::Logger;
 use stats::prelude::*;
-use std::{
-    collections::{HashMap, HashSet},
-    ops::Add,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::ops::Add;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 
 define_stats! {
     prefix = "mononoke.walker";
@@ -274,14 +280,13 @@ impl ProgressStateCountByType<StepStats, ProgressSummary> {
             self.reporting_stats.last_update = now;
         }
 
-        let (delta_s, delta_summary_per_s) = delta_time
-            .map(|delta_time| {
+        let (delta_s, delta_summary_per_s) =
+            delta_time.map_or((0, ProgressSummary::default()), |delta_time| {
                 (
                     delta_time.as_secs(),
                     delta_summary * 1000 / (delta_time.as_millis() as u64),
                 )
-            })
-            .unwrap_or((0, ProgressSummary::default()));
+            });
 
         let total_time = self
             .reporting_stats
@@ -456,7 +461,7 @@ where
     s.map({
         let progress_state = progress_state.clone();
         move |r| {
-            r.and_then(|(key, payload, stats_opt)| {
+            r.map(|(key, payload, stats_opt)| {
                 {
                     let k: &K = &key;
                     let n: &Node = k.into();
@@ -465,7 +470,7 @@ where
                         progress_state.report_throttled();
                     }
                 }
-                Ok((key, payload, stats_opt))
+                (key, payload, stats_opt)
             })
         }
     })
@@ -477,7 +482,7 @@ where
     InStream: Stream<Item = Result<(Node, Option<ND>, Option<SS>), Error>> + 'static + Send,
 {
     let (seen, loaded) = s
-        .try_fold((0 as usize, 0 as usize), {
+        .try_fold((0_usize, 0_usize), {
             async move |(mut seen, mut loaded), (_n, nd, _ss)| {
                 seen += 1;
                 if nd.is_some() {

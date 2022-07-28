@@ -69,6 +69,11 @@ struct TreeOverlayStore::StatementCache {
             db,
             "SELECT COUNT(1) FROM ",
             kEntryTable,
+            " WHERE parent = ? and name = ?"},
+        hasChildren{
+            db,
+            "SELECT COUNT(1) FROM ",
+            kEntryTable,
             " WHERE `parent` = (SELECT `inode` FROM ",
             kEntryTable,
             " WHERE `parent` = ? AND `name` = ?)"},
@@ -115,6 +120,7 @@ struct TreeOverlayStore::StatementCache {
   PersistentSqliteStatement insertChild;
   PersistentSqliteStatement deleteChild;
   PersistentSqliteStatement hasChild;
+  PersistentSqliteStatement hasChildren;
   PersistentSqliteStatement renameChild;
   std::array<PersistentSqliteStatement, kBatchInsertSize> batchInsert;
 };
@@ -262,7 +268,7 @@ InodeNumber TreeOverlayStore::nextInodeNumber() {
 
 void TreeOverlayStore::saveTree(
     InodeNumber inodeNumber,
-    const overlay::OverlayDir& odir) {
+    overlay::OverlayDir&& odir) {
   db_->transaction([&](auto& txn) {
     // When `saveTree` gets called, caller is expected to rewrite the tree
     // content. So we need to remove the previously stored version.
@@ -405,6 +411,17 @@ void TreeOverlayStore::removeChild(
   stmt->step();
 }
 
+bool TreeOverlayStore::hasChild(
+    InodeNumber parent,
+    PathComponentPiece childName) {
+  auto db = db_->lock();
+  auto stmt = cache_->hasChild.get(db);
+  stmt->bind(1, parent.get());
+  stmt->bind(2, childName.stringPiece());
+  stmt->step();
+  return stmt->columnUint64(0) == 1;
+}
+
 void TreeOverlayStore::renameChild(
     InodeNumber src,
     InodeNumber dst,
@@ -413,7 +430,7 @@ void TreeOverlayStore::renameChild(
   // When rename also overwrites some file in the destination, we need to make
   // sure this is transactional.
   db_->transaction([&](auto& txn) {
-    auto overwriteEmpty = cache_->hasChild.get(txn);
+    auto overwriteEmpty = cache_->hasChildren.get(txn);
     overwriteEmpty->bind(1, dst.get());
     overwriteEmpty->bind(2, dstName.stringPiece());
 

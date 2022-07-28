@@ -5,24 +5,30 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{Context as _, Error, Result};
-use blobrepo::BlobRepo;
-use bytes::{Bytes, BytesMut};
+use anyhow::Context as _;
+use anyhow::Error;
+use anyhow::Result;
+use bytes::Bytes;
+use bytes::BytesMut;
 use context::CoreContext;
-use filestore::{self, Alias, FetchKey, StoreRequest};
-use futures::{
-    future::{self, TryFutureExt},
-    stream::{Stream, TryStreamExt},
-};
+use filestore::Alias;
+use filestore::FetchKey;
+use filestore::FilestoreConfigRef;
+use filestore::StoreRequest;
+use futures::future;
+use futures::future::TryFutureExt;
+use futures::stream::Stream;
+use futures::stream::TryStreamExt;
 use mercurial_types::blobs::LFSContent;
 use mononoke_types::ContentMetadata;
+use repo_blobstore::RepoBlobstoreRef;
 use slog::info;
 use std::process::Stdio;
-use tokio::{
-    io::BufReader,
-    process::{Child, Command},
-};
-use tokio_util::codec::{BytesCodec, FramedRead};
+use tokio::io::BufReader;
+use tokio::process::Child;
+use tokio::process::Command;
+use tokio_util::codec::BytesCodec;
+use tokio_util::codec::FramedRead;
 
 fn lfs_stream(
     lfs_helper: &str,
@@ -50,12 +56,12 @@ fn lfs_stream(
 
 async fn do_lfs_upload(
     ctx: &CoreContext,
-    blobrepo: &BlobRepo,
+    repo: &(impl RepoBlobstoreRef + FilestoreConfigRef),
     lfs_helper: &str,
     lfs: &LFSContent,
 ) -> Result<ContentMetadata, Error> {
     let metadata = filestore::get_metadata(
-        blobrepo.blobstore(),
+        repo.repo_blobstore(),
         ctx,
         &FetchKey::Aliased(Alias::Sha256(lfs.oid())),
     )
@@ -75,8 +81,8 @@ async fn do_lfs_upload(
     let (mut child, stream) = lfs_stream(lfs_helper, lfs)?;
 
     let upload = filestore::store(
-        blobrepo.blobstore(),
-        blobrepo.filestore_config(),
+        repo.repo_blobstore(),
+        *repo.filestore_config(),
         ctx,
         &req,
         stream,
@@ -94,7 +100,7 @@ async fn do_lfs_upload(
 
 pub async fn lfs_upload(
     ctx: &CoreContext,
-    blobrepo: &BlobRepo,
+    repo: &(impl RepoBlobstoreRef + FilestoreConfigRef),
     lfs_helper: &str,
     lfs: &LFSContent,
 ) -> Result<ContentMetadata, Error> {
@@ -102,7 +108,7 @@ pub async fn lfs_upload(
     let mut attempt = 0;
 
     loop {
-        let res = do_lfs_upload(ctx, blobrepo, lfs_helper, lfs).await;
+        let res = do_lfs_upload(ctx, repo, lfs_helper, lfs).await;
 
         if res.is_ok() || attempt > max_attempts {
             break res;

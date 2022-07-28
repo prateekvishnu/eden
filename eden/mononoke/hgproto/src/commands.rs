@@ -9,20 +9,45 @@
 //!
 //! To implement a Mercurial service, implement `HgCommands` and then use it to handle incominng
 //! connections.
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{self, BufRead, Cursor};
-use std::mem;
-use std::sync::{Arc, Mutex};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::io;
+use std::io::BufRead;
+use std::io::Cursor;
+use std::sync::Arc;
 
-use anyhow::{bail, Error, Result};
-use bytes_old::{Buf, Bytes, BytesMut};
+use anyhow::bail;
+use anyhow::Error;
+use anyhow::Result;
+use bytes_old::Buf;
+use bytes_old::Bytes;
+use bytes_old::BytesMut;
 use failure_ext::FutureFailureErrorExt;
-use futures::future::{self, err, ok, Either, Future};
-use futures::stream::{self, futures_ordered, once, Stream};
+use futures::future;
+use futures::future::err;
+use futures::future::ok;
+use futures::future::Either;
+use futures::future::Future;
+use futures::stream;
+use futures::stream::futures_ordered;
+use futures::stream::once;
+use futures::stream::Stream;
 use futures::sync::oneshot;
 use futures::IntoFuture;
-use futures_ext::{BoxFuture, BoxStream, BytesStream, FutureExt, StreamExt};
+use futures_ext::BoxFuture;
+use futures_ext::BoxStream;
+use futures_ext::BytesStream;
+use futures_ext::FutureExt;
+use futures_ext::StreamExt;
 use limited_async_read::LimitedAsyncRead;
+use mercurial_bundles::bundle2;
+use mercurial_bundles::bundle2::Bundle2Stream;
+use mercurial_bundles::bundle2::StreamEvent;
+use mercurial_bundles::Bundle2Item;
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::MPath;
 use qps::Qps;
 use slog::Logger;
 use tokio_io::codec::Decoder;
@@ -30,10 +55,10 @@ use tokio_io::AsyncRead;
 
 use crate::dechunker::Dechunker;
 use crate::errors::*;
-use crate::{GetbundleArgs, GettreepackArgs, SingleRequest, SingleResponse};
-use mercurial_bundles::bundle2::{self, Bundle2Stream, StreamEvent};
-use mercurial_bundles::Bundle2Item;
-use mercurial_types::{HgChangesetId, HgFileNodeId, MPath};
+use crate::GetbundleArgs;
+use crate::GettreepackArgs;
+use crate::SingleRequest;
+use crate::SingleResponse;
 
 pub struct HgCommandHandler<H> {
     logger: Logger,
@@ -74,7 +99,7 @@ impl<H: HgCommands + Send + 'static> HgCommandHandler<H> {
         let hgcmds = &self.commands;
 
         if let (Some(qps), Some(src_region)) = (self.qps.as_ref(), self.src_region.as_ref()) {
-            let _res = qps.bump(&src_region);
+            let _res = qps.bump(src_region);
         }
 
         match req {
@@ -254,15 +279,6 @@ impl<H: HgCommands + Send + 'static> HgCommandHandler<H> {
     {
         let hgcmds = &self.commands;
         let dechunker = Dechunker::new(instream);
-        let (dechunker, maybe_full_content) = if hgcmds.should_preserve_raw_bundle2() {
-            let full_bundle2_content = Arc::new(Mutex::new(Bytes::new()));
-            (
-                dechunker.with_full_content(full_bundle2_content.clone()),
-                Some(full_bundle2_content),
-            )
-        } else {
-            (dechunker, None)
-        };
 
         let bundle2stream =
             Bundle2Stream::new(self.logger.clone(), LimitedAsyncRead::new(dechunker));
@@ -302,13 +318,7 @@ impl<H: HgCommands + Send + 'static> HgCommandHandler<H> {
             Either::A(ok(SingleResponse::ReadyForStream)),
             Either::B({
                 hgcmds
-                    .unbundle(
-                        heads,
-                        bundle2stream,
-                        maybe_full_content,
-                        respondlightly,
-                        replaydata,
-                    )
+                    .unbundle(heads, bundle2stream, respondlightly, replaydata)
                     .map(SingleResponse::Unbundle)
             }),
         ]);
@@ -364,7 +374,7 @@ where
         stream::unfold(input, move |input| {
             let fut_decode = input.into_future_decode(create_decoder());
             let fut = fut_decode
-                .map_err(|err| Err(err)) // Real error happened, wrap it in result
+                .map_err(Err) // Real error happened, wrap it in result
                 .and_then(|(maybe_item, instream)| match maybe_item {
                     None => {
                         // None here means we hit EOF, but that shouldn't happen
@@ -394,10 +404,9 @@ where
 
     let try_send_instream =
         |wrapped_send: &mut Option<oneshot::Sender<_>>, instream: BytesStream<S>| -> Result<()> {
-            let send = mem::replace(wrapped_send, None);
-            let send = send.ok_or(Error::msg(
-                "internal error: tried to send input stream twice",
-            ))?;
+            let send = wrapped_send.take();
+            let send =
+                send.ok_or_else(|| Error::msg("internal error: tried to send input stream twice"))?;
             match send.send(instream) {
                 Ok(_) => Ok(()), // Finished
                 Err(_) => bail!("internal error while sending input stream back"),
@@ -426,10 +435,7 @@ where
 
     // Finally, filter out last None value
     let entry_stream = entry_stream.filter_map(|val| val);
-    (
-        entry_stream.boxify(),
-        recv.map_err(|err| Error::from(err)).boxify(),
-    )
+    (entry_stream.boxify(), recv.map_err(Error::from).boxify())
 }
 
 #[derive(Clone)]
@@ -550,9 +556,9 @@ where
             match res_stream_event {
                 Ok(StreamEvent::Next(bundle2item)) => Ok(Some(bundle2item)),
                 Ok(StreamEvent::Done(remainder)) => {
-                    let send = send.take().ok_or(ErrorKind::Bundle2Invalid(
-                        "stream remainder was sent twice".into(),
-                    ))?;
+                    let send = send.take().ok_or_else(|| {
+                        ErrorKind::Bundle2Invalid("stream remainder was sent twice".into())
+                    })?;
                     // Receiving end will deal with failures
                     let _ = send.send(remainder);
                     Ok(None)
@@ -575,8 +581,8 @@ where
 #[inline]
 fn get_or_none<'a>(map: &'a HashMap<Vec<u8>, Vec<u8>>, key: &'a [u8]) -> &'a [u8] {
     match map.get(key) {
-        Some(ref val) => val,
-        None => &NONE,
+        Some(val) => val,
+        None => NONE,
     }
 }
 
@@ -675,7 +681,6 @@ pub trait HgCommands {
         &self,
         _heads: Vec<String>,
         _stream: BoxStream<Bundle2Item<'static>, Error>,
-        _maybe_full_content: Option<Arc<Mutex<Bytes>>>,
         _respondlightly: Option<bool>,
         _replaydata: Option<String>,
     ) -> HgCommandRes<Bytes> {
@@ -714,20 +719,18 @@ pub trait HgCommands {
     fn getcommitdata(&self, _nodes: Vec<HgChangesetId>) -> BoxStream<Bytes, Error> {
         once(Err(ErrorKind::Unimplemented("getcommitdata".into()).into())).boxify()
     }
-
-    // whether raw bundle2 contents should be preverved in the blobstore
-    fn should_preserve_raw_bundle2(&self) -> bool {
-        unimplemented!("should_preserve_raw_bundle2")
-    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
 
-    use bytes_old::{BufMut, BytesMut};
-    use futures::{future, stream};
-    use slog::{o, Discard};
+    use bytes_old::BufMut;
+    use bytes_old::BytesMut;
+    use futures::future;
+    use futures::stream;
+    use slog::o;
+    use slog::Discard;
 
     struct Dummy;
     impl HgCommands for Dummy {
@@ -812,7 +815,7 @@ mod test {
         let input = "\u{0}\u{4}path\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}";
         let (paramstream, _input) = decode_getpack_arg_stream(
             BytesStream::new(stream::once(Ok(Bytes::from(input)))),
-            || Getpackv1ArgDecoder::new(),
+            Getpackv1ArgDecoder::new,
         );
         let res = paramstream.collect().wait().unwrap();
         assert_eq!(res, vec![(MPath::new("path").unwrap(), vec![])]);

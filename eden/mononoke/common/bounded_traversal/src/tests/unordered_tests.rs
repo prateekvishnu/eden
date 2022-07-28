@@ -10,16 +10,18 @@ use std::collections::BTreeSet;
 use anyhow::Error;
 use cloned::cloned;
 use futures::future::FutureExt;
-use futures::stream::{self, Stream, StreamExt, TryStreamExt};
+use futures::stream::Stream;
+use futures::stream::TryStreamExt;
 use maplit::hashmap;
 use pretty_assertions::assert_eq;
 use tokio::task::yield_now;
 
-use super::utils::{StateLog, Tick};
-use crate::{
-    bounded_traversal, bounded_traversal_dag, bounded_traversal_stream, bounded_traversal_stream2,
-    limited_by_key_shardable,
-};
+use super::utils::StateLog;
+use super::utils::Tick;
+use crate::bounded_traversal;
+use crate::bounded_traversal_dag;
+use crate::bounded_traversal_stream;
+use crate::limited_by_key_shardable;
 
 // Tree for test purposes
 #[derive(Debug)]
@@ -609,54 +611,4 @@ async fn test_limited_by_key_shardable_parents() -> Result<(), Error> {
         )
     })
     .await
-}
-
-#[tokio::test]
-async fn test_bounded_traversal_stream2() -> Result<(), Error> {
-    let tree = build_tree();
-
-    let tick = Tick::new();
-    let log: StateLog<BTreeSet<usize>> = StateLog::new();
-    let reference: StateLog<BTreeSet<usize>> = StateLog::new();
-
-    let traverse = bounded_traversal_stream2(2, Some(tree), {
-        let tick = tick.clone();
-        let log = log.clone();
-        move |Tree { id, children }| {
-            let log = log.clone();
-            tick.sleep(1)
-                .map(move |now| {
-                    log.unfold(id, now);
-                    Ok::<_, Error>((id, stream::iter(children.into_iter().map(Ok)).boxed()))
-                })
-                .boxed()
-        }
-    })
-    .try_collect::<BTreeSet<usize>>()
-    .boxed();
-    let handle = tokio::spawn(traverse);
-
-    yield_now().await;
-    assert_eq!(log, reference);
-
-    tick.tick().await;
-    reference.unfold(0, 1);
-    assert_eq!(log, reference);
-
-    tick.tick().await;
-    reference.unfold(1, 2);
-    reference.unfold(2, 2);
-    assert_eq!(log, reference);
-
-    tick.tick().await;
-    reference.unfold(5, 3);
-    reference.unfold(3, 3);
-    assert_eq!(log, reference);
-
-    tick.tick().await;
-    reference.unfold(4, 4);
-    assert_eq!(log, reference);
-
-    assert_eq!(handle.await??, (0..6).collect::<BTreeSet<_>>());
-    Ok(())
 }

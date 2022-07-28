@@ -5,33 +5,40 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Error};
-use blobstore::Blobstore;
-use blobstore_factory::{make_blobstore, BlobstoreOptions, ReadOnlyStorage};
+use anyhow::anyhow;
+use anyhow::Error;
+use blobstore_factory::make_blobstore;
+use blobstore_factory::BlobstoreOptions;
+use blobstore_factory::ReadOnlyStorage;
 use cacheblob::new_memcache_blobstore;
 use cached_config::ConfigStore;
 use clap_old::Arg;
-use cmdlib::{
-    args::{self, MononokeMatches},
-    helpers,
-};
+use cmdlib::args;
+use cmdlib::args::MononokeMatches;
+use cmdlib::helpers;
 use context::CoreContext;
 use fbinit::FacebookInit;
-use futures::{
-    future::{self, try_join, try_join_all, TryFutureExt},
-    stream::{self, StreamExt, TryStreamExt},
-};
+use futures::future;
+use futures::future::try_join;
+use futures::future::try_join_all;
+use futures::future::TryFutureExt;
+use futures::stream;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use metaconfig_types::RepoConfig;
-use mononoke_types::RepositoryId;
-use prefixblob::PrefixBlobstore;
-use slog::{error, info};
+use repo_blobstore::RepoBlobstore;
+use scuba_ext::MononokeScubaSampleBuilder;
+use slog::error;
+use slog::info;
 use sql_construct::SqlConstructFromMetadataDatabaseConfig;
 use sql_ext::facebook::MysqlOptions;
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
-use streaming_clone::{RevlogStreamingChunks, SqlStreamingChunksFetcher};
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
+use streaming_clone::RevlogStreamingChunks;
+use streaming_clone::StreamingClone;
+use streaming_clone::StreamingCloneBuilder;
+
 use tokio::time;
 
 const REPO_ARG: &str = "repo";
@@ -77,7 +84,7 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
         run(ctx, &matches),
         fb,
         &std::env::var("TW_JOB_NAME").unwrap_or_else(|_| "streaming_clone_warmup".to_string()),
-        &logger,
+        logger,
         &matches,
         cmdlib::monitoring::AliveService,
     )
@@ -155,7 +162,7 @@ async fn run<'a>(ctx: CoreContext, matches: &'a MononokeMatches<'a>) -> Result<(
 
 fn split_repo_with_tags(s: &str) -> Result<(String, Vec<String>), Error> {
     if let Some((reponame, tags)) = s.split_once('=') {
-        let tags = tags.split(",").map(|s| s.to_string()).collect();
+        let tags = tags.split(',').map(|s| s.to_string()).collect();
 
         Ok((reponame.to_string(), tags))
     } else {
@@ -164,9 +171,7 @@ fn split_repo_with_tags(s: &str) -> Result<(String, Vec<String>), Error> {
 }
 
 struct StreamingCloneWarmup {
-    fetcher: SqlStreamingChunksFetcher,
-    blobstore: Arc<dyn Blobstore>,
-    repoid: RepositoryId,
+    streaming_clone: StreamingClone,
     reponame: String,
     tag: Option<String>,
 }
@@ -197,19 +202,25 @@ impl StreamingCloneWarmup {
         )
         .await?;
         let blobstore = new_memcache_blobstore(ctx.fb, blobstore, "multiplexed", "")?;
-        let blobstore = PrefixBlobstore::new(blobstore, config.repoid.prefix());
+        let repo_blobstore = Arc::new(RepoBlobstore::new(
+            blobstore,
+            None,
+            config.repoid,
+            MononokeScubaSampleBuilder::with_discard(),
+        ));
 
-        let fetcher = SqlStreamingChunksFetcher::with_metadata_database_config(
+        // Because we want to use our custom blobstore, we must construct the
+        // streaming clone attribute directly.
+        let streaming_clone = StreamingCloneBuilder::with_metadata_database_config(
             ctx.fb,
             &config.storage_config.metadata,
             mysql_options,
             true, /*read-only*/
-        )?;
+        )?
+        .build(config.repoid, repo_blobstore);
 
         Ok(Self {
-            fetcher,
-            blobstore: Arc::new(blobstore),
-            repoid: config.repoid,
+            streaming_clone,
             reponame,
             tag,
         })
@@ -227,8 +238,8 @@ impl StreamingCloneWarmup {
             let tag = None;
             let start = Instant::now();
             let chunks = self
-                .fetcher
-                .fetch_changelog(ctx.clone(), self.repoid, tag, self.blobstore.clone())
+                .streaming_clone
+                .fetch_changelog(ctx.clone(), tag)
                 .await?;
             info!(
                 ctx.logger(),

@@ -5,16 +5,22 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Error};
+use anyhow::anyhow;
+use anyhow::Error;
 use slog::debug;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::num::NonZeroU64;
 
-use crate::{NodeFrontier, SkiplistNodeType};
+use crate::NodeFrontier;
+use crate::SkiplistNodeType;
 use changeset_fetcher::ArcChangesetFetcher;
-use common::{fetch_generations, fetch_parents_and_generations};
+use common::fetch_generations;
+use common::fetch_parents_and_generations;
 use context::CoreContext;
-use mononoke_types::{ChangesetId, Generation};
+use mononoke_types::ChangesetId;
+use mononoke_types::Generation;
 
 /// Update skiplist index so that all heads are indexed.
 ///
@@ -158,7 +164,7 @@ async fn index_changeset(
             }
         }
 
-        let parents = fetch_parents_and_generations(&ctx, &cs_fetcher, edge_end.0).await?;
+        let parents = fetch_parents_and_generations(ctx, cs_fetcher, edge_end.0).await?;
         match parents.as_slice() {
             [] => {
                 return Ok(vec![]);
@@ -192,7 +198,7 @@ fn remove_unreachable_nodes(
         let children = match index.get(&cs_id) {
             Some(SingleEdge((cs_id, _))) => vec![*cs_id],
             Some(SkipEdges(edges)) | Some(ParentEdges(edges)) => {
-                edges.into_iter().cloned().map(|(cs_id, _)| cs_id).collect()
+                edges.iter().cloned().map(|(cs_id, _)| cs_id).collect()
             }
             None => vec![],
         };
@@ -211,7 +217,8 @@ mod test {
     use fixtures::Linear;
     use fixtures::TestRepoFixture;
     use std::collections::VecDeque;
-    use tests_utils::{drawdag::create_from_dag, resolve_cs_id};
+    use tests_utils::drawdag::create_from_dag;
+    use tests_utils::resolve_cs_id;
 
     #[fbinit::test]
     async fn test_index_changeset_linear(fb: FacebookInit) -> Result<(), Error> {

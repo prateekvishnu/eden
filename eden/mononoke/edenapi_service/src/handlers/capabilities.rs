@@ -6,8 +6,10 @@
  */
 
 use bytes::Bytes;
-use gotham::state::{FromState, State};
-use gotham_derive::{StateData, StaticResponseExtender};
+use gotham::state::FromState;
+use gotham::state::State;
+use gotham_derive::StateData;
+use gotham_derive::StaticResponseExtender;
 use serde::Deserialize;
 
 use gotham_ext::error::HttpError;
@@ -16,7 +18,8 @@ use mononoke_api::MononokeError;
 
 use crate::context::ServerContext;
 use crate::errors::MononokeErrorExt;
-use crate::handlers::{EdenApiMethod, HandlerInfo};
+use crate::handlers::EdenApiMethod;
+use crate::handlers::HandlerInfo;
 use crate::middleware::RequestContext;
 use crate::utils::get_repo;
 use mononoke_api_hg::HgRepoContext;
@@ -53,7 +56,7 @@ pub async fn capabilities_handler(state: &mut State) -> Result<BytesBody<Bytes>,
 
     let sctx = ServerContext::borrow_from(state);
     let rctx = RequestContext::borrow_from(state).clone();
-    let hg_repo_ctx = get_repo(&sctx, &rctx, &params.repo, None).await?;
+    let hg_repo_ctx = get_repo(sctx, &rctx, &params.repo, None).await?;
     let caps = get_capabilities_vec(&hg_repo_ctx)
         .await
         .map_err(|e| e.into_http_error("error getting capabilities"))?;

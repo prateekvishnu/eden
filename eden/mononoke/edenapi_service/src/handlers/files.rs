@@ -7,35 +7,62 @@
 
 use std::num::NonZeroU64;
 
-use anyhow::{format_err, Context, Error};
+use anyhow::format_err;
+use anyhow::Context;
+use anyhow::Error;
 use async_trait::async_trait;
 use bytes::Bytes;
 use context::PerfCounterType;
-use futures::{stream, Stream, StreamExt, TryStreamExt};
-use gotham::state::{FromState, State};
-use gotham_derive::{StateData, StaticResponseExtender};
+use futures::stream;
+use futures::Stream;
+use futures::StreamExt;
+use futures::TryStreamExt;
+use gotham::state::FromState;
+use gotham::state::State;
+use gotham_derive::StateData;
+use gotham_derive::StaticResponseExtender;
 use hyper::Body;
 use serde::Deserialize;
 use std::str::FromStr;
 
-use edenapi_types::{
-    wire::ToWire, AnyFileContentId, AnyId, Batch, FileAttributes, FileAuxData, FileContent,
-    FileContentTokenMetadata, FileEntry, FileRequest, FileResponse, FileSpec, ServerError,
-    UploadHgFilenodeRequest, UploadToken, UploadTokenMetadata, UploadTokensResponse,
-};
+use edenapi_types::wire::ToWire;
+use edenapi_types::AnyFileContentId;
+use edenapi_types::AnyId;
+use edenapi_types::Batch;
+use edenapi_types::FileAttributes;
+use edenapi_types::FileAuxData;
+use edenapi_types::FileContent;
+use edenapi_types::FileContentTokenMetadata;
+use edenapi_types::FileEntry;
+use edenapi_types::FileRequest;
+use edenapi_types::FileResponse;
+use edenapi_types::FileSpec;
+use edenapi_types::ServerError;
+use edenapi_types::UploadHgFilenodeRequest;
+use edenapi_types::UploadToken;
+use edenapi_types::UploadTokenMetadata;
+use edenapi_types::UploadTokensResponse;
 use ephemeral_blobstore::BubbleId;
-use gotham_ext::{error::HttpError, response::TryIntoResponse};
-use mercurial_types::{HgFileNodeId, HgNodeHash};
-use mononoke_api_hg::{HgDataContext, HgDataId, HgRepoContext};
+use gotham_ext::error::HttpError;
+use gotham_ext::response::TryIntoResponse;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::HgNodeHash;
+use mononoke_api_hg::HgDataContext;
+use mononoke_api_hg::HgDataId;
+use mononoke_api_hg::HgRepoContext;
 use rate_limiting::Metric;
 use types::Key;
 
 use crate::context::ServerContext;
 use crate::errors::ErrorKind;
 use crate::middleware::RequestContext;
-use crate::utils::{cbor_stream_filtered_errors, get_repo};
+use crate::utils::cbor_stream_filtered_errors;
+use crate::utils::get_repo;
 
-use super::{EdenApiHandler, EdenApiMethod, HandlerInfo, HandlerResult};
+use super::EdenApiHandler;
+use super::EdenApiMethod;
+use super::HandlerInfo;
+use super::HandlerResult;
 
 /// XXX: This number was chosen arbitrarily.
 const MAX_CONCURRENT_FILE_FETCHES_PER_REQUEST: usize = 10;
@@ -122,12 +149,7 @@ impl EdenApiHandler for Files2Handler {
     const ENDPOINT: &'static str = "/files2";
 
     fn sampling_rate(request: &Self::Request) -> NonZeroU64 {
-        // Sample trivial requests
-        if request.keys.len() + request.reqs.len() == 1 {
-            nonzero_ext::nonzero!(100u64)
-        } else {
-            nonzero_ext::nonzero!(1u64)
-        }
+        nonzero_ext::nonzero!(256u64)
     }
 
     async fn handler(
@@ -152,9 +174,8 @@ impl EdenApiHandler for Files2Handler {
             .chain(request.reqs.into_iter());
         ctx.perf_counters()
             .add_to_counter(PerfCounterType::EdenapiFiles, len as i64);
-        let fetches = reqs.map(move |FileSpec { key, attrs }| {
-            fetch_file_response(repo.clone(), key.clone(), attrs)
-        });
+        let fetches =
+            reqs.map(move |FileSpec { key, attrs }| fetch_file_response(repo.clone(), key, attrs));
 
         Ok(stream::iter(fetches)
             .buffer_unordered(MAX_CONCURRENT_FILE_FETCHES_PER_REQUEST)
@@ -265,7 +286,7 @@ pub async fn upload_file(state: &mut State) -> Result<impl TryIntoResponse, Http
     let rctx = RequestContext::borrow_from(state).clone();
     let sctx = ServerContext::borrow_from(state);
 
-    let repo = get_repo(&sctx, &rctx, &params.repo, None).await?;
+    let repo = get_repo(sctx, &rctx, &params.repo, None).await?;
 
     let id = AnyFileContentId::from_str(&format!("{}/{}", &params.idtype, &params.id))
         .map_err(HttpError::e400)?;

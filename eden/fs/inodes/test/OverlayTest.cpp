@@ -9,6 +9,7 @@
 
 #include "eden/fs/inodes/Overlay.h"
 #include "eden/fs/inodes/fsoverlay/FsOverlay.h"
+#include "eden/fs/inodes/test/OverlayTestUtil.h"
 
 #include <folly/Exception.h>
 #include <folly/Expected.h>
@@ -21,13 +22,12 @@
 #include <folly/synchronization/test/Barrier.h>
 #include <folly/test/TestUtils.h>
 #include <algorithm>
-#include <iomanip>
-#include <sstream>
 
 #include "eden/fs/inodes/EdenMount.h"
 #include "eden/fs/inodes/FileInode.h"
 #include "eden/fs/inodes/OverlayFile.h"
 #include "eden/fs/inodes/TreeInode.h"
+#include "eden/fs/model/TestOps.h"
 #include "eden/fs/service/PrettyPrinters.h"
 #include "eden/fs/telemetry/NullStructuredLogger.h"
 #include "eden/fs/testharness/FakeBackingStore.h"
@@ -36,16 +36,11 @@
 #include "eden/fs/testharness/TestChecks.h"
 #include "eden/fs/testharness/TestMount.h"
 #include "eden/fs/testharness/TestUtil.h"
-#include "eden/fs/utils/PathFuncs.h"
 #include "eden/fs/utils/SpawnedProcess.h"
 
 using namespace folly::string_piece_literals;
 
 namespace facebook::eden {
-
-namespace {
-std::string debugDumpOverlayInodes(Overlay&, InodeNumber rootInode);
-} // namespace
 
 constexpr Overlay::OverlayType kOverlayType = Overlay::OverlayType::Legacy;
 
@@ -73,7 +68,8 @@ TEST(OverlayGoldMasterTest, can_load_overlay_v2) {
       realpath(tmpdir.path().string()) + "overlay-v2"_pc,
       kPathMapDefaultCaseSensitive,
       kOverlayType,
-      std::make_shared<NullStructuredLogger>());
+      std::make_shared<NullStructuredLogger>(),
+      *EdenConfig::createTestEdenConfig());
   overlay->initialize().get();
 
   ObjectId hash1{folly::ByteRange{"abcdabcdabcdabcdabcd"_sp}};
@@ -134,24 +130,6 @@ class OverlayTest : public ::testing::Test {
     mount_.initialize(builder);
   }
 
-  // Helper method to check if two timestamps are same or not.
-  static void expectTimeSpecsEqual(
-      const EdenTimestamp& at,
-      const EdenTimestamp& bt) {
-    auto a = at.toTimespec();
-    auto b = bt.toTimespec();
-    EXPECT_EQ(a.tv_sec, b.tv_sec);
-    EXPECT_EQ(a.tv_nsec, b.tv_nsec);
-  }
-
-  static void expectTimeStampsEqual(
-      const InodeTimestamps& a,
-      const InodeTimestamps& b) {
-    expectTimeSpecsEqual(a.atime, b.atime);
-    expectTimeSpecsEqual(a.mtime, b.mtime);
-    expectTimeSpecsEqual(a.ctime, b.ctime);
-  }
-
   TestMount mount_;
 };
 
@@ -201,7 +179,7 @@ TEST_F(OverlayTest, testTimeStampsInOverlayOnMountAndUnmount) {
     mount_.remount();
     auto inodeRemount = mount_.getFileInode("dir/a.txt");
     auto afterRemount = inodeRemount->getMetadata().timestamps;
-    expectTimeStampsEqual(beforeRemountFile, afterRemount);
+    EXPECT_EQ(beforeRemountFile, afterRemount);
   }
 
   {
@@ -214,7 +192,7 @@ TEST_F(OverlayTest, testTimeStampsInOverlayOnMountAndUnmount) {
     mount_.remount();
     auto inodeRemount = mount_.getTreeInode("dir");
     auto afterRemount = inodeRemount->getMetadata().timestamps;
-    expectTimeStampsEqual(beforeRemountDir, afterRemount);
+    EXPECT_EQ(beforeRemountDir, afterRemount);
   }
 }
 
@@ -268,7 +246,8 @@ TEST(PlainOverlayTest, new_overlay_is_clean) {
       AbsolutePath{testDir.path().string()},
       kPathMapDefaultCaseSensitive,
       kOverlayType,
-      std::make_shared<NullStructuredLogger>());
+      std::make_shared<NullStructuredLogger>(),
+      *EdenConfig::createTestEdenConfig());
   overlay->initialize().get();
   EXPECT_TRUE(overlay->hadCleanStartup());
 }
@@ -280,7 +259,8 @@ TEST(PlainOverlayTest, reopened_overlay_is_clean) {
         AbsolutePath{testDir.path().string()},
         kPathMapDefaultCaseSensitive,
         kOverlayType,
-        std::make_shared<NullStructuredLogger>());
+        std::make_shared<NullStructuredLogger>(),
+        *EdenConfig::createTestEdenConfig());
     overlay->initialize().get();
   }
 
@@ -288,7 +268,8 @@ TEST(PlainOverlayTest, reopened_overlay_is_clean) {
       AbsolutePath{testDir.path().string()},
       kPathMapDefaultCaseSensitive,
       kOverlayType,
-      std::make_shared<NullStructuredLogger>());
+      std::make_shared<NullStructuredLogger>(),
+      *EdenConfig::createTestEdenConfig());
   overlay->initialize().get();
   EXPECT_TRUE(overlay->hadCleanStartup());
 }
@@ -302,7 +283,8 @@ TEST(PlainOverlayTest, unclean_overlay_is_dirty) {
         AbsolutePath{testDir.path().string()},
         kPathMapDefaultCaseSensitive,
         kOverlayType,
-        std::make_shared<NullStructuredLogger>());
+        std::make_shared<NullStructuredLogger>(),
+        *EdenConfig::createTestEdenConfig());
     overlay->initialize().get();
   }
 
@@ -314,7 +296,8 @@ TEST(PlainOverlayTest, unclean_overlay_is_dirty) {
       AbsolutePath{testDir.path().string()},
       kPathMapDefaultCaseSensitive,
       kOverlayType,
-      std::make_shared<NullStructuredLogger>());
+      std::make_shared<NullStructuredLogger>(),
+      *EdenConfig::createTestEdenConfig());
   overlay->initialize().get();
   EXPECT_FALSE(overlay->hadCleanStartup());
 }
@@ -355,7 +338,8 @@ class RawOverlayTest : public ::testing::TestWithParam<OverlayRestartMode> {
         getLocalDir(),
         kPathMapDefaultCaseSensitive,
         kOverlayType,
-        std::make_shared<NullStructuredLogger>());
+        std::make_shared<NullStructuredLogger>(),
+        *EdenConfig::createTestEdenConfig());
     overlay->initialize().get();
   }
 
@@ -764,7 +748,8 @@ class DebugDumpOverlayInodesTest : public ::testing::Test {
             AbsolutePathPiece{testDir_.path().string()},
             kPathMapDefaultCaseSensitive,
             kOverlayType,
-            std::make_shared<NullStructuredLogger>())} {
+            std::make_shared<NullStructuredLogger>(),
+            *EdenConfig::createTestEdenConfig())} {
     overlay->initialize().get();
   }
 
@@ -941,51 +926,6 @@ TEST_F(DebugDumpOverlayInodesTest, directories_are_dumped_depth_first) {
       "  Entries (0 total):\n",
       debugDumpOverlayInodes(*overlay, rootIno));
 }
-
-namespace {
-void debugDumpOverlayInodes(
-    Overlay& overlay,
-    InodeNumber rootInode,
-    AbsolutePathPiece path,
-    std::ostringstream& out) {
-  out << path << "\n";
-  out << "  Inode number: " << rootInode << "\n";
-
-  auto dir = overlay.loadOverlayDir(rootInode);
-  out << "  Entries (" << dir.size() << " total):\n";
-
-  auto dtypeToString = [](dtype_t dtype) noexcept -> const char* {
-    switch (dtype) {
-      case dtype_t::Dir:
-        return "d";
-      case dtype_t::Regular:
-        return "f";
-      default:
-        return "?";
-    }
-  };
-
-  for (const auto& [entryPath, entry] : dir) {
-    auto permissions = entry.getInitialMode() & ~S_IFMT;
-    out << "  " << std::dec << std::setw(11) << entry.getInodeNumber() << " "
-        << dtypeToString(entry.getDtype()) << " " << std::oct << std::setw(4)
-        << permissions << " " << entryPath << "\n";
-  }
-  for (const auto& [entryPath, entry] : dir) {
-    if (entry.getDtype() == dtype_t::Dir) {
-      debugDumpOverlayInodes(
-          overlay, entry.getInodeNumber(), path + entryPath, out);
-    }
-  }
-}
-
-std::string debugDumpOverlayInodes(Overlay& overlay, InodeNumber rootInode) {
-  std::ostringstream out;
-  debugDumpOverlayInodes(overlay, rootInode, AbsolutePathPiece{}, out);
-  return out.str();
-}
-
-} // namespace
 
 } // namespace facebook::eden
 

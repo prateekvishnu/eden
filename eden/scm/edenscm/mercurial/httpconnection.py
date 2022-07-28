@@ -21,8 +21,7 @@ import socket
 
 from bindings import auth as rustauth
 
-from . import httpclient, pycompat, sslutil, urllibcompat, util
-from .i18n import _
+from . import httpclient, sslutil, urllibcompat, util
 
 urlerr = util.urlerr
 urlreq = util.urlreq
@@ -67,7 +66,7 @@ class httpsendfile(object):
 
 # moved here from url.py to avoid a cycle
 def readauthforuri(ui, uri, user):
-    return rustauth.getauth(ui._rcfg._rcfg, uri, user=user, raise_if_missing=False)
+    return rustauth.getauth(ui._rcfg, uri, user=user, raise_if_missing=False)
 
 
 # Mercurial (at least until we can remove the old codepath) requires
@@ -261,6 +260,6 @@ class http2handler(urlreq.httphandler, urlreq.httpshandler):
             ssl_wrap_socket=sslutil.wrapsocket,
             ssl_validator=sslutil.validatesocket,
             ui=self.ui,
-            **kwargs
+            **kwargs,
         )
         return con

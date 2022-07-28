@@ -5,17 +5,25 @@
  * GNU General Public License version 2.
  */
 
-use anyhow::{anyhow, Result};
-use bytes::{BufMut, Bytes, BytesMut};
+use anyhow::anyhow;
+use anyhow::Result;
+use bytes::BufMut;
+use bytes::Bytes;
+use bytes::BytesMut;
 use futures::sync::mpsc;
 use futures_ext::BoxStream;
 use metadata::Metadata;
 use std::io;
 use std::sync::Arc;
-use tokio_util::codec::{Decoder, Encoder};
-use zstd::stream::raw::{Encoder as ZstdEncoder, InBuffer, Operation, OutBuffer};
+use tokio_util::codec::Decoder;
+use tokio_util::codec::Encoder;
+use zstd::stream::raw::Encoder as ZstdEncoder;
+use zstd::stream::raw::InBuffer;
+use zstd::stream::raw::Operation;
+use zstd::stream::raw::OutBuffer;
 
-use netstring::{NetstringDecoder, NetstringEncoder};
+use netstring::NetstringDecoder;
+use netstring::NetstringEncoder;
 
 // Multiplex stdin/out/err over a single stream using netstring as framing
 #[derive(Debug)]
@@ -116,12 +124,10 @@ impl Decoder for SshDecoder {
                 0 => Ok(Some(SshMsg(IoStream::Stdin, data.freeze()))),
                 1 => Ok(Some(SshMsg(IoStream::Stdout, data.freeze()))),
                 2 => Ok(Some(SshMsg(IoStream::Stderr, data.freeze()))),
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "bad ssh stream",
-                    ));
-                }
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "bad ssh stream",
+                )),
             }
         } else {
             Ok(None)
@@ -203,8 +209,10 @@ impl Encoder<SshMsg> for SshEncoder {
 
 #[cfg(test)]
 mod test {
-    use bytes::{BufMut, BytesMut};
-    use tokio_util::codec::{Decoder, Encoder};
+    use bytes::BufMut;
+    use bytes::BytesMut;
+    use tokio_util::codec::Decoder;
+    use tokio_util::codec::Encoder;
 
     use super::IoStream::*;
     use super::*;
