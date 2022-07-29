@@ -14,6 +14,7 @@ use ffi::PySys_SetArgv;
 use ffi::PyUnicode_AsWideCharString;
 #[cfg(feature = "python3")]
 use ffi::PyUnicode_FromString;
+use ffi::Py_DECREF;
 use ffi::Py_Finalize;
 use ffi::Py_Initialize;
 use ffi::Py_IsInitialized;
@@ -35,45 +36,50 @@ type PyChar = c_char;
 type PyChar = wchar_t;
 
 #[cfg(feature = "python2")]
-fn to_py_str(s: CString) -> *mut PyChar {
-    s.into_raw()
+fn to_py_str(s: &str) -> *mut PyChar {
+    unimplemented!()
 }
 
 #[cfg(feature = "python3")]
-fn to_py_str(s: CString) -> *mut PyChar {
+fn to_py_str(s: &str) -> *mut PyChar {
+    let c_str = CString::new(s).unwrap();
+
     unsafe {
-        let pyobj = PyUnicode_FromString(s.as_ptr());
-        PyUnicode_AsWideCharString(pyobj, std::ptr::null_mut())
+        let unicode_obj = PyUnicode_FromString(c_str.as_ptr());
+        assert!(!unicode_obj.is_null());
+
+        let py_str = PyUnicode_AsWideCharString(unicode_obj, std::ptr::null_mut());
+
+        Py_DECREF(unicode_obj);
+
+        py_str
     }
 }
 
-fn to_py_argv(args: Vec<CString>) -> Vec<*mut PyChar> {
-    let mut argv: Vec<_> = args.into_iter().map(|x| to_py_str(x)).collect();
+fn to_py_argv(args: &[String]) -> Vec<*mut PyChar> {
+    let mut argv: Vec<_> = args.iter().map(|x| to_py_str(x)).collect();
     argv.push(std::ptr::null_mut());
     argv
 }
 
-pub fn py_set_argv(args: Vec<CString>) {
+pub fn py_set_argv(args: &[String]) {
     let mut argv = to_py_argv(args);
     unsafe {
         // This inserts argv[0] path to sys.path, useful for running local builds.
         PySys_SetArgv((argv.len() - 1) as c_int, argv.as_mut_ptr());
     }
-    std::mem::forget(argv);
 }
 
-pub fn py_main(args: Vec<CString>) -> u8 {
+pub fn py_main(args: &[String]) -> u8 {
     let mut argv = to_py_argv(args);
-    let result = unsafe {
+    unsafe {
         let argc = (argv.len() - 1) as c_int;
         // Py_Main may not return.
-        Py_Main(argc, argv.as_mut_ptr())
-    };
-    std::mem::forget(argv);
-    result as u8
+        Py_Main(argc, argv.as_mut_ptr()) as u8
+    }
 }
 
-pub fn py_set_program_name(name: CString) {
+pub fn py_set_program_name(name: &str) {
     unsafe {
         Py_SetProgramName(to_py_str(name));
     }

@@ -36,8 +36,9 @@ namespace facebook::eden {
 
 InodeMap::UnloadedInode::UnloadedInode(
     InodeNumber parentNum,
-    PathComponentPiece entryName)
-    : parent(parentNum), name(entryName) {}
+    PathComponentPiece entryName,
+    mode_t mode)
+    : parent(parentNum), name(entryName), mode{mode} {}
 
 InodeMap::UnloadedInode::UnloadedInode(
     InodeNumber parentNum,
@@ -93,6 +94,10 @@ InodeMap::UnloadedInode::UnloadedInode(
   if (folly::kIsWindows) {
     XDCHECK_LE(numFsReferences, 1u);
   }
+}
+
+InodeType InodeMap::UnloadedInode::getInodeType() const {
+  return S_ISDIR(mode) ? InodeType::TREE : InodeType::FILE;
 }
 
 InodeMap::InodeMap(
@@ -296,6 +301,10 @@ ImmediateFuture<InodePtr> InodeMap::lookupInode(InodeNumber number) {
   auto* unloadedData = &unloadedIter->second;
   bool alreadyLoading = !unloadedData->promises.empty();
 
+  if (!alreadyLoading) {
+    publishInodeLoadStartEvent(number, *unloadedData, data);
+  }
+
   // Add a new entry to the promises list.
   unloadedData->promises.emplace_back();
   auto result = unloadedData->promises.back().getSemiFuture();
@@ -359,6 +368,10 @@ ImmediateFuture<InodePtr> InodeMap::lookupInode(InodeNumber number) {
 
     auto* parentData = &unloadedIter->second;
     alreadyLoading = !parentData->promises.empty();
+
+    if (!alreadyLoading) {
+      publishInodeLoadStartEvent(unloadedData->parent, *parentData, data);
+    }
 
     // Add a new entry to the promises list.
     // It should kick off loading of the current child inode when
@@ -429,8 +442,9 @@ void InodeMap::startChildLookup(
   // Ask the TreeInode to load this child inode.
   //
   // (Inode lookups can also be triggered by TreeInode::getOrLoadChild().
-  // In that case getOrLoadChild() will call shouldLoadChild() to tell if it
-  // should start the load itself, or if the load is already in progress.)
+  // In that case getOrLoadChild() will call startLoadingChildIfNotLoading() to
+  // tell if it should continue the load itself, or if the load was already in
+  // progress.)
   treeInode->loadChildInode(childName, childInodeNumber);
 }
 
@@ -452,8 +466,16 @@ InodeMap::PromiseVector InodeMap::inodeLoadComplete(InodeBase* inode) {
 
     inode->setChannelRefcount(it->second.numFsReferences);
 
-    // Insert the entry into loadedInodes_, and remove it from unloadedInodes_
+    // Insert the entry into loadedInodes_ and remove it from unloadedInodes_
     insertLoadedInode(data, inode);
+    // Before removing from unloadedInodes_, publish load end event to tracebus
+    mount_->addInodeTraceEvent(
+        it->second.loadStartTime,
+        InodeEventType::LOAD,
+        it->second.getInodeType(),
+        number,
+        it->second.name.stringPiece(),
+        InodeEventProgress::END);
     data->unloadedInodes_.erase(it);
     return promises;
   } catch (const std::exception& ex) {
@@ -463,6 +485,7 @@ InodeMap::PromiseVector InodeMap::inodeLoadComplete(InodeBase* inode) {
     for (auto& promise : promises) {
       promise.setException(ew);
     }
+    publishInodeLoadFailEvent(number);
     return PromiseVector{};
   }
 }
@@ -475,6 +498,39 @@ void InodeMap::inodeLoadFailed(
   auto promises = extractPendingPromises(number);
   for (auto& promise : promises) {
     promise.setException(ex);
+  }
+  publishInodeLoadFailEvent(number);
+}
+
+void InodeMap::publishInodeLoadStartEvent(
+    InodeNumber number,
+    UnloadedInode& unloadedData,
+    const folly::Synchronized<Members>::LockedPtr& /* data */) noexcept {
+  unloadedData.loadStartTime = std::chrono::system_clock::now();
+  mount_->addInodeTraceEvent(
+      unloadedData.loadStartTime,
+      InodeEventType::LOAD,
+      unloadedData.getInodeType(),
+      number,
+      unloadedData.name.stringPiece(),
+      InodeEventProgress::START);
+}
+
+void InodeMap::publishInodeLoadFailEvent(InodeNumber number) noexcept {
+  auto data = data_.rlock();
+  auto it = data->unloadedInodes_.find(number);
+  if (it != data->unloadedInodes_.end()) {
+    XLOG(ERR)
+        << "failed to find unloaded inode data when finishing load of inode "
+        << number;
+  } else {
+    mount_->addInodeTraceEvent(
+        it->second.loadStartTime,
+        InodeEventType::LOAD,
+        it->second.getInodeType(),
+        number,
+        it->second.name.stringPiece(),
+        InodeEventProgress::FAIL);
   }
 }
 
@@ -813,17 +869,7 @@ Future<SerializedInodeMap> InodeMap::shutdown(
   // we know that all inodes have been destroyed and we can complete shutdown.
   root_.manualDecRef();
 
-  return std::move(future).thenValue([
-#ifndef _WIN32
-                                         this,
-                                         doTakeover
-#endif
-  ](auto&&) {
-#ifdef _WIN32
-    // On Windows we don't have the takeover implemented yet, so we will return
-    // from here.
-    return SerializedInodeMap{};
-#else
+  return std::move(future).thenValue([this, doTakeover](auto&&) {
     // TODO: This check could occur after the loadedInodes_ assertion below to
     // maximize coverage of any invariants that are broken during shutdown.
     if (!doTakeover) {
@@ -836,10 +882,10 @@ Future<SerializedInodeMap> InodeMap::shutdown(
         << data->loadedInodes_.size()
         << " unloadedCount=" << data->unloadedInodes_.size();
 
-    if (data->loadedInodes_.size() != 1) {
+    if (!data->loadedInodes_.empty()) {
       EDEN_BUG() << "After InodeMap::shutdown() finished, "
                  << data->loadedInodes_.size()
-                 << " inodes still loaded; they must all (except the root) "
+                 << " inodes still loaded; they must all "
                  << "have been unloaded for this to succeed!";
     }
 
@@ -859,23 +905,28 @@ Future<SerializedInodeMap> InodeMap::shutdown(
       if (entry.hash.has_value()) {
         serializedEntry.hash_ref() = entry.hash.value().asString();
       }
-      // If entry.hash is empty, the inode is not materialized.
+      // If entry.hash is empty, the inode is materialized.
       serializedEntry.mode_ref() = entry.mode;
 
       result.unloadedInodes_ref()->emplace_back(std::move(serializedEntry));
     }
 
     return result;
-#endif
   });
 }
 
 void InodeMap::shutdownComplete(
     folly::Synchronized<Members>::LockedPtr&& data) {
   // We manually dropped our reference count to the root inode in
-  // beginShutdown().  Destroy it now, and call resetNoDecRef() on our pointer
-  // to make sure it doesn't try to decrement the reference count again when
-  // the pointer is destroyed.
+  // shutdown().  Destroy it now, remove it from the loadedInodes, and call
+  // resetNoDecRef() on our pointer to make sure it doesn't try to decrement the
+  // reference count again when the pointer is destroyed. Note: we don't add
+  // the root to unloadedInodes here as it has been freed and we don't want to
+  // serialize the freed root during graceful shutdown for takeover.
+  auto numErased = data->loadedInodes_.erase(kRootNodeId);
+  XCHECK_EQ(numErased, 1u) << "inconsistent loaded inodes data: "
+                           << kRootNodeId;
+  --data->numTreeInodes_;
   delete root_.get();
   root_.resetNoDecRef();
 
@@ -1094,17 +1145,20 @@ optional<InodeMap::UnloadedInode> InodeMap::updateOverlayForUnload(
   }
 }
 
-bool InodeMap::shouldLoadChild(
+bool InodeMap::startLoadingChildIfNotLoading(
     const TreeInode* parent,
     PathComponentPiece name,
     InodeNumber childInode,
+    mode_t mode,
     folly::Promise<InodePtr> promise) {
   auto data = data_.wlock();
   UnloadedInode* unloadedData{nullptr};
   auto iter = data->unloadedInodes_.find(childInode);
   if (iter == data->unloadedInodes_.end()) {
     InodeNumber parentNumber = parent->getNodeId();
-    auto newUnloadedData = UnloadedInode(parentNumber, name);
+    // T127459236: not all attributes of the UnloadedInode are set here. For
+    // example, isUnlinked, hash, and numFsReferences are set to default values
+    auto newUnloadedData = UnloadedInode(parentNumber, name, mode);
     auto ret =
         data->unloadedInodes_.emplace(childInode, std::move(newUnloadedData));
     XDCHECK(ret.second);
@@ -1114,6 +1168,10 @@ bool InodeMap::shouldLoadChild(
   }
 
   bool isFirstPromise = unloadedData->promises.empty();
+
+  if (isFirstPromise) {
+    publishInodeLoadStartEvent(childInode, *unloadedData, data);
+  }
 
   // Add the promise to the existing list for this inode.
   unloadedData->promises.push_back(std::move(promise));

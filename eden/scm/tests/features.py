@@ -11,13 +11,6 @@ But for now it's easier than changing configs at the top of individual
 tests.
 """
 
-narrowheadsincompatiblelist = """
-    test-bookmarks.t
-    test-revset2.t
-
-    test-revset.t
-"""
-
 segmentedchangelogcompatiblelist = """
     test-abort-checkin.t
     test-absorb-edit-lines.t
@@ -558,6 +551,36 @@ segmentedchangelogcompatiblelist = """
     test-rebase-brute-force.t
     test-rebase-check-restore.t
     test-rebase-emptycommit.t
+
+    test-clone-resume.t
+    test-clone-uncompressed.t
+
+    test-commitcloud-sync-bookmarks.t
+    test-commitcloud-sync-omission.t
+    test-commitcloud-sync-remote-bookmarks.t
+
+    test-debugrebuildchangelog.t
+    test-doctor.t
+
+    test-fb-hgext-pull-createmarkers-hide-later.t
+
+    test-fb-hgext-remotefilelog-blame.t
+    test-fb-hgext-remotefilelog-push-pull.t
+    test-fb-hgext-remotefilelog-sparse.t
+    test-fb-hgext-remotefilelog-treemanifest-lfs.t
+
+    test-fb-hgext-treemanifest-autoconvert.t
+    test-fb-hgext-treemanifest-prefetch.t
+    test-fb-hgext-treemanifest-pullpublic.t
+    test-fb-hgext-treemanifest-treeonly.t
+    test-fb-hgext-treemanifest.t
+
+    test-pushrebase-withmerges.t
+    test-rebase-mutation.t
+    test-rebase-scenario-global.t
+
+    test-context.py
+    test-rustmanifest.t
 """
 
 ignorerevnumincompatiblelist = """
@@ -770,10 +793,6 @@ def setup(testname, hgrcpath):
     # Disable mutation.record to maintain commit hashes.
     with open(hgrcpath, "a") as f:
         f.write("\n[mutation]\nrecord=False\n")
-    # Disable narrow-heads if incompatible.
-    if testname in narrowheadsincompatiblelist:
-        with open(hgrcpath, "a") as f:
-            f.write("\n[experimental]\nnarrow-heads=False\n")
     # Enable segmented changelog if compatible.
     if testname in segmentedchangelogcompatiblelist:
         with open(hgrcpath, "a") as f:

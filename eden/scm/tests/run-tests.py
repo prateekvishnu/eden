@@ -1554,7 +1554,7 @@ class Test(unittest.TestCase):
         env["HOME"] = self._testtmp  # Unix
         env["USERPROFILE"] = self._testtmp  # Windows
         if self._usechg:
-            env["CHGDISABLE"] = "0"
+            env["CHGDISABLE"] = "never"
         else:
             env["CHGDISABLE"] = "1"
         # This number should match portneeded in _getport
@@ -1645,7 +1645,6 @@ class Test(unittest.TestCase):
             hgrc.write("[experimental]\n")
             hgrc.write("metalog = true\n")
             hgrc.write("[lfs]\n")
-            hgrc.write("[extensions]\npatchrmdir=\n")
             if self._watchman:
                 hgrc.write("[extensions]\nfsmonitor=\n")
                 hgrc.write("[fsmonitor]\ndetectrace=1\n")
@@ -1669,6 +1668,10 @@ class Test(unittest.TestCase):
             hgrc.write("reponame=reponame-default\n")
             hgrc.write("localdatarepack=True\n")
             hgrc.write("cachepath=%s/default-hgcache\n" % self._testtmp)
+
+            # pre-ack new hints to avoid test fallout from new hints
+            hgrc.write("[hint]\n")
+            hgrc.write("ack-match-full-traversal=true\n")
 
             for opt in self._extraconfigopts:
                 section, key = opt.split(".", 1)

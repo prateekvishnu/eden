@@ -4,7 +4,6 @@
 
   $ disable treemanifest
   $ hg debugextensions --excludedefault
-  patchrmdir (untested!)
 
   $ enable histedit rebase
   $ newext ext1 <<EOF
@@ -14,11 +13,13 @@
   > buglink = 'https://example.org/bts'
   > EOF
 
+  $ setconfig extensions.hotfix1=python-base64:Cgo=
+
   $ hg debugextensions --excludedefault
   ext1 (untested!)
   ext2 (3.2.1!)
   histedit
-  patchrmdir (untested!)
+  hotfix1 (untested!)
   rebase
 
   $ hg debugextensions -v --excludedefault
@@ -33,8 +34,8 @@
   histedit
     location: */hgext/histedit.py* (glob)
     bundled: yes
-  patchrmdir
-    location: */hgext/patchrmdir.py* (glob)
+  hotfix1
+    location: <edenscm_hgext_hotfix1>
     bundled: no
   rebase
     location: */hgext/rebase.py* (glob)
@@ -66,8 +67,8 @@
    {
     "buglink": "",
     "bundled": false,
-    "name": "patchrmdir",
-    "source": "*/hgext/patchrmdir.py*", (glob)
+    "name": "hotfix1",
+    "source": "<edenscm_hgext_hotfix1>",
     "testedwith": []
    },
    {

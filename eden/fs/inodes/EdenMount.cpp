@@ -18,6 +18,7 @@
 #include <folly/logging/xlog.h>
 #include <folly/portability/GFlags.h>
 #include <folly/stop_watch.h>
+#include <folly/system/Pid.h>
 #include <folly/system/ThreadName.h>
 
 #include "eden/fs/config/EdenConfig.h"
@@ -33,6 +34,7 @@
 #include "eden/fs/inodes/ServerState.h"
 #include "eden/fs/inodes/TreeInode.h"
 #include "eden/fs/inodes/TreePrefetchLease.h"
+#include "eden/fs/journal/Journal.h"
 #include "eden/fs/model/Hash.h"
 #include "eden/fs/model/Tree.h"
 #include "eden/fs/model/git/GitIgnoreStack.h"
@@ -2261,7 +2263,7 @@ void EdenMount::addInodeTraceEvent(
     InodeType type,
     InodeNumber ino,
     folly::StringPiece path,
-    InodeEventProgress progress) {
+    InodeEventProgress progress) noexcept {
   // Measure timestamps and duration
   auto eventSystemTime = (progress == InodeEventProgress::START)
       ? startTime
@@ -2270,15 +2272,19 @@ void EdenMount::addInodeTraceEvent(
       eventSystemTime - startTime);
   auto steadyTime = std::chrono::steady_clock::now();
 
-  // Publish event to inodeTraceBus
-  inodeTraceBus_->publish(InodeTraceEvent(
-      {eventSystemTime, steadyTime},
-      ino,
-      type,
-      eventType,
-      progress,
-      duration,
-      path));
+  try {
+    // Publish event to inodeTraceBus
+    inodeTraceBus_->publish(InodeTraceEvent(
+        {eventSystemTime, steadyTime},
+        ino,
+        type,
+        eventType,
+        progress,
+        duration,
+        path));
+  } catch (const std::exception& e) {
+    XLOG(DBG3) << "Error publishing inode event to tracebus: " << e.what();
+  }
 }
 
 namespace {

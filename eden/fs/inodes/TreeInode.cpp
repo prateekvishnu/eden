@@ -31,7 +31,7 @@
 #include "eden/fs/inodes/OverlayFile.h"
 #include "eden/fs/inodes/ServerState.h"
 #include "eden/fs/inodes/TreePrefetchLease.h"
-#include "eden/fs/journal/JournalDelta.h"
+#include "eden/fs/journal/Journal.h"
 #include "eden/fs/model/Tree.h"
 #include "eden/fs/model/TreeEntry.h"
 #include "eden/fs/model/git/GitIgnoreStack.h"
@@ -275,8 +275,8 @@ TreeInode::loadChild(
   folly::Promise<InodePtr> promise;
   auto returnFuture = promise.getSemiFuture();
   auto childNumber = entry.getInodeNumber();
-  bool startLoad = getInodeMap()->shouldLoadChild(
-      this, name, childNumber, std::move(promise));
+  bool startLoad = getInodeMap()->startLoadingChildIfNotLoading(
+      this, name, childNumber, entry.getInitialMode(), std::move(promise));
   if (startLoad) {
     // The inode is not already being loaded.  We have to start
     // loading it now.
@@ -3942,8 +3942,8 @@ folly::Future<InodePtr> TreeInode::loadChildLocked(
   folly::Promise<InodePtr> promise;
   auto future = promise.getFuture();
   auto childNumber = entry.getInodeNumber();
-  bool startLoad = getInodeMap()->shouldLoadChild(
-      this, name, childNumber, std::move(promise));
+  bool startLoad = getInodeMap()->startLoadingChildIfNotLoading(
+      this, name, childNumber, entry.getInitialMode(), std::move(promise));
   if (startLoad) {
     auto loadFuture = startLoadingInodeNoThrow(entry, name, fetchContext);
     pendingLoads.emplace_back(
